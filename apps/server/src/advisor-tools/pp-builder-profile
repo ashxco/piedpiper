@@ -1,0 +1,37 @@
+#!/bin/sh
+# pp-builder-profile — read/update the builder profile
+# Usage: pp-builder-profile
+
+PROFILE="$HOME/.piedpiper/advisors/builder-profile.json"
+TODAY=$(date +%Y-%m-%d)
+
+if [ ! -f "$PROFILE" ]; then
+  mkdir -p "$(dirname "$PROFILE")"
+  cat > "$PROFILE" << EOJSON
+{
+  "created": "$TODAY",
+  "last_seen": "$TODAY",
+  "session_count": 1,
+  "projects": [],
+  "relationship_tier": "introduction",
+  "notes": ""
+}
+EOJSON
+fi
+
+if command -v python3 >/dev/null 2>&1; then
+  python3 -c "
+import json
+with open('$PROFILE', 'r') as f:
+    p = json.load(f)
+p['last_seen'] = '$TODAY'
+p['session_count'] = p.get('session_count', 0) + 1
+sc = p['session_count']
+p['relationship_tier'] = 'established' if sc >= 20 else 'familiar' if sc >= 5 else 'returning' if sc >= 2 else 'introduction'
+with open('$PROFILE', 'w') as f:
+    json.dump(p, f, indent=2)
+print(json.dumps(p, indent=2))
+" 2>/dev/null
+else
+  cat "$PROFILE"
+fi

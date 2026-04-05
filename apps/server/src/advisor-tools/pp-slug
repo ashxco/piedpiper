@@ -1,0 +1,15 @@
+#!/bin/sh
+# pp-slug — derive project slug from git remote or directory name
+# Usage: eval "$(pp-slug)"
+
+REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+REMOTE_URL=$(git config --get remote.origin.url 2>/dev/null || echo "")
+
+if [ -n "$REMOTE_URL" ]; then
+  SLUG=$(echo "$REMOTE_URL" | sed 's|.*[:/]||' | sed 's|\.git$||' | tr '[:upper:]' '[:lower:]' | tr ' ' '-')
+else
+  SLUG=$(basename "$REPO_ROOT" | tr '[:upper:]' '[:lower:]' | tr ' ' '-')
+fi
+
+echo "_PROJECT_SLUG=$SLUG"
+echo "SLUG=$SLUG"

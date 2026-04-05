@@ -1,0 +1,47 @@
+{
+  "$schema": "https://turbo.build/schema.json",
+  "globalEnv": [
+    "PORT",
+    "VITE_WS_URL",
+    "VITE_DEV_SERVER_URL",
+    "ELECTRON_RENDERER_PORT",
+    "PIEDPIPER_LOG_WS_EVENTS",
+    "PIEDPIPER_MODE",
+    "PIEDPIPER_PORT",
+    "PIEDPIPER_NO_BROWSER",
+    "PIEDPIPER_HOME",
+    "PIEDPIPER_AUTH_TOKEN",
+    "PIEDPIPER_DESKTOP_WS_URL",
+    "PIEDPIPER_TRACE_MIN_LEVEL",
+    "PIEDPIPER_TRACE_TIMING_ENABLED",
+    "PIEDPIPER_TRACE_FILE",
+    "PIEDPIPER_TRACE_MAX_BYTES",
+    "PIEDPIPER_TRACE_MAX_FILES",
+    "PIEDPIPER_TRACE_BATCH_WINDOW_MS",
+    "PIEDPIPER_OTLP_TRACES_URL",
+    "PIEDPIPER_OTLP_METRICS_URL",
+    "PIEDPIPER_OTLP_EXPORT_INTERVAL_MS",
+    "PIEDPIPER_OTLP_SERVICE_NAME"
+  ],
+  "tasks": {
+    "build": {
+      "dependsOn": ["^build"],
+      "outputs": ["dist/**", "dist-electron/**"]
+    },
+    "dev": {
+      "dependsOn": ["@piedpiper/contracts#build"],
+      "cache": false,
+      "persistent": true
+    },
+    "typecheck": {
+      "dependsOn": ["^typecheck"],
+      "outputs": [],
+      "cache": false
+    },
+    "test": {
+      "dependsOn": ["^build"],
+      "cache": false,
+      "outputs": []
+    }
+  }
+}

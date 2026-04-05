@@ -1,0 +1,24 @@
+{
+  "$schema": "https://turbo.build/schema.json",
+  "extends": ["//"],
+  "tasks": {
+    "build": {
+      "dependsOn": ["^build"],
+      "outputs": ["dist-electron/**"],
+    },
+    "dev": {
+      "dependsOn": ["piedpiper#build"],
+      "persistent": true,
+    },
+    "start": {
+      "dependsOn": ["build", "@piedpiper/web#build", "piedpiper#build"],
+      "cache": false,
+      "persistent": true,
+    },
+    "smoke-test": {
+      "dependsOn": ["build", "@piedpiper/web#build", "piedpiper#build"],
+      "cache": false,
+      "outputs": [],
+    },
+  },
+}

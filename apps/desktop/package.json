@@ -1,0 +1,30 @@
+{
+  "name": "@piedpiper/desktop",
+  "version": "0.0.15",
+  "private": true,
+  "main": "dist-electron/main.js",
+  "scripts": {
+    "dev": "bun run --parallel dev:bundle dev:electron",
+    "dev:bundle": "tsdown --watch",
+    "dev:electron": "bun run scripts/dev-electron.mjs",
+    "build": "tsdown",
+    "start": "bun run scripts/start-electron.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --passWithNoTests",
+    "smoke-test": "node scripts/smoke-test.mjs"
+  },
+  "dependencies": {
+    "effect": "catalog:",
+    "electron": "40.6.0",
+    "electron-updater": "^6.6.2"
+  },
+  "devDependencies": {
+    "@piedpiper/contracts": "workspace:*",
+    "@piedpiper/shared": "workspace:*",
+    "@types/node": "catalog:",
+    "tsdown": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  },
+  "productName": "Pied Piper"
+}

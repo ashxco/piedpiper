@@ -1,0 +1,343 @@
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import { assert, it } from "@effect/vitest";
+import { assertSuccess } from "@effect/vitest/utils";
+import { FileSystem, Path, Effect } from "effect";
+
+import {
+  isCommandAvailable,
+  launchDetached,
+  resolveAvailableEditors,
+  resolveEditorLaunch,
+} from "./open";
+
+it.layer(NodeServices.layer)("resolveEditorLaunch", (it) => {
+  it.effect("returns commands for command-based editors", () =>
+    Effect.gen(function* () {
+      const antigravityLaunch = yield* resolveEditorLaunch(
+        { cwd: "/tmp/workspace", editor: "antigravity" },
+        "darwin",
+      );
+      assert.deepEqual(antigravityLaunch, {
+        command: "agy",
+        args: ["/tmp/workspace"],
+      });
+
+      const cursorLaunch = yield* resolveEditorLaunch(
+        { cwd: "/tmp/workspace", editor: "cursor" },
+        "darwin",
+      );
+      assert.deepEqual(cursorLaunch, {
+        command: "cursor",
+        args: ["/tmp/workspace"],
+      });
+
+      const traeLaunch = yield* resolveEditorLaunch(
+        { cwd: "/tmp/workspace", editor: "trae" },
+        "darwin",
+      );
+      assert.deepEqual(traeLaunch, {
+        command: "trae",
+        args: ["/tmp/workspace"],
+      });
+
+      const vscodeLaunch = yield* resolveEditorLaunch(
+        { cwd: "/tmp/workspace", editor: "vscode" },
+        "darwin",
+      );
+      assert.deepEqual(vscodeLaunch, {
+        command: "code",
+        args: ["/tmp/workspace"],
+      });
+
+      const vscodeInsidersLaunch = yield* resolveEditorLaunch(
+        { cwd: "/tmp/workspace", editor: "vscode-insiders" },
+        "darwin",
+      );
+      assert.deepEqual(vscodeInsidersLaunch, {
+        command: "code-insiders",
+        args: ["/tmp/workspace"],
+      });
+
+      const vscodiumLaunch = yield* resolveEditorLaunch(
+        { cwd: "/tmp/workspace", editor: "vscodium" },
+        "darwin",
+      );
+      assert.deepEqual(vscodiumLaunch, {
+        command: "codium",
+        args: ["/tmp/workspace"],
+      });
+
+      const zedLaunch = yield* resolveEditorLaunch(
+        { cwd: "/tmp/workspace", editor: "zed" },
+        "darwin",
+      );
+      assert.deepEqual(zedLaunch, {
+        command: "zed",
+        args: ["/tmp/workspace"],
+      });
+
+      const ideaLaunch = yield* resolveEditorLaunch(
+        { cwd: "/tmp/workspace", editor: "idea" },
+        "darwin",
+      );
+      assert.deepEqual(ideaLaunch, {
+        command: "idea",
+        args: ["/tmp/workspace"],
+      });
+    }),
+  );
+
+  it.effect("applies launch-style-specific navigation arguments", () =>
+    Effect.gen(function* () {
+      const lineOnly = yield* resolveEditorLaunch(
+        { cwd: "/tmp/workspace/AGENTS.md:48", editor: "cursor" },
+        "darwin",
+      );
+      assert.deepEqual(lineOnly, {
+        command: "cursor",
+        args: ["--goto", "/tmp/workspace/AGENTS.md:48"],
+      });
+
+      const lineAndColumn = yield* resolveEditorLaunch(
+        { cwd: "/tmp/workspace/src/open.ts:71:5", editor: "cursor" },
+        "darwin",
+      );
+      assert.deepEqual(lineAndColumn, {
+        command: "cursor",
+        args: ["--goto", "/tmp/workspace/src/open.ts:71:5"],
+      });
+
+      const traeLineAndColumn = yield* resolveEditorLaunch(
+        { cwd: "/tmp/workspace/src/open.ts:71:5", editor: "trae" },
+        "darwin",
+      );
+      assert.deepEqual(traeLineAndColumn, {
+        command: "trae",
+        args: ["--goto", "/tmp/workspace/src/open.ts:71:5"],
+      });
+
+      const vscodeLineAndColumn = yield* resolveEditorLaunch(
+        { cwd: "/tmp/workspace/src/open.ts:71:5", editor: "vscode" },
+        "darwin",
+      );
+      assert.deepEqual(vscodeLineAndColumn, {
+        command: "code",
+        args: ["--goto", "/tmp/workspace/src/open.ts:71:5"],
+      });
+
+      const vscodeInsidersLineAndColumn = yield* resolveEditorLaunch(
+        { cwd: "/tmp/workspace/src/open.ts:71:5", editor: "vscode-insiders" },
+        "darwin",
+      );
+      assert.deepEqual(vscodeInsidersLineAndColumn, {
+        command: "code-insiders",
+        args: ["--goto", "/tmp/workspace/src/open.ts:71:5"],
+      });
+
+      const vscodiumLineAndColumn = yield* resolveEditorLaunch(
+        { cwd: "/tmp/workspace/src/open.ts:71:5", editor: "vscodium" },
+        "darwin",
+      );
+      assert.deepEqual(vscodiumLineAndColumn, {
+        command: "codium",
+        args: ["--goto", "/tmp/workspace/src/open.ts:71:5"],
+      });
+
+      const zedLineAndColumn = yield* resolveEditorLaunch(
+        { cwd: "/tmp/workspace/src/open.ts:71:5", editor: "zed" },
+        "darwin",
+      );
+      assert.deepEqual(zedLineAndColumn, {
+        command: "zed",
+        args: ["/tmp/workspace/src/open.ts:71:5"],
+      });
+
+      const zedLineOnly = yield* resolveEditorLaunch(
+        { cwd: "/tmp/workspace/AGENTS.md:48", editor: "zed" },
+        "darwin",
+      );
+      assert.deepEqual(zedLineOnly, {
+        command: "zed",
+        args: ["/tmp/workspace/AGENTS.md:48"],
+      });
+
+      const ideaLineOnly = yield* resolveEditorLaunch(
+        { cwd: "/tmp/workspace/AGENTS.md:48", editor: "idea" },
+        "darwin",
+      );
+      assert.deepEqual(ideaLineOnly, {
+        command: "idea",
+        args: ["--line", "48", "/tmp/workspace/AGENTS.md"],
+      });
+
+      const ideaLineAndColumn = yield* resolveEditorLaunch(
+        { cwd: "/tmp/workspace/src/open.ts:71:5", editor: "idea" },
+        "darwin",
+      );
+      assert.deepEqual(ideaLineAndColumn, {
+        command: "idea",
+        args: ["--line", "71", "--column", "5", "/tmp/workspace/src/open.ts"],
+      });
+    }),
+  );
+
+  it.effect("maps file-manager editor to OS open commands", () =>
+    Effect.gen(function* () {
+      const launch1 = yield* resolveEditorLaunch(
+        { cwd: "/tmp/workspace", editor: "file-manager" },
+        "darwin",
+      );
+      assert.deepEqual(launch1, {
+        command: "open",
+        args: ["/tmp/workspace"],
+      });
+
+      const launch2 = yield* resolveEditorLaunch(
+        { cwd: "C:\\workspace", editor: "file-manager" },
+        "win32",
+      );
+      assert.deepEqual(launch2, {
+        command: "explorer",
+        args: ["C:\\workspace"],
+      });
+
+      const launch3 = yield* resolveEditorLaunch(
+        { cwd: "/tmp/workspace", editor: "file-manager" },
+        "linux",
+      );
+      assert.deepEqual(launch3, {
+        command: "xdg-open",
+        args: ["/tmp/workspace"],
+      });
+    }),
+  );
+});
+
+it.layer(NodeServices.layer)("launchDetached", (it) => {
+  it.effect("resolves when command can be spawned", () =>
+    Effect.gen(function* () {
+      const result = yield* launchDetached({
+        command: process.execPath,
+        args: ["-e", "process.exit(0)"],
+      }).pipe(Effect.result);
+      assertSuccess(result, undefined);
+    }),
+  );
+
+  it.effect("rejects when command does not exist", () =>
+    Effect.gen(function* () {
+      const result = yield* launchDetached({
+        command: `piedpiper-no-such-command-${Date.now()}`,
+        args: [],
+      }).pipe(Effect.result);
+      assert.equal(result._tag, "Failure");
+    }),
+  );
+});
+
+it.layer(NodeServices.layer)("isCommandAvailable", (it) => {
+  it.effect("resolves win32 commands with PATHEXT", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const dir = yield* fs.makeTempDirectoryScoped({ prefix: "piedpiper-open-test-" });
+      yield* fs.writeFileString(path.join(dir, "code.CMD"), "@echo off\r\n");
+      const env = {
+        PATH: dir,
+        PATHEXT: ".COM;.EXE;.BAT;.CMD",
+      } satisfies NodeJS.ProcessEnv;
+      const result = yield* Effect.tryPromise(() =>
+        isCommandAvailable("code", { platform: "win32", env }),
+      );
+      assert.equal(result, true);
+    }),
+  );
+
+  it.effect("returns false when a command is not on PATH", () =>
+    Effect.gen(function* () {
+      const env = {
+        PATH: "",
+        PATHEXT: ".COM;.EXE;.BAT;.CMD",
+      } satisfies NodeJS.ProcessEnv;
+      const result = yield* Effect.tryPromise(() =>
+        isCommandAvailable("definitely-not-installed", { platform: "win32", env }),
+      );
+      assert.equal(result, false);
+    }),
+  );
+
+  it.effect("does not treat bare files without executable extension as available on win32", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const dir = yield* fs.makeTempDirectoryScoped({ prefix: "piedpiper-open-test-" });
+      yield* fs.writeFileString(path.join(dir, "npm"), "echo nope\r\n");
+      const env = {
+        PATH: dir,
+        PATHEXT: ".COM;.EXE;.BAT;.CMD",
+      } satisfies NodeJS.ProcessEnv;
+      const result = yield* Effect.tryPromise(() =>
+        isCommandAvailable("npm", { platform: "win32", env }),
+      );
+      assert.equal(result, false);
+    }),
+  );
+
+  it.effect("appends PATHEXT for commands with non-executable extensions on win32", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const dir = yield* fs.makeTempDirectoryScoped({ prefix: "piedpiper-open-test-" });
+      yield* fs.writeFileString(path.join(dir, "my.tool.CMD"), "@echo off\r\n");
+      const env = {
+        PATH: dir,
+        PATHEXT: ".COM;.EXE;.BAT;.CMD",
+      } satisfies NodeJS.ProcessEnv;
+      const result = yield* Effect.tryPromise(() =>
+        isCommandAvailable("my.tool", { platform: "win32", env }),
+      );
+      assert.equal(result, true);
+    }),
+  );
+
+  it.effect("uses platform-specific PATH delimiter for platform overrides", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const firstDir = yield* fs.makeTempDirectoryScoped({ prefix: "piedpiper-open-test-" });
+      const secondDir = yield* fs.makeTempDirectoryScoped({ prefix: "piedpiper-open-test-" });
+      yield* fs.writeFileString(path.join(firstDir, "code.CMD"), "@echo off\r\n");
+      yield* fs.writeFileString(path.join(secondDir, "code.CMD"), "MZ");
+      const env = {
+        PATH: `${firstDir};${secondDir}`,
+        PATHEXT: ".COM;.EXE;.BAT;.CMD",
+      } satisfies NodeJS.ProcessEnv;
+      const result = yield* Effect.tryPromise(() =>
+        isCommandAvailable("code", { platform: "win32", env }),
+      );
+      assert.equal(result, true);
+    }),
+  );
+});
+
+it.layer(NodeServices.layer)("resolveAvailableEditors", (it) => {
+  it.effect("returns installed editors for command launches", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const dir = yield* fs.makeTempDirectoryScoped({ prefix: "piedpiper-editors-" });
+
+      yield* fs.writeFileString(path.join(dir, "trae.CMD"), "@echo off\r\n");
+      yield* fs.writeFileString(path.join(dir, "code-insiders.CMD"), "@echo off\r\n");
+      yield* fs.writeFileString(path.join(dir, "codium.CMD"), "@echo off\r\n");
+      yield* fs.writeFileString(path.join(dir, "explorer.CMD"), "MZ");
+      const editors = yield* Effect.tryPromise(() =>
+        resolveAvailableEditors("win32", {
+          PATH: dir,
+          PATHEXT: ".COM;.EXE;.BAT;.CMD",
+        }),
+      );
+      assert.deepEqual(editors, ["trae", "vscode-insiders", "vscodium", "file-manager"]);
+    }),
+  );
+});

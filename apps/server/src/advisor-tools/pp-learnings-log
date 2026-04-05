@@ -1,0 +1,19 @@
+#!/bin/sh
+# pp-learnings-log — record a structured learning
+# Usage: pp-learnings-log '{"skill":"...","key":"...","insight":"..."}'
+
+ENTRY="$1"
+[ -z "$ENTRY" ] && { echo "Usage: pp-learnings-log '<json>'" >&2; exit 1; }
+
+DATA_DIR="$HOME/.piedpiper/advisors"
+
+REMOTE_URL=$(git config --get remote.origin.url 2>/dev/null || echo "")
+if [ -n "$REMOTE_URL" ]; then
+  SLUG=$(echo "$REMOTE_URL" | sed 's|.*[:/]||' | sed 's|\.git$||' | tr '[:upper:]' '[:lower:]' | tr ' ' '-')
+else
+  SLUG=$(basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" | tr '[:upper:]' '[:lower:]' | tr ' ' '-')
+fi
+
+TARGET="$DATA_DIR/projects/$SLUG"
+mkdir -p "$TARGET"
+echo "$ENTRY" >> "$TARGET/learnings.jsonl"

@@ -1,0 +1,22 @@
+#!/bin/sh
+# pp-repo-mode — detect repository type, output shell variables
+# Usage: source <(pp-repo-mode)
+
+REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+
+REPO_MODE="single"
+if [ -f "$REPO_ROOT/pnpm-workspace.yaml" ] || \
+   [ -f "$REPO_ROOT/lerna.json" ] || \
+   [ -f "$REPO_ROOT/nx.json" ] || \
+   [ -f "$REPO_ROOT/turbo.json" ] || \
+   ([ -f "$REPO_ROOT/Cargo.toml" ] && grep -q '\[workspace\]' "$REPO_ROOT/Cargo.toml" 2>/dev/null) || \
+   [ -f "$REPO_ROOT/go.work" ]; then
+  REPO_MODE="monorepo"
+elif [ -f "$REPO_ROOT/package.json" ] && grep -q '"workspaces"' "$REPO_ROOT/package.json" 2>/dev/null; then
+  REPO_MODE="monorepo"
+fi
+
+echo "_REPO_MODE=$REPO_MODE"
+echo "_REPO_ROOT=$REPO_ROOT"
+echo "_BRANCH=$BRANCH"

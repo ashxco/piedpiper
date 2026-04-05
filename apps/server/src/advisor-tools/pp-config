@@ -1,0 +1,31 @@
+#!/bin/sh
+# pp-config — get/set user preferences
+set -e
+
+CONFIG_FILE="$HOME/.piedpiper/advisors/config.yaml"
+
+ensure_config() {
+  if [ ! -f "$CONFIG_FILE" ]; then
+    mkdir -p "$(dirname "$CONFIG_FILE")"
+    touch "$CONFIG_FILE"
+  fi
+}
+
+case "${1:-}" in
+  get)
+    [ -z "$2" ] && { echo "Usage: pp-config get <key>" >&2; exit 1; }
+    ensure_config
+    grep "^${2}:" "$CONFIG_FILE" 2>/dev/null | head -1 | sed "s/^${2}:[[:space:]]*//" | sed 's/^["'"'"']//' | sed 's/["'"'"']$//'
+    ;;
+  set)
+    [ -z "$2" ] && { echo "Usage: pp-config set <key> <value>" >&2; exit 1; }
+    ensure_config
+    if grep -q "^${2}:" "$CONFIG_FILE" 2>/dev/null; then
+      sed -i '' "s/^${2}:.*/${2}: ${3}/" "$CONFIG_FILE" 2>/dev/null || \
+        sed -i "s/^${2}:.*/${2}: ${3}/" "$CONFIG_FILE"
+    else
+      echo "${2}: ${3}" >> "$CONFIG_FILE"
+    fi
+    ;;
+  *) echo "Usage: pp-config get|set <key> [<value>]" >&2; exit 1 ;;
+esac
