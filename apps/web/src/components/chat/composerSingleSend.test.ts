@@ -222,3 +222,12 @@ describe("runComposerSingleSend", () => {
     ]);
   });
 });
+
+it("forwards fresh-context intent on the next turn", async () => {
+  const calls = effects();
+  const result = await runComposerSingleSend({ ...input(), freshContext: true }, calls);
+  expect(result.status).toBe("sent");
+  expect(calls.dispatchCommand).toHaveBeenCalledWith(
+    expect.objectContaining({ type: "thread.turn.start", freshContext: true }),
+  );
+});

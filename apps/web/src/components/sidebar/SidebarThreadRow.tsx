@@ -49,6 +49,7 @@ import { wakeSnoozedThread } from "./threadSnoozeActions";
 import { ThreadTitleCard } from "./ThreadTitleCard";
 import { UnicodeSpinner } from "./UnicodeSpinner";
 import { cn } from "~/lib/utils";
+import { enqueueThreadFiles } from "../../pendingThreadFiles";
 import { textDirection } from "~/markdown-text-direction";
 
 const SIDEBAR_GIT_STATUS_STALE_TIME_MS = 30_000;
@@ -138,6 +139,7 @@ export interface SidebarThreadRowProps {
 }
 
 export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowProps) {
+  const [fileDragActive, setFileDragActive] = useState(false);
   const [dotHovered, setDotHovered] = useState(false);
   const thread = useSidebarThreadSummaryById(props.threadId);
   const lastVisitedAt = useUiStateStore((state) => state.threadLastVisitedAtById[props.threadId]);
@@ -257,6 +259,37 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
         isActive={isActive}
         data-testid={`thread-row-${thread.id}`}
         data-sidebar-row={thread.id}
+        data-file-drop-target
+        onDragEnter={(event) => {
+          if (Array.from(event.dataTransfer.types).includes("Files")) setFileDragActive(true);
+        }}
+        onDragOver={(event) => {
+          if (!Array.from(event.dataTransfer.types).includes("Files")) return;
+          event.preventDefault();
+          event.dataTransfer.dropEffect = "copy";
+        }}
+        onDragLeave={(event) => {
+          if (
+            !(event.relatedTarget instanceof Node) ||
+            !event.currentTarget.contains(event.relatedTarget)
+          )
+            setFileDragActive(false);
+        }}
+        onDrop={(event) => {
+          setFileDragActive(false);
+          if (
+            Array.from(event.dataTransfer.items).some(
+              (item) => item.webkitGetAsEntry?.()?.isDirectory,
+            )
+          )
+            return;
+          const files = Array.from(event.dataTransfer.files);
+          if (files.length === 0) return;
+          event.preventDefault();
+          event.stopPropagation();
+          enqueueThreadFiles(thread.id, files);
+          props.navigateToThread(thread.id);
+        }}
         data-sidebar-parent={
           props.snoozed
             ? sidebarSnoozedShelfRowId(sidebarProjectRowId(thread.projectId))
@@ -269,6 +302,7 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
         className={cn(
           resolveThreadRowClassName({ isActive, isSelected }),
           "relative isolate",
+          fileDragActive && "ring-1 ring-inset ring-primary bg-accent",
           isOfficeHovered
             ? "ring-1 ring-inset ring-primary/40 bg-accent"
             : hasUnsentDraft && !isSelected

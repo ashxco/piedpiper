@@ -42,6 +42,7 @@ export type TerminalSessionInput = Schema.Codec.Encoded<typeof TerminalSessionIn
 
 export const TerminalOpenInput = Schema.Struct({
   ...TerminalSessionInput.fields,
+  viewerId: Schema.optional(TerminalIdSchema),
   cwd: TrimmedNonEmptyStringSchema,
   cols: Schema.optional(TerminalColsSchema),
   rows: Schema.optional(TerminalRowsSchema),
@@ -59,16 +60,24 @@ export type TerminalWriteInput = Schema.Codec.Encoded<typeof TerminalWriteInput>
 
 export const TerminalResizeInput = Schema.Struct({
   ...TerminalSessionInput.fields,
+  viewerId: Schema.optional(TerminalIdSchema),
   cols: TerminalColsSchema,
   rows: TerminalRowsSchema,
 });
 export type TerminalResizeInput = Schema.Codec.Encoded<typeof TerminalResizeInput>;
+
+export const TerminalDetachInput = Schema.Struct({
+  ...TerminalSessionInput.fields,
+  viewerId: TerminalIdSchema,
+});
+export type TerminalDetachInput = Schema.Codec.Encoded<typeof TerminalDetachInput>;
 
 export const TerminalClearInput = TerminalSessionInput;
 export type TerminalClearInput = Schema.Codec.Encoded<typeof TerminalClearInput>;
 
 export const TerminalRestartInput = Schema.Struct({
   ...TerminalSessionInput.fields,
+  viewerId: Schema.optional(TerminalIdSchema),
   cwd: TrimmedNonEmptyStringSchema,
   cols: TerminalColsSchema,
   rows: TerminalRowsSchema,
@@ -93,6 +102,8 @@ export const TerminalSessionSnapshot = Schema.Struct({
   status: TerminalSessionStatus,
   pid: Schema.NullOr(Schema.Int.check(Schema.isGreaterThan(0))),
   history: Schema.String,
+  cols: Schema.optional(TerminalColsSchema),
+  rows: Schema.optional(TerminalRowsSchema),
   exitCode: Schema.NullOr(Schema.Int),
   exitSignal: Schema.NullOr(Schema.Int),
   updatedAt: Schema.String,
@@ -149,6 +160,8 @@ const TerminalRestartedEvent = Schema.Struct({
 const TerminalActivityEvent = Schema.Struct({
   ...TerminalEventBaseSchema.fields,
   type: Schema.Literal("activity"),
+  cols: Schema.optional(TerminalColsSchema),
+  rows: Schema.optional(TerminalRowsSchema),
   hasRunningSubprocess: Schema.Boolean,
   /** Name of the command running in the terminal; absent at an idle prompt. */
   label: Schema.optional(TerminalLabelSchema),

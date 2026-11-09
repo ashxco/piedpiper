@@ -34,6 +34,8 @@ export type ThreadKeybindingCommand = (typeof THREAD_KEYBINDING_COMMANDS)[number
 export const COMPOSER_CONTROL_KEYBINDING_COMMANDS = [
   "modelPicker.toggle",
   "composer.effort",
+  "composer.increaseEffort",
+  "composer.decreaseEffort",
   "composer.mode",
   "composer.workspace",
   "composer.branch",
@@ -52,6 +54,7 @@ export const NAVIGATION_KEYBINDING_COMMANDS = ["navigation.back", "navigation.fo
 export type NavigationKeybindingCommand = (typeof NAVIGATION_KEYBINDING_COMMANDS)[number];
 
 export const STATIC_KEYBINDING_COMMANDS = [
+  "composer.stash",
   "workspace.focusNext",
   "workspace.focusPrevious",
   "sidebar.toggle",

@@ -72,7 +72,10 @@ import {
 import { neutralizeInheritedHistory, sanitizeTerminalHistoryChunk } from "./TerminalSanitizer";
 import {
   legacySafeThreadId,
-  toSafeTerminalId,
+  encodedHistoryName,
+  hashedHistoryThreadPart,
+  historyName,
+  MAX_HISTORY_FILENAME_BYTES,
   toSafeThreadId,
   toSessionKey,
 } from "./TerminalSessionKeys";
@@ -151,6 +154,7 @@ interface TerminalSessionState {
   updatedAt: string;
   cols: number;
   rows: number;
+  viewers: Map<string, { clientId: number; cols: number; rows: number }>;
   process: PtyProcess | null;
   unsubscribeData: (() => void) | null;
   unsubscribeExit: (() => void) | null;
@@ -207,6 +211,27 @@ interface TerminalManagerState {
   killFibers: Map<PtyProcess, Fiber.Fiber<void, never>>;
 }
 
+const desiredGrid = (
+  session: TerminalSessionState,
+  input: {
+    viewerId?: string | undefined;
+    cols?: number | undefined;
+    rows?: number | undefined;
+  },
+  clientId: number,
+) => {
+  const fallback = { cols: input.cols ?? session.cols, rows: input.rows ?? session.rows };
+  if (input.viewerId)
+    session.viewers.set(`${clientId}:${input.viewerId}`, { clientId, ...fallback });
+  const viewers = [...session.viewers.values()];
+  return viewers.length === 0
+    ? fallback
+    : {
+        cols: Math.min(...viewers.map((viewer) => viewer.cols)),
+        rows: Math.min(...viewers.map((viewer) => viewer.rows)),
+      };
+};
+
 function snapshot(session: TerminalSessionState): TerminalSessionSnapshot {
   return {
     threadId: session.threadId,
@@ -215,6 +240,8 @@ function snapshot(session: TerminalSessionState): TerminalSessionSnapshot {
     status: session.status,
     pid: session.pid,
     history: session.history.value(),
+    cols: session.cols,
+    rows: session.rows,
     exitCode: session.exitCode,
     exitSignal: session.exitSignal,
     updatedAt: session.updatedAt,
@@ -597,16 +624,23 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
         }
       });
 
-    const historyPath = (threadId: string, terminalId: string) => {
-      const threadPart = toSafeThreadId(threadId);
-      if (terminalId === DEFAULT_TERMINAL_ID) {
-        return path.join(logsDir, `${threadPart}.log`);
-      }
-      return path.join(logsDir, `${threadPart}_${toSafeTerminalId(terminalId)}.log`);
+    const historyPath = (threadId: string, terminalId: string) =>
+      path.join(logsDir, historyName(threadId, terminalId));
+    const historyPaths = (threadId: string, terminalId: string) => [
+      ...new Set([
+        historyPath(threadId, terminalId),
+        path.join(logsDir, encodedHistoryName(threadId, terminalId)),
+        ...(terminalId === DEFAULT_TERMINAL_ID
+          ? [path.join(logsDir, `${legacySafeThreadId(threadId)}.log`)]
+          : []),
+      ]),
+    ];
+    const historyExists = (filePath: string) => {
+      const name = path.basename(filePath);
+      return Buffer.byteLength(name) <= MAX_HISTORY_FILENAME_BYTES
+        ? fileSystem.exists(filePath)
+        : fileSystem.readDirectory(logsDir).pipe(Effect.map((entries) => entries.includes(name)));
     };
-
-    const legacyHistoryPath = (threadId: string) =>
-      path.join(logsDir, `${legacySafeThreadId(threadId)}.log`);
 
     const toTerminalHistoryError =
       (operation: "read" | "truncate" | "migrate", threadId: string, terminalId: string) =>
@@ -893,79 +927,68 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
       terminalId: string,
     ) {
       const nextPath = historyPath(threadId, terminalId);
-      if (
-        yield* fileSystem
-          .exists(nextPath)
-          .pipe(Effect.mapError(toTerminalHistoryError("read", threadId, terminalId)))
-      ) {
-        const { history: raw, truncated } = yield* readHistoryTail(nextPath).pipe(
+      for (const sourcePath of historyPaths(threadId, terminalId)) {
+        const migrating = sourcePath !== nextPath;
+        const operation = migrating ? "migrate" : "read";
+        if (
+          !(yield* historyExists(sourcePath).pipe(
+            Effect.mapError(toTerminalHistoryError(operation, threadId, terminalId)),
+          ))
+        )
+          continue;
+        const { history: raw, truncated } = yield* readHistoryTail(sourcePath).pipe(
           Effect.scoped,
-          Effect.mapError(toTerminalHistoryError("read", threadId, terminalId)),
+          Effect.mapError(toTerminalHistoryError(operation, threadId, terminalId)),
         );
         const capped = capStoredHistory(raw);
-        if (truncated || capped !== raw) {
-          yield* fileSystem
-            .writeFileString(nextPath, capped)
-            .pipe(Effect.mapError(toTerminalHistoryError("truncate", threadId, terminalId)));
+        if (migrating || truncated || capped !== raw) {
+          const write = migrating
+            ? Effect.gen(function* () {
+                const temporaryPath = yield* fileSystem.makeTempFileScoped({
+                  directory: logsDir,
+                  prefix: ".history-",
+                });
+                yield* fileSystem.writeFileString(temporaryPath, capped);
+                yield* fileSystem.rename(temporaryPath, nextPath);
+              }).pipe(Effect.scoped)
+            : fileSystem.writeFileString(nextPath, capped);
+          yield* write.pipe(
+            Effect.mapError(
+              toTerminalHistoryError(migrating ? "migrate" : "truncate", threadId, terminalId),
+            ),
+          );
         }
+        if (migrating)
+          yield* fileSystem.remove(sourcePath, { force: true }).pipe(
+            Effect.catch((error) =>
+              Effect.logWarning("failed to remove legacy terminal history", {
+                threadId,
+                terminalId,
+                error,
+              }),
+            ),
+          );
         return capped;
       }
-
-      if (terminalId !== DEFAULT_TERMINAL_ID) {
-        return "";
-      }
-
-      const legacyPath = legacyHistoryPath(threadId);
-      if (
-        !(yield* fileSystem
-          .exists(legacyPath)
-          .pipe(Effect.mapError(toTerminalHistoryError("migrate", threadId, terminalId))))
-      ) {
-        return "";
-      }
-
-      const { history: raw } = yield* readHistoryTail(legacyPath).pipe(
-        Effect.scoped,
-        Effect.mapError(toTerminalHistoryError("migrate", threadId, terminalId)),
-      );
-      const capped = capStoredHistory(raw);
-      yield* fileSystem
-        .writeFileString(nextPath, capped)
-        .pipe(Effect.mapError(toTerminalHistoryError("migrate", threadId, terminalId)));
-      yield* fileSystem.remove(legacyPath, { force: true }).pipe(
-        Effect.catch((cleanupError) =>
-          Effect.logWarning("failed to remove legacy terminal history", {
-            threadId,
-            error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
-          }),
-        ),
-      );
-      return capped;
+      return "";
     });
 
     const deleteHistory = Effect.fn("terminal.deleteHistory")(function* (
       threadId: string,
       terminalId: string,
     ) {
-      yield* fileSystem.remove(historyPath(threadId, terminalId), { force: true }).pipe(
-        Effect.catch((error) =>
-          Effect.logWarning("failed to delete terminal history", {
-            threadId,
-            terminalId,
-            error: error instanceof Error ? error.message : String(error),
-          }),
-        ),
-      );
-      if (terminalId === DEFAULT_TERMINAL_ID) {
-        yield* fileSystem.remove(legacyHistoryPath(threadId), { force: true }).pipe(
-          Effect.catch((error) =>
-            Effect.logWarning("failed to delete terminal history", {
-              threadId,
-              terminalId,
-              error: error instanceof Error ? error.message : String(error),
-            }),
-          ),
-        );
+      for (const filePath of historyPaths(threadId, terminalId)) {
+        if (yield* historyExists(filePath).pipe(Effect.orElseSucceed(() => false))) {
+          yield* fileSystem.remove(filePath, { force: true }).pipe(
+            Effect.catch((error) =>
+              Effect.logWarning("failed to delete terminal history", {
+                threadId,
+                terminalId,
+                error,
+              }),
+            ),
+          );
+        }
       }
     });
 
@@ -981,7 +1004,9 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
           (name) =>
             name === `${toSafeThreadId(threadId)}.log` ||
             name === `${legacySafeThreadId(threadId)}.log` ||
-            name.startsWith(threadPrefix),
+            name.startsWith(threadPrefix) ||
+            name === `${hashedHistoryThreadPart(threadId)}.log` ||
+            name.startsWith(`${hashedHistoryThreadPart(threadId)}_`),
         ),
         (name) =>
           fileSystem.remove(path.join(logsDir, name), { force: true }).pipe(
@@ -1693,6 +1718,21 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
       }).pipe(Effect.ignoreCause({ log: true })),
     );
 
+    const publishGrid = (session: TerminalSessionState) => {
+      session.eventSequence = nextEventSequence();
+      return publishEvent({
+        type: "activity",
+        threadId: session.threadId,
+        terminalId: session.terminalId,
+        createdAt: session.updatedAt,
+        sequence: session.eventSequence,
+        hasRunningSubprocess: session.hasRunningSubprocess,
+        ...(session.childCommandLabel ? { label: session.childCommandLabel } : {}),
+        cols: session.cols,
+        rows: session.rows,
+      });
+    };
+
     // A failed resize must not block attaching to a shell that is still usable.
     const resizeOnAttach = Effect.fn("terminal.resizeOnAttach")(function* (
       session: TerminalSessionState,
@@ -1715,10 +1755,11 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
         session.cols = cols;
         session.rows = rows;
         session.updatedAt = new Date().toISOString();
+        yield* publishGrid(session);
       }
     });
 
-    const open: TerminalManagerShape["open"] = (input) =>
+    const open: TerminalManagerShape["open"] = (input, clientId = 0) =>
       withThreadLock(
         input.threadId,
         Effect.gen(function* () {
@@ -1730,13 +1771,9 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
           if (input.resume === true) {
             if (Option.isSome(existing)) {
               const resumed = existing.value;
+              const grid = desiredGrid(resumed, input, clientId);
               if (resumed.process) {
-                yield* resizeOnAttach(
-                  resumed,
-                  resumed.process,
-                  input.cols ?? resumed.cols,
-                  input.rows ?? resumed.rows,
-                );
+                yield* resizeOnAttach(resumed, resumed.process, grid.cols, grid.rows);
               }
               return snapshot(resumed);
             }
@@ -1774,6 +1811,7 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
               updatedAt: new Date().toISOString(),
               cols,
               rows,
+              viewers: new Map(),
               process: null,
               unsubscribeData: null,
               unsubscribeExit: null,
@@ -1784,6 +1822,7 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
               eventSequence: nextEventSequence(),
             };
 
+            desiredGrid(session, input, clientId);
             const createdSession = session;
             closedSessionKeys.delete(sessionKey);
             yield* modifyManagerState((state) => {
@@ -1811,8 +1850,7 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
           const liveSession = existing.value;
           const nextRuntimeEnv = normalizedRuntimeEnv(input.env);
           const currentRuntimeEnv = liveSession.runtimeEnv;
-          const targetCols = input.cols ?? liveSession.cols;
-          const targetRows = input.rows ?? liveSession.rows;
+          const { cols: targetCols, rows: targetRows } = desiredGrid(liveSession, input, clientId);
           const runtimeEnvChanged = !Equal.equals(currentRuntimeEnv, nextRuntimeEnv);
 
           if (liveSession.cwd !== input.cwd || runtimeEnvChanged) {
@@ -1889,21 +1927,53 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
       });
     });
 
-    const resize: TerminalManagerShape["resize"] = Effect.fn("terminal.resize")(function* (input) {
-      const terminalId = input.terminalId ?? DEFAULT_TERMINAL_ID;
-      const session = yield* requireSession(input.threadId, terminalId);
-      const process = session.process;
-      if (!process || session.status !== "running") {
-        return yield* new TerminalNotRunningError({
-          threadId: input.threadId,
-          terminalId,
-        });
-      }
-      yield* resizePtyProcess(session, process, input.cols, input.rows);
-      session.cols = input.cols;
-      session.rows = input.rows;
-      session.updatedAt = new Date().toISOString();
-    });
+    const resize: TerminalManagerShape["resize"] = (input, clientId = 0) =>
+      withThreadLock(
+        input.threadId,
+        Effect.gen(function* () {
+          const terminalId = input.terminalId ?? DEFAULT_TERMINAL_ID;
+          const session = yield* requireSession(input.threadId, terminalId);
+          const grid = desiredGrid(session, input, clientId);
+          if (!session.process || session.status !== "running")
+            return yield* new TerminalNotRunningError({ threadId: input.threadId, terminalId });
+          if (session.cols === grid.cols && session.rows === grid.rows) return;
+          yield* resizePtyProcess(session, session.process, grid.cols, grid.rows);
+          session.cols = grid.cols;
+          session.rows = grid.rows;
+          session.updatedAt = new Date().toISOString();
+          yield* publishGrid(session);
+        }),
+      );
+
+    const detach: TerminalManagerShape["detach"] = (input, clientId = 0) =>
+      withThreadLock(
+        input.threadId,
+        Effect.gen(function* () {
+          const found = yield* getSession(input.threadId, input.terminalId ?? DEFAULT_TERMINAL_ID);
+          if (Option.isNone(found)) return;
+          const session = found.value;
+          session.viewers.delete(`${clientId}:${input.viewerId}`);
+          const grid = desiredGrid(session, {}, clientId);
+          if (session.process)
+            yield* resizeOnAttach(session, session.process, grid.cols, grid.rows);
+        }),
+      );
+    const detachClient: TerminalManagerShape["detachClient"] = (clientId) =>
+      Effect.gen(function* () {
+        const state = yield* readManagerState;
+        for (const session of state.sessions.values()) {
+          yield* withThreadLock(
+            session.threadId,
+            Effect.gen(function* () {
+              for (const [key, viewer] of session.viewers)
+                if (viewer.clientId === clientId) session.viewers.delete(key);
+              const grid = desiredGrid(session, {}, clientId);
+              if (session.process)
+                yield* resizeOnAttach(session, session.process, grid.cols, grid.rows);
+            }),
+          );
+        }
+      });
 
     const clear: TerminalManagerShape["clear"] = (input) =>
       withThreadLock(
@@ -1930,7 +2000,7 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
         }),
       );
 
-    const restart: TerminalManagerShape["restart"] = (input) =>
+    const restart: TerminalManagerShape["restart"] = (input, clientId = 0) =>
       withThreadLock(
         input.threadId,
         Effect.gen(function* () {
@@ -1960,6 +2030,7 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
               updatedAt: new Date().toISOString(),
               cols,
               rows,
+              viewers: new Map(),
               process: null,
               unsubscribeData: null,
               unsubscribeExit: null,
@@ -1969,6 +2040,7 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
               activityCount: 0,
               eventSequence: nextEventSequence(),
             };
+            desiredGrid(session, input, clientId);
             const createdSession = session;
             closedSessionKeys.delete(sessionKey);
             yield* modifyManagerState((state) => {
@@ -1984,8 +2056,7 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
             session.runtimeEnv = normalizedRuntimeEnv(input.env);
           }
 
-          const cols = input.cols ?? session.cols;
-          const rows = input.rows ?? session.rows;
+          const { cols, rows } = desiredGrid(session, input, clientId);
 
           session.history.clear();
           session.pendingHistoryControlSequence = "";
@@ -2064,6 +2135,8 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
       open,
       write,
       resize,
+      detach,
+      detachClient,
       clear,
       restart,
       close,

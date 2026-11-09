@@ -19,6 +19,7 @@ interface SendSettings {
 }
 
 export interface ComposerSingleSendInput {
+  freshContext?: boolean;
   thread: {
     id: ThreadId;
     createdAt: string;
@@ -161,6 +162,7 @@ export async function runComposerSingleSend(
         attachments,
       },
       ...settings,
+      ...(input.freshContext ? { freshContext: true } : {}),
       titleSeed: message.title,
       createdAt: message.createdAt,
     });

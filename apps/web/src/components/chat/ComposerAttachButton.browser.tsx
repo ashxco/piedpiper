@@ -65,7 +65,7 @@ describe("ComposerAttachButton", () => {
   it("opens the picker without taking focus, and is disabled while connecting", async () => {
     const screen = await render(<ComposerAttachButton onFiles={() => {}} />);
     try {
-      const button = page.getByRole("button", { name: "Attach images or PDFs" });
+      const button = page.getByRole("button", { name: "Attach files" });
       const click = vi.spyOn(attachInput(), "click").mockImplementation(() => {});
       const pointerDown = new PointerEvent("pointerdown", { bubbles: true, cancelable: true });
       button.element().dispatchEvent(pointerDown);

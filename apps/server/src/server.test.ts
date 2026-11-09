@@ -366,6 +366,8 @@ const buildAppUnderTest = (options?: {
       ),
       Layer.provide(
         Layer.mock(TerminalManager)({
+          detach: () => Effect.void,
+          detachClient: () => Effect.void,
           ...options?.layers?.terminalManager,
         }),
       ),
@@ -479,6 +481,67 @@ const getWsServerUrl = (pathname = "") =>
   });
 
 it.layer(NodeServices.layer)("server router seam", (it) => {
+  it.effect("negotiates compression only with WebSocket clients that offer it", () =>
+    Effect.gen(function* () {
+      yield* buildAppUnderTest();
+      const url = yield* getWsServerUrl("/ws");
+      const connect = (perMessageDeflate: boolean) =>
+        Effect.acquireRelease(
+          Effect.callback<NodeSocket.NodeWS.WebSocket, Error>((resume) => {
+            const socket = new NodeSocket.NodeWS.WebSocket(url, { perMessageDeflate });
+            socket.once("open", () => resume(Effect.succeed(socket)));
+            socket.once("error", (error) => resume(Effect.fail(error)));
+          }),
+          (socket) => Effect.sync(() => socket.close()),
+        );
+      assert.include((yield* connect(true)).extensions, "permessage-deflate");
+      assert.notInclude((yield* connect(false)).extensions, "permessage-deflate");
+    }).pipe(Effect.scoped, Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("cancels disconnected RPCs before waiting for terminal cleanup", () =>
+    Effect.gen(function* () {
+      const started = yield* Latch.make();
+      const cancelled = yield* Latch.make();
+      yield* buildAppUnderTest({
+        layers: {
+          terminalManager: {
+            open: () =>
+              started.open.pipe(Effect.andThen(Effect.never), Effect.ensuring(cancelled.open)),
+            // Models cleanup waiting for a lock held by the in-flight open call.
+            detachClient: () => cancelled.await,
+          },
+        },
+      });
+      const url = yield* getWsServerUrl("/ws");
+      const socket = yield* Effect.acquireRelease(
+        Effect.callback<NodeSocket.NodeWS.WebSocket, Error>((resume) => {
+          const socket = new NodeSocket.NodeWS.WebSocket(url);
+          socket.once("open", () => resume(Effect.succeed(socket)));
+          socket.once("error", (error) => resume(Effect.fail(error)));
+        }),
+        (socket) => Effect.sync(() => socket.close()),
+      );
+      socket.send(
+        JSON.stringify({
+          _tag: "Request",
+          id: "1",
+          tag: WS_METHODS.terminalOpen,
+          headers: [],
+          payload: {
+            threadId: "thread-1",
+            terminalId: "default",
+            cwd: "/tmp/project",
+            viewerId: "viewer",
+          },
+        }),
+      );
+      yield* started.await.pipe(Effect.timeout("5 seconds"));
+      socket.close();
+      yield* cancelled.await.pipe(Effect.timeout("5 seconds"));
+    }).pipe(Effect.scoped, Effect.provide(NodeHttpServer.layerTest)),
+  );
+
   it.effect("serves static index content for GET / when staticDir is configured", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
@@ -3550,6 +3613,8 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
   it.effect("streams terminal metadata over websocket rpc and unsubscribes on close", () =>
     Effect.gen(function* () {
       const unsubscribed = yield* Latch.make();
+      const detached = yield* Latch.make();
+      let detachCount = 0;
       const terminal = {
         threadId: "thread-1",
         terminalId: "default",
@@ -3559,6 +3624,11 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       yield* buildAppUnderTest({
         layers: {
           terminalManager: {
+            detachClient: () =>
+              Effect.sync(() => {
+                detachCount += 1;
+                detached.openUnsafe();
+              }),
             subscribeMetadata: (listener) =>
               listener({ type: "snapshot", terminals: [] }).pipe(
                 Effect.andThen(listener({ type: "upsert", terminal })),
@@ -3573,7 +3643,19 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       const wsUrl = yield* getWsServerUrl("/ws");
       const events = yield* Effect.scoped(
         withWsRpcClient(wsUrl, (client) =>
-          client[WS_METHODS.subscribeTerminalMetadata]({}).pipe(Stream.take(2), Stream.runCollect),
+          Effect.gen(function* () {
+            const events = yield* client[WS_METHODS.subscribeTerminalMetadata]({}).pipe(
+              Stream.take(2),
+              Stream.runCollect,
+            );
+            yield* unsubscribed.await.pipe(Effect.timeout("5 seconds"));
+            assert.equal(
+              detachCount,
+              0,
+              "ending a subscription must not detach a connected client",
+            );
+            return events;
+          }),
         ),
       );
 
@@ -3581,7 +3663,8 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         { type: "snapshot", terminals: [] },
         { type: "upsert", terminal },
       ]);
-      yield* unsubscribed.await.pipe(Effect.timeout("5 seconds"));
+      yield* detached.await.pipe(Effect.timeout("5 seconds"));
+      assert.equal(detachCount, 1, "physical disconnect is observed after the subscription ended");
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 

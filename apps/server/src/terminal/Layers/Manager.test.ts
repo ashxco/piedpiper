@@ -42,6 +42,7 @@ import {
   makeTerminalManagerWithOptions,
   runProcessTableCommand,
 } from "./Manager";
+import { historyName, encodedHistoryName } from "./TerminalSessionKeys";
 import { takePendingProcessEvent } from "./PendingProcessEventQueue";
 import { INHERITED_MODE_RESET } from "./TerminalSanitizer";
 
@@ -301,6 +302,51 @@ const createManager = (
   );
 
 it.layer(NodeServices.layer, { excludeTestServices: true })("TerminalManager", (it) => {
+  it.effect("shares the smallest attached grid and releases it on detach or disconnect", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter, getEvents } = yield* createManager();
+      yield* manager.open(openInput({ viewerId: "desktop", cols: 120, rows: 40 }), 1);
+      const smaller = yield* manager.open(
+        openInput({ viewerId: "browser", cols: 80, rows: 20 }),
+        2,
+      );
+      expect([smaller.cols, smaller.rows]).toEqual([80, 20]);
+      yield* manager.resize({ threadId: "thread-1", viewerId: "desktop", cols: 140, rows: 50 }, 1);
+      expect(ptyAdapter.processes[0]!.resizeCalls.at(-1)).toEqual({ cols: 80, rows: 20 });
+      yield* manager.detach({ threadId: "thread-1", viewerId: "browser" }, 2);
+      expect(ptyAdapter.processes[0]!.resizeCalls.at(-1)).toEqual({ cols: 140, rows: 50 });
+      yield* manager.open(openInput({ viewerId: "browser", cols: 90, rows: 25 }), 2);
+      yield* manager.detachClient(2);
+      expect(ptyAdapter.processes[0]!.resizeCalls.at(-1)).toEqual({ cols: 140, rows: 50 });
+      const resumed = yield* manager.open(
+        openInput({ resume: true, viewerId: "desktop", cols: 130, rows: 45 }),
+        1,
+      );
+      expect([resumed.cols, resumed.rows]).toEqual([130, 45]);
+      expect((yield* getEvents).at(-1)).toMatchObject({ type: "activity", cols: 130, rows: 45 });
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("migrates long encoded history and opens IDs larger than a filesystem name", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const { manager, logsDir } = yield* createManager();
+      const threadId = "thread-" + "a".repeat(110);
+      const oldPath = path.join(logsDir, encodedHistoryName(threadId, "default"));
+      yield* fs.writeFileString(oldPath, "old history");
+      const restored = yield* manager.open(openInput({ threadId }));
+      expect(restored.history).toContain("old history");
+      expect(yield* fs.exists(oldPath)).toBe(false);
+      expect(yield* fs.exists(path.join(logsDir, historyName(threadId, "default")))).toBe(true);
+      yield* manager.close({ threadId, deleteHistory: true });
+      expect(yield* fs.exists(path.join(logsDir, historyName(threadId, "default")))).toBe(false);
+      const longId = "nested/".repeat(80);
+      yield* manager.open(openInput({ threadId: longId, terminalId: "b".repeat(128) }));
+      yield* manager.clear({ threadId: longId, terminalId: "b".repeat(128) });
+      expect(historyName(longId, "b".repeat(128)).length).toBeLessThanOrEqual(143);
+    }).pipe(Effect.scoped),
+  );
+
   it.effect("spawns lazily and reuses running terminal per thread", () =>
     Effect.gen(function* () {
       const { manager, ptyAdapter } = yield* createManager();

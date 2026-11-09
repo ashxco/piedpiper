@@ -14,6 +14,8 @@ export const COMPOSER_ATTACH_IMAGE_ACCEPT = [
   "image/png",
   "image/webp",
   "application/pdf",
+  "text/*",
+  ".md,.mdx,.json,.jsonl,.yaml,.yml,.toml,.log,.csv,.ts,.tsx,.js,.jsx,.py,.go,.rs,.sh,.sql",
   ".heic",
   ".heif",
   ".pdf",
@@ -47,8 +49,8 @@ export function ComposerAttachButton(props: {
         variant="ghost"
         size="icon-xs"
         className="text-muted-foreground/70 hover:text-foreground/80"
-        aria-label="Attach images or PDFs"
-        title="Attach images or PDFs"
+        aria-label="Attach files"
+        title="Attach files"
         disabled={props.disabled}
         onPointerDown={(event) => event.preventDefault()}
         onClick={() => inputRef.current?.click()}

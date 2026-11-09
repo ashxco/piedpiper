@@ -102,7 +102,7 @@ export function resolveDiffHeaderClickAction(input: {
 }
 
 /** What the panel shows: checkpoint diffs of the turns, or live git changes. */
-export type DiffPanelScope = "turns" | GitDiffPreviewScope;
+export type DiffPanelScope = "turns" | "tool" | GitDiffPreviewScope;
 
 /** A thread with no turns has no checkpoints to show, so it opens on the working tree. */
 export function resolveDiffPanelScope(input: {
@@ -159,6 +159,7 @@ export function resolveGitDiffPreviewEmptyMessage(input: {
     return "No tracked changes here. Untracked files are left out of this diff.";
   }
   const whitespaceSuffix = input.ignoreWhitespace ? " (whitespace hidden)" : "";
+  if (input.scope === "commit") return `No changes in this commit${whitespaceSuffix}.`;
   if (input.scope === "uncommitted") return `No uncommitted changes${whitespaceSuffix}.`;
   if (input.result.baseRef === null) {
     return `No base branch, and no uncommitted changes${whitespaceSuffix}.`;
@@ -216,7 +217,15 @@ export function resolveDiffReviewSection(input: {
   scope: DiffPanelScope;
   selectedTurnId: string | null;
   selectedTurnLabel: string;
+  selectionId?: string | undefined;
 }): { sectionId: string; sectionTitle: string } {
+  if (input.scope === "tool")
+    return { sectionId: `tool:${input.selectionId}`, sectionTitle: "Tool edit" };
+  if (input.scope === "commit")
+    return {
+      sectionId: `commit:${input.selectionId}`,
+      sectionTitle: `Commit ${input.selectionId?.slice(0, 8)}`,
+    };
   if (input.scope === "uncommitted") {
     return { sectionId: "uncommitted", sectionTitle: "Uncommitted changes" };
   }

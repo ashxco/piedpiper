@@ -18,6 +18,7 @@ import {
   TerminalOpenInput,
   TerminalResizeError,
   TerminalResizeInput,
+  TerminalDetachInput,
   TerminalRestartInput,
   TerminalSessionSnapshot,
   TerminalSessionLookupError,
@@ -81,6 +82,7 @@ export interface TerminalManagerShape {
    */
   readonly open: (
     input: TerminalOpenInput,
+    clientId?: number,
   ) => Effect.Effect<TerminalSessionSnapshot, TerminalError>;
 
   /**
@@ -91,11 +93,20 @@ export interface TerminalManagerShape {
   /**
    * Resize the PTY backing a terminal session.
    */
-  readonly resize: (input: TerminalResizeInput) => Effect.Effect<void, TerminalError>;
+  readonly resize: (
+    input: TerminalResizeInput,
+    clientId?: number,
+  ) => Effect.Effect<void, TerminalError>;
 
   /**
    * Clear terminal output history.
    */
+  readonly detach: (
+    input: TerminalDetachInput,
+    clientId?: number,
+  ) => Effect.Effect<void, TerminalError>;
+  readonly detachClient: (clientId: number) => Effect.Effect<void>;
+
   readonly clear: (input: TerminalClearInput) => Effect.Effect<void, TerminalError>;
 
   /**
@@ -105,6 +116,7 @@ export interface TerminalManagerShape {
    */
   readonly restart: (
     input: TerminalRestartInput,
+    clientId?: number,
   ) => Effect.Effect<TerminalSessionSnapshot, TerminalError>;
 
   /**

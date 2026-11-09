@@ -42,6 +42,7 @@ import {
 import { __resetNativeApiForTests } from "../nativeApi";
 import { useReviewCommentDraftStore, useReviewCommentFormStore } from "../reviewCommentDraftStore";
 import { useStore } from "../store";
+import { useToolDiffSelection } from "../toolDiffSelection";
 
 const noop = (): void => undefined;
 
@@ -485,6 +486,7 @@ describe("DiffPanel", () => {
     });
     routeSearch.current = { diff: "1" };
     seedThread();
+    useToolDiffSelection.setState({ selection: null });
     useComposerDraftStore.setState({ draftThreadsByThreadId: {} });
     useReviewCommentDraftStore.setState({ commentsByThreadId: {} });
     useReviewCommentFormStore.setState({ text: "" });
@@ -511,6 +513,48 @@ describe("DiffPanel", () => {
       expect(renderedFilePaths()).toEqual(["src/app.test.ts", "src/app.ts"]);
     });
     expect(document.body.textContent).not.toContain("No completed turns yet.");
+  });
+
+  it("reviews a selected commit without fetching a checkpoint", async () => {
+    const commit = "a".repeat(40);
+    routeSearch.current = { diff: "1", diffScope: "commit", diffCommit: commit };
+    await using _panel = await mountPanel();
+    await vi.waitFor(() =>
+      expect(diffPreviewSpy).toHaveBeenCalledWith({
+        cwd: CWD,
+        scope: "commit",
+        commit,
+        ignoreWhitespace: false,
+      }),
+    );
+    await vi.waitFor(() => expect(renderedFilePaths()).toEqual(["src/app.test.ts", "src/app.ts"]));
+    expect(getFullThreadDiffSpy).not.toHaveBeenCalled();
+  });
+
+  it("reviews a retained tool edit without querying Git or checkpoint contents", async () => {
+    routeSearch.current = { diff: "1", diffToolId: "tool-edit" };
+    useToolDiffSelection.setState({
+      selection: {
+        threadId: THREAD_ID,
+        toolId: "tool-edit",
+        stream: {
+          toolName: "Edit",
+          updatedAt: 1,
+          filePath: CWD + "/src/edit.ts",
+          fieldName: "new_string",
+          oldString: "before\n",
+          text: "after\n",
+        },
+      },
+    });
+    await using _panel = await mountPanel();
+    await vi.waitFor(() => expect(renderedFilePaths()).toEqual(["src/edit.ts"]));
+    await expect
+      .element(page.getByText("Tool input; line numbers are relative to this edit."))
+      .toBeVisible();
+    expect(diffPreviewSpy).not.toHaveBeenCalled();
+    expect(getFullThreadDiffSpy).not.toHaveBeenCalled();
+    expect(getTurnDiffFileContentsSpy).not.toHaveBeenCalled();
   });
 
   it("does not query the patch while the panel is closed", async () => {

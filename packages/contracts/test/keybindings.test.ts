@@ -69,6 +69,8 @@ it.effect("parses the ported shortcut commands", () =>
       "diff.close",
       "modelPicker.toggle",
       "composer.effort",
+      "composer.increaseEffort",
+      "composer.decreaseEffort",
       "composer.mode",
       "composer.workspace",
       "composer.branch",
@@ -87,7 +89,7 @@ it.effect("parses the ported shortcut commands", () =>
     }
     assert.deepEqual(
       [...COMPOSER_CONTROL_KEYBINDING_COMMANDS, ...COMPOSER_SEND_KEYBINDING_COMMANDS],
-      commands.slice(4, 11),
+      commands.slice(4, 13),
     );
     assert.deepEqual(
       [...NAVIGATION_KEYBINDING_COMMANDS],

@@ -28,6 +28,8 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { render } from "vitest-browser-react";
 
 import { useComposerDraftStore } from "../composerDraftStore";
+import { usePromptStashStore } from "../promptStashStore";
+import { useComposerContextStore } from "../composerContextStore";
 import { closeThreadFind, useThreadFindStore } from "./chat/threadFindStore";
 import { isThreadErrorDismissedForSession } from "./chat/ThreadErrorBanner";
 import type { ComposerImageAttachmentResult } from "./ChatView.heicImage";
@@ -4551,6 +4553,45 @@ describe("ChatView timeline estimator parity (full app)", () => {
       }
     });
 
+    it("stashes and restores a text attachment with a fresh-context prompt", async () => {
+      usePromptStashStore.setState({ entries: [] });
+      const mounted = await mountChatView({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: createSnapshotForTargetUser({
+          targetMessageId: "msg-stash" as MessageId,
+          targetText: "previous conversation",
+        }),
+      });
+      try {
+        await typeComposerPrompt("/clear");
+        await userEvent.keyboard("{Enter}");
+        await expectComposerPrompt("");
+        expect(hasTurnStartRequest()).toBe(false);
+        expect(useComposerContextStore.getState().freshContextThreads.has(THREAD_ID)).toBe(true);
+        pickFiles([new File(["example text\n"], "notes.txt", { type: "text/plain" })]);
+        await vi.waitFor(() =>
+          expect(readDraftImages().map((file) => file.name)).toEqual(["notes.txt"]),
+        );
+        await typeComposerPrompt("Review these notes");
+        await page.getByRole("button", { name: "Stashed prompts" }).click();
+        await page.getByRole("menuitem", { name: "Stash prompt", exact: true }).click();
+        await expectComposerPrompt("");
+        expect(readDraftImages()).toEqual([]);
+        expect(usePromptStashStore.getState().entries[0]?.freshContext).toBe(true);
+        await page.getByRole("button", { name: "Stashed prompts" }).click();
+        await page.getByRole("menuitem", { name: "Review these notes", exact: true }).click();
+        await expectComposerPrompt("Review these notes");
+        expect(await readDraftImages()[0]?.file.text()).toBe("example text\n");
+        expect(useComposerContextStore.getState().freshContextThreads.has(THREAD_ID)).toBe(true);
+        expect(usePromptStashStore.getState().entries).toEqual([]);
+        expect(hasTurnStartRequest()).toBe(false);
+      } finally {
+        usePromptStashStore.setState({ entries: [] });
+        useComposerContextStore.getState().setFreshContext(THREAD_ID, false);
+        await mounted.cleanup();
+      }
+    });
+
     it("reports a file type it cannot attach", async () => {
       const mounted = await mountChatView({
         viewport: DEFAULT_VIEWPORT,
@@ -4562,9 +4603,9 @@ describe("ChatView timeline estimator parity (full app)", () => {
 
       try {
         await waitForComposerEditor();
-        pickFiles([new File(["x"], "notes.txt", { type: "text/plain" })]);
+        pickFiles([new File(["PK\x00"], "archive.zip", { type: "application/zip" })]);
         await expect
-          .element(page.getByText("Unsupported file type for 'notes.txt'", { exact: false }))
+          .element(page.getByText("Unsupported file type for 'archive.zip'", { exact: false }))
           .toBeVisible();
         expect(readDraftImages()).toEqual([]);
       } finally {
@@ -4582,7 +4623,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
         await expect.element(page.getByText("What should this change cover?")).toBeVisible();
         // The composer's footer strip stays mounted with display:none while a question is open.
         const attachButton = document.querySelector<HTMLElement>(
-          "button[aria-label='Attach images or PDFs']",
+          "button[aria-label='Attach files']",
         );
         expect(attachButton?.checkVisibility() ?? false).toBe(false);
       } finally {
@@ -4973,7 +5014,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
         const file = new File(["x"], "late.png", { type: "image/png" });
         dispatchFileDragEvent(await waitForComposerEditor(), "drop", file);
         await expect
-          .element(page.getByText("Attach images after the revert finishes."))
+          .element(page.getByText("Attach files after the revert finishes."))
           .toBeVisible();
         expect(countPreparingComposerImages(THREAD_ID)).toBe(0);
 

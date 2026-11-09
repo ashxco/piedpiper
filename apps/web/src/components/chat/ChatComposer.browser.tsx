@@ -1,3 +1,4 @@
+import { useComposerDraftStore } from "../../composerDraftStore";
 import "../../index.css";
 
 import { type ServerProvider, ThreadId } from "@piedpiper/contracts";
@@ -510,4 +511,28 @@ describe("ChatComposer footer", () => {
       await screen.unmount();
     }
   });
+});
+
+it("keeps the editor and actions reachable in a 400 by 360 window", async () => {
+  await page.viewport(400, 360);
+  useComposerDraftStore.getState().setPrompt(THREAD_ID, "Long prompt\n".repeat(80));
+  const mounted = await mountComposer(400, {
+    freshContext: true,
+    onCancelFreshContext: () => {},
+    onStashPrompt: () => {},
+    onRestorePrompt: () => {},
+    onStashError: () => {},
+  });
+  try {
+    const editor = document.querySelector<HTMLElement>('[role="textbox"]')!;
+    const form = document.querySelector<HTMLElement>("[data-chat-composer-form]")!;
+    expect(editor.getBoundingClientRect().height).toBeLessThanOrEqual(92);
+    expect(form.getBoundingClientRect().height).toBeLessThan(300);
+    expectRectInside(actionsCluster(), footer(), "actions");
+    expect(footer().getBoundingClientRect().bottom).toBeLessThanOrEqual(360);
+  } finally {
+    await mounted.cleanup();
+    useComposerDraftStore.getState().setPrompt(THREAD_ID, "");
+    await page.viewport(DEFAULT_TEST_VIEWPORT.width, DEFAULT_TEST_VIEWPORT.height);
+  }
 });

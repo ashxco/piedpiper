@@ -29,11 +29,12 @@ import {
   deriveComposerSendState,
   deriveQaCardMessages,
   hasServerAcknowledgedLocalDispatch,
-  buildComposerPdfAttachment,
   chatEmptyStateHeading,
   isComposerMenuOpen,
   dropAsyncAnswerMessagesWithQaCards,
   isComposerPdfFile,
+  isComposerTextFile,
+  buildComposerFileAttachment,
   isPathSuggestionCurrent,
   resolveCompactDisabledReason,
   shouldRestoreComposerAfterFailedSend,
@@ -1777,7 +1778,7 @@ describe("PDF composer attachments", () => {
   });
 
   it("gives a draft PDF no preview and a real PDF type", () => {
-    const untyped = buildComposerPdfAttachment(
+    const untyped = buildComposerFileAttachment(
       "pdf-1",
       new File(["%PDF-1.7"], "spec.pdf", { type: "" }),
     );
@@ -1790,7 +1791,7 @@ describe("PDF composer attachments", () => {
   it("sends a PDF as a file attachment and an image as an image", async () => {
     const attachments = await buildTurnStartImageAttachments(
       [
-        buildComposerPdfAttachment("pdf-1", pdfFile),
+        buildComposerFileAttachment("pdf-1", pdfFile),
         {
           type: "image",
           id: "image-1",
@@ -1825,7 +1826,7 @@ describe("PDF composer attachments", () => {
     const message = buildOptimisticUserMessage({
       id: MessageId.makeUnsafe("message-pdf"),
       text: "read this",
-      images: [buildComposerPdfAttachment("pdf-1", pdfFile)],
+      images: [buildComposerFileAttachment("pdf-1", pdfFile)],
       createdAt: "2026-01-01T00:00:00.000Z",
     });
     expect(message.attachments).toEqual([
@@ -1852,7 +1853,7 @@ describe("PDF composer attachments", () => {
   it("keeps a PDF out of persisted draft storage", async () => {
     await expect(
       serializeComposerImages(
-        [buildComposerPdfAttachment("pdf-1", pdfFile)],
+        [buildComposerFileAttachment("pdf-1", pdfFile)],
         [],
         async () => "data:;base64,AA==",
       ),
@@ -2081,4 +2082,18 @@ describe("chatEmptyStateHeading", () => {
     );
     expect(chatEmptyStateHeading([])).toBe("Let's pipe some code in");
   });
+});
+
+it("normalizes source files to text attachments for upload and optimistic display", async () => {
+  const file = new File(["const x = 1;"], "source.ts", { type: "application/typescript" });
+  expect(isComposerTextFile(file)).toBe(true);
+  expect(isComposerTextFile({ name: "binary.exe", type: "application/octet-stream" })).toBe(false);
+  const attachment = buildComposerFileAttachment("text", file);
+  expect(attachment.file.type).toBe("text/plain");
+  expect(attachment.previewUrl).toBe("");
+  const upload = await buildTurnStartImageAttachments(
+    [attachment],
+    async () => "data:text/plain;base64,YQ==",
+  );
+  expect(upload[0]).toMatchObject({ type: "file", mimeType: "text/plain", name: "source.ts" });
 });

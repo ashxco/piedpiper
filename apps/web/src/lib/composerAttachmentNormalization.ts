@@ -162,7 +162,7 @@ export function hydrateImagesFromPersisted(
         name: attachment.name,
         mimeType: attachment.mimeType,
         sizeBytes: attachment.sizeBytes,
-        previewUrl: attachment.dataUrl,
+        previewUrl: attachment.mimeType.startsWith("image/") ? attachment.dataUrl : "",
         file,
       } satisfies ComposerImageAttachment,
     ];

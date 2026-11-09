@@ -20,23 +20,38 @@ const snapshot: TerminalSessionSnapshot = {
 };
 const disposals: Array<() => void> = [];
 
-function setup() {
+function setup(visible = false) {
   const pending: Array<(value: TerminalSessionSnapshot) => void> = [];
   const open = vi.fn(
     () => new Promise<TerminalSessionSnapshot>((resolve) => pending.push(resolve)),
   );
   const write = vi.fn();
   const onSessionExited = vi.fn();
+  const resize = vi.fn().mockResolvedValue(undefined);
+  const detach = vi.fn().mockResolvedValue(undefined);
+  const terminal = {
+    cols: 80,
+    rows: 24,
+    write,
+    clear: vi.fn(),
+    element: { isConnected: visible },
+    buffer: { active: { viewportY: 0, baseY: 0 } },
+    scrollToBottom: vi.fn(),
+    resize: vi.fn((cols: number, rows: number) => {
+      terminal.cols = cols;
+      terminal.rows = rows;
+    }),
+  };
   const owner = connectTerminalSession(
-    { cols: 80, rows: 24, write, clear: vi.fn() } as unknown as Terminal,
-    { fit: vi.fn() } as unknown as FitAddon,
-    {} as HTMLElement,
-    { terminal: { open } } as unknown as NativeApi,
+    terminal as unknown as Terminal,
+    { fit: vi.fn(), proposeDimensions: () => ({ cols: 100, rows: 30 }) } as unknown as FitAddon,
+    { clientWidth: 800, clientHeight: 300 } as HTMLElement,
+    { terminal: { open, resize, detach } } as unknown as NativeApi,
     { threadId, terminalId: "default", cwd: "/tmp", readAutoFocus: () => false, onSessionExited },
     vi.fn(),
   );
   disposals.push(owner.dispose);
-  return { owner, pending, open, write, onSessionExited };
+  return { owner, pending, open, write, onSessionExited, resize, detach, terminal };
 }
 
 beforeEach(() => {
@@ -55,6 +70,28 @@ afterEach(() => {
 });
 
 describe("terminal session ownership", () => {
+  it("measures its own viewport but renders the shared server grid", async () => {
+    const { owner, pending, resize, detach, terminal } = setup(true);
+    pending[0]!({ ...snapshot, cols: 60, rows: 20 });
+    await Promise.resolve();
+    owner.fit();
+    expect(resize).toHaveBeenCalledWith(expect.objectContaining({ cols: 100, rows: 30 }));
+    expect([terminal.cols, terminal.rows]).toEqual([60, 20]);
+    useTerminalStateStore.getState().recordTerminalEvent({
+      type: "activity",
+      threadId,
+      terminalId: "default",
+      createdAt: snapshot.updatedAt,
+      sequence: 3,
+      hasRunningSubprocess: false,
+      cols: 90,
+      rows: 25,
+    });
+    expect([terminal.cols, terminal.rows]).toEqual([90, 25]);
+    owner.dispose();
+    expect(detach).toHaveBeenCalledWith(expect.objectContaining({ viewerId: expect.any(String) }));
+  });
+
   it("ignores a pending open after disposal and removes the reconnect subscription", async () => {
     const { owner, pending, open, write } = setup();
     owner.dispose();

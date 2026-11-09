@@ -38,6 +38,8 @@ import {
 } from "./checkpointing/wireCheckpointFiles";
 import { ServerConfig } from "./config";
 import { cloneGitRepository } from "./git/gitClone";
+import { readGitCommitHistory } from "./git/gitCommitHistory";
+import { syncWorktreeBranches } from "./git/syncWorktreeBranches";
 import { resolveGitHubCliStatus } from "./git/gitHubCliStatus";
 import { GitCore } from "./git/Services/GitCore";
 import { GitHubCli } from "./git/Services/GitHubCli";
@@ -120,6 +122,13 @@ const WsRpcLayer = WsRpcGroup.toLayer(
     const pathService = yield* Path.Path;
     const gitHubCli = yield* GitHubCli;
     const terminalManager = yield* TerminalManager;
+    const connectedClients = (yield* RpcServer.Protocol).clientIds;
+    const detachDisconnectedTerminalClient = (clientId: number) =>
+      connectedClients.pipe(
+        Effect.flatMap((clients) =>
+          clients.has(clientId) ? Effect.void : terminalManager.detachClient(clientId),
+        ),
+      );
     const providerRegistry = yield* ProviderRegistry;
     const providerService = yield* ProviderService;
     const claudeSlashCommands = yield* ClaudeSlashCommands;
@@ -324,7 +333,10 @@ const WsRpcLayer = WsRpcGroup.toLayer(
           ORCHESTRATION_WS_METHODS.replayEvents,
           Stream.runCollect(
             orchestrationEngine.readEvents(
-              clamp(input.fromSequenceExclusive, { maximum: Number.MAX_SAFE_INTEGER, minimum: 0 }),
+              clamp(input.fromSequenceExclusive, {
+                maximum: Number.MAX_SAFE_INTEGER,
+                minimum: 0,
+              }),
             ),
           ).pipe(
             Effect.map((events) => Array.from(events, capEventCheckpointFilesForWire)),
@@ -643,11 +655,29 @@ const WsRpcLayer = WsRpcGroup.toLayer(
           { "rpc.aggregate": "workspace" },
         ),
       [WS_METHODS.gitStatus]: (input) =>
-        observeRpcEffect(WS_METHODS.gitStatus, gitManager.status(input), {
-          "rpc.aggregate": "git",
-        }),
+        observeRpcEffect(
+          WS_METHODS.gitStatus,
+          gitManager.status(input).pipe(
+            Effect.tap((status) =>
+              syncWorktreeBranches(git, orchestrationEngine, status).pipe(
+                Effect.catchCause((cause) =>
+                  Effect.logWarning("Could not synchronize worktree branches", {
+                    cause: Cause.pretty(cause),
+                  }),
+                ),
+              ),
+            ),
+          ),
+          {
+            "rpc.aggregate": "git",
+          },
+        ),
       [WS_METHODS.gitDiffPreview]: (input) =>
         observeRpcEffect(WS_METHODS.gitDiffPreview, git.diffPreview(input), {
+          "rpc.aggregate": "git",
+        }),
+      [WS_METHODS.gitListCommits]: (input) =>
+        observeRpcEffect(WS_METHODS.gitListCommits, readGitCommitHistory(git, input), {
           "rpc.aggregate": "git",
         }),
       [WS_METHODS.gitPull]: (input) =>
@@ -767,34 +797,55 @@ const WsRpcLayer = WsRpcGroup.toLayer(
           gitGitHubCreateRepoEffect(input, { git, gitHubCli }, GitCommandError),
           { "rpc.aggregate": "git" },
         ),
-      [WS_METHODS.terminalOpen]: (input) =>
-        observeRpcEffect(WS_METHODS.terminalOpen, terminalManager.open(input), {
-          "rpc.aggregate": "terminal",
-        }),
+      [WS_METHODS.terminalOpen]: (input, { clientId }) =>
+        observeRpcEffect(
+          WS_METHODS.terminalOpen,
+          terminalManager
+            .open(input, clientId)
+            .pipe(Effect.ensuring(detachDisconnectedTerminalClient(clientId))),
+          {
+            "rpc.aggregate": "terminal",
+          },
+        ),
       [WS_METHODS.terminalWrite]: (input) =>
         observeRpcEffect(WS_METHODS.terminalWrite, terminalManager.write(input), {
           "rpc.aggregate": "terminal",
         }),
-      [WS_METHODS.terminalResize]: (input) =>
-        observeRpcEffect(WS_METHODS.terminalResize, terminalManager.resize(input), {
-          "rpc.aggregate": "terminal",
-        }),
+      [WS_METHODS.terminalResize]: (input, { clientId }) =>
+        observeRpcEffect(
+          WS_METHODS.terminalResize,
+          terminalManager
+            .resize(input, clientId)
+            .pipe(Effect.ensuring(detachDisconnectedTerminalClient(clientId))),
+          {
+            "rpc.aggregate": "terminal",
+          },
+        ),
+      [WS_METHODS.terminalDetach]: (input, { clientId }) => terminalManager.detach(input, clientId),
       [WS_METHODS.terminalClear]: (input) =>
         observeRpcEffect(WS_METHODS.terminalClear, terminalManager.clear(input), {
           "rpc.aggregate": "terminal",
         }),
-      [WS_METHODS.terminalRestart]: (input) =>
-        observeRpcEffect(WS_METHODS.terminalRestart, terminalManager.restart(input), {
-          "rpc.aggregate": "terminal",
-        }),
+      [WS_METHODS.terminalRestart]: (input, { clientId }) =>
+        observeRpcEffect(
+          WS_METHODS.terminalRestart,
+          terminalManager
+            .restart(input, clientId)
+            .pipe(Effect.ensuring(detachDisconnectedTerminalClient(clientId))),
+          {
+            "rpc.aggregate": "terminal",
+          },
+        ),
       [WS_METHODS.terminalClose]: (input) =>
         observeRpcEffect(WS_METHODS.terminalClose, terminalManager.close(input), {
           "rpc.aggregate": "terminal",
         }),
-      [WS_METHODS.subscribeTerminalEvents]: (_input) =>
+      [WS_METHODS.subscribeTerminalEvents]: (_input, { clientId }) =>
         observeRpcStream(
           WS_METHODS.subscribeTerminalEvents,
-          terminalOutputStream(terminalManager.subscribe),
+          terminalOutputStream(terminalManager.subscribe).pipe(
+            Stream.ensuring(detachDisconnectedTerminalClient(clientId)),
+          ),
           { "rpc.aggregate": "terminal" },
         ),
       [WS_METHODS.subscribeTerminalMetadata]: (_input) =>
@@ -908,22 +959,38 @@ const WS_RPC_SERVER_OPTIONS = {
 
 export const websocketRpcRouteLayer = Layer.unwrap(
   Effect.gen(function* () {
-    const rpcWebSocketHttpEffect = yield* Effect.gen(function* () {
-      const { protocol, httpEffect } = yield* RpcServer.makeProtocolWithHttpEffectWebsocket;
-      yield* RpcServer.make(WsRpcGroup, WS_RPC_SERVER_OPTIONS).pipe(
-        Effect.provideService(RpcServer.Protocol, withOutputWindow(protocol)),
-        Effect.forkScoped,
+    const { protocol, httpEffect: rpcWebSocketHttpEffect } =
+      yield* RpcServer.makeProtocolWithHttpEffectWebsocket.pipe(
+        Effect.provide(RpcSerialization.layerJson),
       );
-      // @effect-diagnostics-next-line returnEffectInGen:off
-      return httpEffect;
-    }).pipe(
+    const terminalManager = yield* TerminalManager;
+    const disconnects = yield* Queue.unbounded<number>();
+    // RPC cancellation may need to release a terminal lock before its cleanup can finish.
+    yield* Queue.take(protocol.disconnects).pipe(
+      Effect.tap((clientId) =>
+        terminalManager.detachClient(clientId).pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("Failed to detach terminal client", cause),
+          ),
+          Effect.forkScoped,
+        ),
+      ),
+      Effect.flatMap((clientId) => Queue.offer(disconnects, clientId)),
+      Effect.forever,
+      Effect.forkScoped,
+    );
+    yield* RpcServer.make(WsRpcGroup, WS_RPC_SERVER_OPTIONS).pipe(
+      Effect.provideService(RpcServer.Protocol, withOutputWindow({ ...protocol, disconnects })),
       Effect.provide(
         Layer.mergeAll(
-          // Request fibers run in the handlers' captured context, so the reporter is provided there.
-          WsRpcLayer.pipe(Layer.provide(wsDefectReporterLayer)),
+          WsRpcLayer.pipe(
+            Layer.provide(wsDefectReporterLayer),
+            Layer.provide(Layer.succeed(RpcServer.Protocol, protocol)),
+          ),
           RpcSerialization.layerJson,
         ),
       ),
+      Effect.forkScoped,
     );
     return HttpRouter.add(
       "GET",

@@ -39,6 +39,7 @@ import {
   type ProviderServiceShape,
 } from "../../provider/Services/ProviderService.ts";
 import { GitCore, type GitCoreShape } from "../../git/Services/GitCore.ts";
+import { syncWorktreeBranches } from "../../git/syncWorktreeBranches.ts";
 import { GitHubCli, type GitHubCliShape } from "../../git/Services/GitHubCli.ts";
 import { TextGeneration, type TextGenerationShape } from "../../git/Services/TextGeneration.ts";
 import { OrchestrationEngineLive } from "./OrchestrationEngine.ts";
@@ -373,6 +374,167 @@ describe("ProviderCommandReactor", () => {
       drain,
     };
   }
+
+  it("starts a fresh provider session while retaining the chat history", async () => {
+    const harness = await createHarness();
+    const threadId = ThreadId.makeUnsafe("thread-1");
+    const send = (index: number, freshContext = false) =>
+      Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.makeUnsafe(`fresh-${index}`),
+          threadId,
+          message: {
+            messageId: asMessageId(`fresh-message-${index}`),
+            role: "user",
+            text: `Message ${index}`,
+            attachments: [],
+          },
+          freshContext,
+          runtimeMode: "approval-required",
+          interactionMode: "default",
+          createdAt: new Date().toISOString(),
+        }),
+      );
+    await send(1);
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    const before = (await Effect.runPromise(harness.engine.getReadModel())).threads.get(threadId)!;
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.makeUnsafe("fresh-ready"),
+        threadId,
+        session: { ...before.session!, status: "ready", activeTurnId: null },
+        createdAt: new Date().toISOString(),
+      }),
+    );
+    await send(2, true);
+    await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+    expect(harness.startSession.mock.calls[1]?.[1]).toMatchObject({
+      resumeCursor: null,
+      freshContext: true,
+    });
+    const after = (await Effect.runPromise(harness.engine.getReadModel())).threads.get(threadId)!;
+    expect(after.messages.map((message) => message.text)).toEqual(["Message 1", "Message 2"]);
+    expect(after.activities.some((activity) => activity.kind === "session.context-reset")).toBe(
+      true,
+    );
+    const rejected = await Effect.runPromiseExit(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.makeUnsafe("fresh-busy"),
+        threadId,
+        message: {
+          messageId: asMessageId("fresh-message-busy"),
+          role: "user",
+          text: "Too soon",
+          attachments: [],
+        },
+        freshContext: true,
+        runtimeMode: "approval-required",
+        interactionMode: "default",
+        createdAt: new Date().toISOString(),
+      }),
+    );
+    expect(Exit.isFailure(rejected)).toBe(true);
+  });
+
+  it("does not apply branch metadata from a previous worktree", async () => {
+    const harness = await createHarness();
+    const threadId = ThreadId.makeUnsafe("thread-1");
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.meta.update",
+        commandId: CommandId.makeUnsafe("move-worktree"),
+        threadId,
+        branch: "main",
+        worktreePath: harness.projectWorktreePath,
+      }),
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.meta.update",
+        commandId: CommandId.makeUnsafe("stale-worktree"),
+        threadId,
+        expectedBranch: "main",
+        expectedWorktreePath: harness.projectWorkspaceRoot,
+        branch: "stale",
+      }),
+    );
+    const thread = (await Effect.runPromise(harness.engine.getReadModel())).threads.get(threadId)!;
+    expect(thread.branch).toBe("main");
+    expect(thread.worktreePath).toBe(harness.projectWorktreePath);
+  });
+
+  it("synchronizes archived worktree chats only after confirming the observed branch", async () => {
+    const harness = await createHarness();
+    const threadId = ThreadId.makeUnsafe("thread-1");
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.meta.update",
+        commandId: CommandId.makeUnsafe("sync-worktree"),
+        threadId,
+        branch: "old",
+        worktreePath: harness.projectWorktreePath,
+      }),
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.archive",
+        commandId: CommandId.makeUnsafe("archive-sync-worktree"),
+        threadId,
+      }),
+    );
+    const status = {
+      isRepo: true,
+      hasOriginRemote: false,
+      isDefaultBranch: false,
+      branch: "new",
+      hasWorkingTreeChanges: false,
+      workingTree: {
+        rootPath: harness.projectWorktreePath,
+        files: [],
+        insertions: 0,
+        deletions: 0,
+      },
+      hasUpstream: false,
+      aheadCount: 0,
+      behindCount: 0,
+      pr: null,
+    };
+    const execute = vi.fn<GitCoreShape["execute"]>(() =>
+      Effect.succeed({
+        code: 0,
+        stdout: "changed-again\n",
+        stderr: "",
+        stdoutTruncated: false,
+        stderrTruncated: false,
+      }),
+    );
+    const run = () =>
+      Effect.runPromise(
+        syncWorktreeBranches({ execute }, harness.engine, status).pipe(
+          Effect.provide(NodeServices.layer),
+        ),
+      );
+    await run();
+    expect(
+      (await Effect.runPromise(harness.engine.getReadModel())).threads.get(threadId)?.branch,
+    ).toBe("old");
+    execute.mockReturnValue(
+      Effect.succeed({
+        code: 0,
+        stdout: "new\n",
+        stderr: "",
+        stdoutTruncated: false,
+        stderrTruncated: false,
+      }),
+    );
+    await run();
+    const thread = (await Effect.runPromise(harness.engine.getReadModel())).threads.get(threadId)!;
+    expect(thread.branch).toBe("new");
+    expect(thread.archivedAt).not.toBeNull();
+  });
 
   it("reacts to thread.turn.start by ensuring session and sending provider turn", async () => {
     const harness = await createHarness();

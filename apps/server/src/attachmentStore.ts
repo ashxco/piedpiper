@@ -10,7 +10,7 @@ import {
 import { inferImageExtension, SAFE_IMAGE_FILE_EXTENSIONS } from "./imageMime.ts";
 import { pdfAttachmentRelativePath } from "./orchestration/pdfAttachmentIntake.ts";
 
-const ATTACHMENT_FILENAME_EXTENSIONS = [...SAFE_IMAGE_FILE_EXTENSIONS, ".pdf", ".bin"];
+const ATTACHMENT_FILENAME_EXTENSIONS = [...SAFE_IMAGE_FILE_EXTENSIONS, ".pdf", ".txt", ".bin"];
 const ATTACHMENT_ID_THREAD_SEGMENT_MAX_CHARS = 80;
 const ATTACHMENT_ID_THREAD_SEGMENT_PATTERN = "[a-z0-9_]+(?:-[a-z0-9_]+)*";
 const ATTACHMENT_ID_UUID_PATTERN = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
@@ -64,7 +64,9 @@ export function attachmentRelativePath(attachment: ChatAttachment | ChatFileAtta
       return `${attachment.id}${extension}`;
     }
     case "file":
-      return pdfAttachmentRelativePath(attachment.id);
+      return attachment.mimeType === "text/plain"
+        ? `${attachment.id}.txt`
+        : pdfAttachmentRelativePath(attachment.id);
   }
 }
 

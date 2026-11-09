@@ -28,7 +28,34 @@ export function connectTerminalSession(
   clearSelectionAction: () => void,
 ) {
   const { threadId, terminalId, cwd, runtimeEnv } = options;
+  const viewerId = crypto.randomUUID();
   let disposed = false;
+  let lastMeasured: { cols: number; rows: number } | undefined;
+  const measure = () =>
+    fitAddon.proposeDimensions() ?? { cols: terminal.cols, rows: terminal.rows };
+  const detach = () => {
+    void api.terminal.detach?.({ threadId, terminalId, viewerId }).catch(() => undefined);
+  };
+  const applyGrid = (grid: { cols?: number | undefined; rows?: number | undefined }) => {
+    if (grid.cols && grid.rows && (terminal.cols !== grid.cols || terminal.rows !== grid.rows)) {
+      const atBottom = terminal.buffer.active.viewportY >= terminal.buffer.active.baseY;
+      terminal.resize(grid.cols, grid.rows);
+      if (atBottom) terminal.scrollToBottom();
+    }
+  };
+  const fit = (onlyIfChanged = false) => {
+    if (disposed) return;
+    if (!canFitTerminal(terminal, mount)) {
+      if (lastMeasured) detach();
+      lastMeasured = undefined;
+      return;
+    }
+    const size = measure();
+    if (onlyIfChanged && size.cols === lastMeasured?.cols && size.rows === lastMeasured?.rows)
+      return;
+    lastMeasured = size;
+    void api.terminal.resize({ threadId, terminalId, viewerId, ...size }).catch(() => undefined);
+  };
   let activeTerminal: Terminal | null = terminal;
   let hasHandledExit = false;
   let lastAppliedTerminalEventId = 0;
@@ -55,6 +82,7 @@ export function connectTerminalSession(
     }
 
     if (event.type === "activity") {
+      applyGrid(event);
       return;
     }
 
@@ -66,6 +94,7 @@ export function connectTerminalSession(
     if (event.type === "started" || event.type === "restarted") {
       hasHandledExit = false;
       clearSelectionAction();
+      applyGrid(event.snapshot);
       writeTerminalSnapshot(currentTerminal, event.snapshot);
       return;
     }
@@ -153,17 +182,24 @@ export function connectTerminalSession(
     const currentTerminal = activeTerminal;
     if (!currentTerminal) return;
     // A hidden viewport keeps and sends its last real size.
-    if (canFitTerminal(currentTerminal, mount)) fitAddon.fit();
+    const visible = canFitTerminal(currentTerminal, mount);
+    const size = visible ? measure() : { cols: currentTerminal.cols, rows: currentTerminal.rows };
+    lastMeasured = visible ? size : undefined;
     const snapshot = await api.terminal.open({
       threadId,
       terminalId,
       cwd,
-      cols: currentTerminal.cols,
-      rows: currentTerminal.rows,
+      ...size,
+      ...(visible ? { viewerId } : {}),
       ...(runtimeEnv ? { env: runtimeEnv } : {}),
       ...(resume ? { resume: true } : {}),
     });
-    if (disposed || openId !== latestOpenId) return;
+    if (disposed) {
+      detach();
+      return;
+    }
+    if (openId !== latestOpenId) return;
+    applyGrid(snapshot);
     useTerminalTabStateStore.getState().applySnapshot(snapshot);
     if (resume) clearSelectionAction();
     writeTerminalSnapshot(currentTerminal, snapshot);
@@ -216,10 +252,12 @@ export function connectTerminalSession(
 
   void openTerminal({ resume: false });
   return {
+    fit,
     dispose() {
       if (disposed) return;
       disposed = true;
       activeTerminal = null;
+      detach();
       unsubscribeTerminalEvents();
       if (resumeTimer !== null) window.clearTimeout(resumeTimer);
       if (exitTimer !== null) window.clearTimeout(exitTimer);

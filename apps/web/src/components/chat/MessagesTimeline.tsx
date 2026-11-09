@@ -165,6 +165,7 @@ interface MessagesTimelineProps {
   expandedWorkGroups: Record<string, boolean>;
   onToggleWorkGroup: (groupId: string) => void;
   onOpenTurnDiff: (turnId: TurnId, filePath?: string) => void;
+  onOpenToolDiff?: ((toolId: string, stream: ToolInputStream) => void) | undefined;
   revertTurnCountByUserMessageId: Map<MessageId, number>;
   onRevertUserMessage: (messageId: MessageId) => void;
   isRevertingCheckpoint: boolean;
@@ -207,6 +208,7 @@ interface TimelineRowSharedState {
   onImageExpand: (preview: ExpandedImagePreview) => void;
   onToggleWorkGroup: (groupId: string) => void;
   onOpenTurnDiff: (turnId: TurnId, filePath?: string) => void;
+  onOpenToolDiff?: ((toolId: string, stream: ToolInputStream) => void) | undefined;
   onRevertUserMessage: (messageId: MessageId) => void;
   onTimelineImageLoad: () => void;
   onToggleAllDirectories: (turnId: TurnId, currentlyExpanded: boolean) => void;
@@ -259,6 +261,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   expandedWorkGroups,
   onToggleWorkGroup,
   onOpenTurnDiff,
+  onOpenToolDiff,
   revertTurnCountByUserMessageId,
   onRevertUserMessage,
   isRevertingCheckpoint,
@@ -581,6 +584,10 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   const stableOnImageExpand = useStableCallback(onImageExpand);
   const stableOnToggleWorkGroup = useStableCallback(onToggleWorkGroup);
   const stableOnOpenTurnDiff = useStableCallback(onOpenTurnDiff);
+  const stableOnOpenToolDiff = useStableCallback((toolId: string, stream: ToolInputStream) =>
+    onOpenToolDiff?.(toolId, stream),
+  );
+  const hasOpenToolDiff = onOpenToolDiff !== undefined;
   const stableOnRevertUserMessage = useStableCallback(onRevertUserMessage);
   const stableOnRunShellCommand = useStableCallback(onRunShellCommand ?? NOOP_RUN_SHELL_COMMAND);
   const hasRunShellCommand = onRunShellCommand !== undefined;
@@ -594,6 +601,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       onImageExpand: stableOnImageExpand,
       onToggleWorkGroup: stableOnToggleWorkGroup,
       onOpenTurnDiff: stableOnOpenTurnDiff,
+      onOpenToolDiff: hasOpenToolDiff ? stableOnOpenToolDiff : undefined,
       onRevertUserMessage: stableOnRevertUserMessage,
       onTimelineImageLoad,
       onToggleAllDirectories,
@@ -605,6 +613,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     [
       assistantLabel,
       hasRunShellCommand,
+      hasOpenToolDiff,
+      stableOnOpenToolDiff,
       isToolRowExpanded,
       markdownCwd,
       onTimelineImageLoad,
@@ -2273,7 +2283,8 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
   workspaceRoot?: string | undefined;
 }) {
   const { workEntry, livePreview, showPreviewArea = false, workspaceRoot } = props;
-  const { timestampFormat, isToolRowExpanded, setToolRowExpanded } = useTimelineRowContext();
+  const { timestampFormat, isToolRowExpanded, setToolRowExpanded, onOpenToolDiff } =
+    useTimelineRowContext();
   const { isWorking, activeTurnId } = use(TimelineRowActivityCtx);
   // Lifecycle updates replace the entry id, and with it the row's key.
   const expansionKey = workEntry.providerItemId ?? workEntry.id;
@@ -2289,7 +2300,13 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
     (livePreview.text.length > 0 || (livePreview.oldString?.length ?? 0) > 0);
   if (showPreviewArea && hasPreviewContent) {
     const isStatic = livePreview === workEntry.staticPreview;
-    return <ToolInputCodePreview stream={livePreview} defaultCollapsed={isStatic} />;
+    return (
+      <ToolInputCodePreview
+        stream={livePreview}
+        defaultCollapsed={isStatic}
+        onOpenDiff={onOpenToolDiff ? () => onOpenToolDiff(expansionKey, livePreview) : undefined}
+      />
+    );
   }
 
   const friendlyText = buildFriendlyToolText({ workEntry, workspaceRoot });
@@ -2386,7 +2403,15 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
         <TimelineRowTimestamp createdAt={workEntry.createdAt} timestampFormat={timestampFormat} />
       </div>
       {showExpandedBody ? (
-        <ToolCallExpandedPanel body={expandedBody} workspaceRoot={workspaceRoot} />
+        <ToolCallExpandedPanel
+          body={expandedBody}
+          workspaceRoot={workspaceRoot}
+          onOpenDiff={
+            onOpenToolDiff && expandedBody.preview
+              ? () => onOpenToolDiff(expansionKey, expandedBody.preview!)
+              : undefined
+          }
+        />
       ) : (
         hasChangedFiles &&
         !previewIsChangedFiles &&
@@ -2430,9 +2455,11 @@ function ToolCallExpandedSection(props: { label: string; children: string }) {
 function ToolCallExpandedPanel({
   body,
   workspaceRoot,
+  onOpenDiff,
 }: {
   body: ToolCallExpandedBody;
   workspaceRoot: string | undefined;
+  onOpenDiff?: (() => void) | undefined;
 }) {
   return (
     <div
@@ -2449,7 +2476,13 @@ function ToolCallExpandedPanel({
           {withVisibleControlCharacters(formatToolInputJson(body.input), { keepLineBreaks: true })}
         </ToolCallExpandedSection>
       )}
-      {body.preview && <ToolInputCodePreview stream={body.preview} defaultCollapsed={false} />}
+      {body.preview && (
+        <ToolInputCodePreview
+          stream={body.preview}
+          defaultCollapsed={false}
+          onOpenDiff={onOpenDiff}
+        />
+      )}
       {body.detail && (
         <ToolCallExpandedSection label="Detail">
           {withVisibleControlCharacters(body.detail, { keepLineBreaks: true })}

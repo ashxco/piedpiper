@@ -1,3 +1,6 @@
+import { ComposerStashMenu } from "./ComposerStashMenu";
+import type { PromptStashEntry } from "../../promptStashStore";
+import { resolveComposerEffortChange } from "../../lib/composerEffort";
 import {
   type ApprovalRequestId,
   type ModelSelection,
@@ -26,7 +29,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { BotIcon, ListTodoIcon } from "lucide-react";
+import { BotIcon, ListTodoIcon, XIcon } from "lucide-react";
 import { shortcutLabelForCommand } from "~/keybindings";
 import { useServerKeybindings } from "~/rpc/serverState";
 import { cn, newCommandId } from "~/lib/utils";
@@ -55,7 +58,7 @@ import type {
 } from "../../session-logic";
 import { formatWorkingTimer } from "../../session-logic";
 import type { SessionPhase } from "../../types";
-import type { ComposerImageAttachment } from "../../composerDraftStore";
+import { useComposerDraftStore, type ComposerImageAttachment } from "../../composerDraftStore";
 import type { TerminalContextDraft } from "../../lib/terminalContext";
 import type { ComposerProviderState } from "./composerProviderRegistry";
 import type { ComposerCommandItem } from "./ComposerCommandMenu";
@@ -187,6 +190,8 @@ const WorkingStatusLabel = memo(function WorkingStatusLabel(props: {
 export type { ChatComposerControl };
 
 export interface ChatComposerHandle {
+  stepEffort: (direction: 1 | -1) => boolean;
+  openStash: () => void;
   /** Opens a footer control's menu (the compact menu in compact layout); false when it is not shown. */
   openControl: (control: ChatComposerControl) => boolean;
   /** Routes a drop from outside the composer (the chat column) like a drop on the composer. */
@@ -197,6 +202,12 @@ export interface ChatComposerHandle {
 }
 
 export interface ChatComposerProps {
+  onStashPrompt?: (() => void) | undefined;
+  onRestorePrompt?: ((entry: PromptStashEntry) => void) | undefined;
+  onStashError?: ((error: unknown) => void) | undefined;
+  isStashingPrompt?: boolean | undefined;
+  freshContext?: boolean;
+  onCancelFreshContext?: () => void;
   ref?: Ref<ChatComposerHandle>;
   // Thread/project identity
   threadId: ThreadId;
@@ -427,6 +438,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     activePlan,
     sidebarProposedPlan,
     onSend,
+    freshContext,
+    onStashPrompt,
+    onRestorePrompt,
+    onStashError,
+    isStashingPrompt,
+    onCancelFreshContext,
     onInterrupt,
     onImplementPlanInNewThread,
     resolvedTheme,
@@ -536,6 +553,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const modelShortcutLabel = shortcutLabelForCommand(keybindings, "modelPicker.toggle");
   const effortShortcutLabel = shortcutLabelForCommand(keybindings, "composer.effort");
   const modeShortcutLabel = shortcutLabelForCommand(keybindings, "composer.mode");
+  const [stashOpen, setStashOpen] = useState(false);
   const [openMenu, setOpenMenu] = useState<ChatComposerOpenMenu | null>(null);
   // Stable per-menu handlers keep memoized pickers (TraitsPicker) from re-rendering per keystroke.
   const [menuOpenChangeHandlers] = useState(() =>
@@ -766,6 +784,26 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const footerControlsShown =
     !activePendingApproval && !activePendingUserInput && !(missingCwd && projectId);
   useImperativeHandle(ref, () => ({
+    openStash: () => {
+      if (footerControlsShown) setStashOpen(true);
+    },
+    stepEffort: (direction) => {
+      if (!footerControlsShown) return false;
+      const currentPrompt = readComposerThreadPrompt(threadId);
+      const change = resolveComposerEffortChange({
+        ...traitsInput,
+        prompt: currentPrompt,
+        change: { direction },
+      });
+      if (!change) return false;
+      useComposerDraftStore
+        .getState()
+        .setProviderModelOptions(threadId, selectedProvider, change.modelOptions, {
+          persistSticky: true,
+        });
+      if (change.prompt !== currentPrompt) onTraitsPromptChange(change.prompt);
+      return true;
+    },
     openControl: (control) => {
       // A second modelPicker.toggle press closes the open picker.
       if (control === "model" && openMenu === "model") {
@@ -808,8 +846,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       {/* Input bar */}
       <div
         className={cn(
-          "px-3 pb-6 sm:px-5 sm:pb-8",
-          isWorking ? "pt-3 sm:pt-4" : "pt-[24px] sm:pt-[26px]",
+          "px-3 pb-6 sm:px-5 sm:pb-8 [@media(max-height:34rem)]:pb-2",
+          isWorking ? "pt-3 sm:pt-4" : "pt-[24px] sm:pt-[26px] [@media(max-height:34rem)]:pt-2",
         )}
       >
         <form
@@ -836,6 +874,20 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 composerProviderState.composerSurfaceClassName,
               )}
             >
+              {freshContext && (
+                <div className="flex items-center gap-2 px-4 pt-3 text-xs text-muted-foreground">
+                  <span>Next message starts with fresh context</span>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-xs"
+                    aria-label="Keep current context"
+                    onClick={onCancelFreshContext}
+                  >
+                    <XIcon />
+                  </Button>
+                </div>
+              )}
               {/* Working status — collapses inside the composer card */}
               <div
                 className="grid transition-[grid-template-rows] duration-200 ease-out"
@@ -1037,6 +1089,27 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     )}
                   >
                     <ComposerAttachButton disabled={isConnecting} onFiles={onFileDrop} />
+                    {onStashPrompt && onRestorePrompt && onStashError && (
+                      <ComposerStashMenu
+                        provider={selectedProvider}
+                        open={stashOpen}
+                        onOpenChange={setStashOpen}
+                        hasContent={
+                          prompt.trim().length > 0 ||
+                          composerImages.length > 0 ||
+                          composerTerminalContexts.length > 0 ||
+                          reviewCommentCount > 0
+                        }
+                        disabled={
+                          isConnecting ||
+                          Boolean(isStashingPrompt) ||
+                          preparingComposerImages.length > 0
+                        }
+                        onStash={onStashPrompt}
+                        onRestore={onRestorePrompt}
+                        onError={onStashError}
+                      />
+                    )}
                     {/* Provider/model picker */}
                     <ProviderModelPicker
                       provider={selectedProvider}

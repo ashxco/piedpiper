@@ -78,6 +78,7 @@ function makeTurnStartEvents(input: {
     | "message"
     | "createdAt"
     | "modelSelection"
+    | "freshContext"
     | "titleSeed"
     | "sourceProposedPlan"
   >;
@@ -118,6 +119,7 @@ function makeTurnStartEvents(input: {
       threadId: command.threadId,
       messageId: command.message.messageId,
       ...(command.modelSelection !== undefined ? { modelSelection: command.modelSelection } : {}),
+      ...(command.freshContext ? { freshContext: true } : {}),
       ...(command.titleSeed !== undefined ? { titleSeed: command.titleSeed } : {}),
       runtimeMode: input.runtimeMode,
       interactionMode: input.interactionMode,
@@ -385,7 +387,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       });
       // A stale git sync (e.g. the pre-rename temp branch) must not overwrite newer server state.
       const staleBranchSync =
-        command.expectedBranch !== undefined && thread.branch !== command.expectedBranch;
+        (command.expectedBranch !== undefined && thread.branch !== command.expectedBranch) ||
+        (command.expectedWorktreePath !== undefined &&
+          thread.worktreePath !== command.expectedWorktreePath);
       const branch = staleBranchSync ? undefined : command.branch;
       const worktreePath = staleBranchSync ? undefined : command.worktreePath;
       const occurredAt = nowIso();
@@ -463,6 +467,15 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         threadId: command.threadId,
       });
       const sourceProposedPlan = command.sourceProposedPlan;
+      if (
+        command.freshContext &&
+        (targetThread.session?.status === "running" || targetThread.session?.status === "starting")
+      ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "Wait for the current turn to finish before starting a fresh session.",
+        });
+      }
       const sourceThread = sourceProposedPlan
         ? yield* requireThread({
             readModel,

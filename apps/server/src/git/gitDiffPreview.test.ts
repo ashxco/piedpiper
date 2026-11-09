@@ -21,6 +21,7 @@ import { ServerConfig } from "../config.ts";
 import { runProcess } from "../processRunner.ts";
 import { GitCoreLive } from "./Layers/GitCore.ts";
 import { GitCore } from "./Services/GitCore.ts";
+import { readGitCommitHistory } from "./gitCommitHistory.ts";
 import {
   GIT_DIFF_PREVIEW_UNTRACKED_MAX_FILES,
   readGitDiffPreview,
@@ -530,3 +531,31 @@ describe("trimTruncatedPatchToWholeFile", () => {
     expect(trimTruncatedPatchToWholeFile("diff --git a/a b/a\n+one")).toBe("");
   });
 });
+
+it.effect("reviews immutable commits, including the root, without including working changes", () =>
+  Effect.gen(function* () {
+    const root = yield* makeRepo();
+    const core = yield* GitCore;
+    const initial = yield* git(root, ["rev-parse", "HEAD"]);
+    writeFileSync(path.join(root, "tracked.txt"), "committed\n");
+    yield* git(root, ["commit", "-am", "Second commit"]);
+    const latest = yield* git(root, ["rev-parse", "HEAD"]);
+    writeFileSync(path.join(root, "tracked.txt"), "uncommitted-secret\n");
+    yield* git(root, ["config", "log.showSignature", "true"]);
+    yield* git(root, ["config", "log.decorate", "full"]);
+    const history = yield* readGitCommitHistory(core, { cwd: root, limit: 1 });
+    expect(history.commits.map((commit) => [commit.sha, commit.subject])).toEqual([
+      [latest, "Second commit"],
+    ]);
+    expect(history.nextCursor).toBe(1);
+    const older = yield* readGitCommitHistory(core, { cwd: root, cursor: 1, limit: 1 });
+    expect(older.commits[0]?.sha).toBe(initial);
+    expect(older.nextCursor).toBeNull();
+    const patch = yield* core.diffPreview({ cwd: root, scope: "commit", commit: latest });
+    expect(patch.diff).toContain("+committed");
+    expect(patch.diff).not.toContain("uncommitted-secret");
+    const firstPatch = yield* core.diffPreview({ cwd: root, scope: "commit", commit: initial });
+    expect(firstPatch.diff).toContain("+one");
+    expect(firstPatch.diff).toContain("--- /dev/null");
+  }).pipe(Effect.scoped, Effect.provide(TestLayer)),
+);

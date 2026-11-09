@@ -421,6 +421,7 @@ const make = Effect.gen(function* () {
       readonly modelSelection?: ModelSelection;
       /** Start a brand-new provider session and drop the persisted resume cursor. */
       readonly discardResumeState?: boolean;
+      readonly freshContext?: boolean;
       /** Keep the thread "starting" until the provider reports turn.started. */
       readonly pendingTurnStart?: boolean;
     },
@@ -483,6 +484,7 @@ const make = Effect.gen(function* () {
       providerService.startSession(threadId, {
         threadId,
         ...(preferredProvider ? { provider: preferredProvider } : {}),
+        ...(options?.freshContext ? { freshContext: true } : {}),
         ...(effectiveCwd ? { cwd: effectiveCwd } : {}),
         modelSelection: desiredModelSelection,
         // A null cursor tells ProviderService to ignore the persisted resume state.
@@ -605,6 +607,27 @@ const make = Effect.gen(function* () {
     return startedSession.threadId;
   });
 
+  const appendContextReset = Effect.fn("appendContextReset")(function* (
+    threadId: ThreadId,
+    createdAt: string,
+  ) {
+    yield* orchestrationEngine.dispatch({
+      type: "thread.activity.append",
+      commandId: serverCommandId("fresh-session"),
+      threadId,
+      createdAt,
+      activity: {
+        id: EventId.makeUnsafe(crypto.randomUUID()),
+        tone: "info",
+        kind: "session.context-reset",
+        summary: "Started a fresh session",
+        payload: {},
+        turnId: null,
+        createdAt,
+      },
+    });
+  });
+
   const sendTurnForThread = Effect.fn("sendTurnForThread")(function* (input: {
     readonly threadId: ThreadId;
     readonly messageText: string;
@@ -613,6 +636,7 @@ const make = Effect.gen(function* () {
     readonly interactionMode?: "default" | "plan" | "ask";
     readonly createdAt: string;
     readonly discardResumeState?: boolean;
+    readonly freshContext?: boolean;
   }) {
     const thread = yield* resolveThread(input.threadId);
     if (!thread) {
@@ -621,8 +645,10 @@ const make = Effect.gen(function* () {
     yield* ensureSessionForThread(input.threadId, input.createdAt, {
       ...(input.modelSelection !== undefined ? { modelSelection: input.modelSelection } : {}),
       ...(input.discardResumeState ? { discardResumeState: true } : {}),
+      ...(input.freshContext ? { freshContext: true } : {}),
       pendingTurnStart: true,
     });
+    if (input.freshContext) yield* appendContextReset(input.threadId, input.createdAt);
     if (input.modelSelection !== undefined) {
       threadModelSelections.set(input.threadId, input.modelSelection);
     }
@@ -1169,8 +1195,10 @@ const make = Effect.gen(function* () {
     yield* ensureSessionForThread(threadId, input.createdAt, {
       ...(input.modelSelection !== undefined ? { modelSelection: input.modelSelection } : {}),
       ...(input.discardResumeState ? { discardResumeState: true } : {}),
+      ...(input.freshContext ? { freshContext: true } : {}),
       pendingTurnStart: true,
     });
+    if (input.freshContext) yield* appendContextReset(threadId, input.createdAt);
     const { goal: previous } = yield* providerService.runGoalRequest({
       threadId,
       request: { type: "get" },
@@ -1180,7 +1208,11 @@ const make = Effect.gen(function* () {
       yield* providerService.runGoalRequest({ threadId, request: { type: "clear" } });
     }
     // The session is already fresh; discarding again would lose the goal just set.
-    const { discardResumeState: _discardResumeState, ...turnInput } = input;
+    const {
+      discardResumeState: _discardResumeState,
+      freshContext: _freshContext,
+      ...turnInput
+    } = input;
     yield* providerService
       .runGoalRequest({ threadId, request: { type: "set", objective, status: "paused" } })
       .pipe(
@@ -1242,6 +1274,18 @@ const make = Effect.gen(function* () {
       return;
     }
 
+    if (
+      event.payload.freshContext &&
+      (thread.session?.status === "running" || thread.session?.status === "starting")
+    ) {
+      return yield* rejectTurnStart({
+        threadId: thread.id,
+        messageId: message.id,
+        summary: "Fresh session could not start",
+        detail: "Wait for the current turn to finish before starting a fresh session.",
+        createdAt: event.payload.createdAt,
+      });
+    }
     const readModel = yield* orchestrationEngine.getReadModel();
     const threadCwd = resolveThreadWorkspaceCwd({ thread, projects: readModel.projects });
     const threadCwdExists = threadCwd
@@ -1399,6 +1443,7 @@ const make = Effect.gen(function* () {
 
     const turnInput = {
       threadId: event.payload.threadId,
+      ...(event.payload.freshContext ? { discardResumeState: true, freshContext: true } : {}),
       messageText: goalObjective ?? message.text,
       ...(message.attachments !== undefined ? { attachments: message.attachments } : {}),
       ...(event.payload.modelSelection !== undefined

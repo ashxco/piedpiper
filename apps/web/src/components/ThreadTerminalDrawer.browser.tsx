@@ -381,7 +381,18 @@ describe("ThreadTerminalDrawer split layout", () => {
 
   it("refits a pane and resizes its PTY when the pane changes size without a prop change", async () => {
     const terminals = captureTerminalInstances();
-    const resize = vi.fn((_input: { cols: number; rows: number }) => Promise.resolve());
+    const resize = vi.fn((input: { cols: number; rows: number }) => {
+      useTerminalStateStore.getState().recordTerminalEvent({
+        type: "activity",
+        threadId: THREAD_ID,
+        terminalId: "default",
+        createdAt: new Date().toISOString(),
+        hasRunningSubprocess: false,
+        cols: input.cols,
+        rows: input.rows,
+      });
+      return Promise.resolve();
+    });
     const stub = createNativeApiStub({ history: "hello\r\n" });
     nativeApiHolder.api = { ...stub, terminal: { ...stub.terminal, resize } };
     const screen = await renderDrawer(() => undefined, 400);
@@ -412,7 +423,18 @@ describe("ThreadTerminalDrawer split layout", () => {
 
   it("does not refit during a drawer drag", async () => {
     const terminals = captureTerminalInstances();
-    const resize = vi.fn((_input: { cols: number; rows: number }) => Promise.resolve());
+    const resize = vi.fn((input: { cols: number; rows: number }) => {
+      useTerminalStateStore.getState().recordTerminalEvent({
+        type: "activity",
+        threadId: THREAD_ID,
+        terminalId: "default",
+        createdAt: new Date().toISOString(),
+        hasRunningSubprocess: false,
+        cols: input.cols,
+        rows: input.rows,
+      });
+      return Promise.resolve();
+    });
     const stub = createNativeApiStub({ history: "hello\r\n" });
     nativeApiHolder.api = { ...stub, terminal: { ...stub.terminal, resize } };
     vi.spyOn(HTMLElement.prototype, "setPointerCapture").mockImplementation(() => undefined);

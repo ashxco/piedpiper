@@ -21,6 +21,20 @@ const GIT_BRANCHES_REFETCH_INTERVAL_MS = 60_000;
 const GIT_BRANCHES_PAGE_SIZE = 100;
 const GIT_DIFF_PREVIEW_STALE_TIME_MS = 5_000;
 
+export function gitCommitHistoryQueryOptions(cwd: string | null, enabled: boolean) {
+  return infiniteQueryOptions({
+    queryKey: ["git", "commits", cwd],
+    initialPageParam: 0,
+    queryFn: ({ pageParam }) => {
+      if (!cwd) throw new Error("No repository selected.");
+      return ensureNativeApi().git.listCommits({ cwd, cursor: pageParam, limit: 50 });
+    },
+    getNextPageParam: (page) => page.nextCursor ?? undefined,
+    enabled: enabled && cwd !== null,
+    staleTime: GIT_STATUS_STALE_TIME_MS,
+  });
+}
+
 // Read structurally: without the method a create still works, just unreported.
 export const gitQueryKeys = {
   all: ["git"] as const,
@@ -36,7 +50,8 @@ export const gitQueryKeys = {
     scope: GitDiffPreviewScope | null,
     ignoreWhitespace: boolean,
     cacheScope: string | null,
-  ) => ["git", "diff-preview", cwd, scope, ignoreWhitespace, cacheScope] as const,
+    commit?: string,
+  ) => ["git", "diff-preview", cwd, scope, ignoreWhitespace, cacheScope, commit] as const,
 };
 
 export const gitMutationKeys = {
@@ -125,16 +140,28 @@ export function gitStatusQueryOptions(cwd: string | null) {
 export function gitDiffPreviewQueryOptions(input: {
   cwd: string | null;
   scope: GitDiffPreviewScope | null;
+  commit?: string | undefined;
   ignoreWhitespace: boolean;
   cacheScope: string | null;
   enabled: boolean;
 }) {
   const { cwd, scope, ignoreWhitespace } = input;
   return queryOptions({
-    queryKey: gitQueryKeys.diffPreview(cwd, scope, ignoreWhitespace, input.cacheScope),
+    queryKey: gitQueryKeys.diffPreview(
+      cwd,
+      scope,
+      ignoreWhitespace,
+      input.cacheScope,
+      input.commit,
+    ),
     queryFn: async () => {
       if (!cwd || !scope) throw new Error("Uncommitted and branch diffs are unavailable.");
-      return ensureNativeApi().git.diffPreview({ cwd, scope, ignoreWhitespace });
+      return ensureNativeApi().git.diffPreview({
+        cwd,
+        scope,
+        ignoreWhitespace,
+        ...(input.commit ? { commit: input.commit } : {}),
+      });
     },
     enabled: input.enabled && cwd !== null && scope !== null,
     staleTime: GIT_DIFF_PREVIEW_STALE_TIME_MS,
@@ -143,7 +170,10 @@ export function gitDiffPreviewQueryOptions(input: {
     // Holds the patch on screen across a status refresh, but never shows another scope's patch.
     placeholderData: (previous, previousQuery) => {
       const key = previousQuery?.queryKey;
-      return key?.[2] === cwd && key?.[3] === scope && key?.[4] === ignoreWhitespace
+      return key?.[2] === cwd &&
+        key?.[3] === scope &&
+        key?.[4] === ignoreWhitespace &&
+        key?.[6] === input.commit
         ? previous
         : undefined;
     },

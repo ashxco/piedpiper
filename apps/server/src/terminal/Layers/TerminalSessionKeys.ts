@@ -1,13 +1,5 @@
-/**
- * Stable id encoding helpers for terminal session lookup.
- *
- * Terminal session keys live on disk (history files, log files) and in
- * in-memory maps. The on-disk encoding uses a base64url-prefixed thread id
- * to keep filenames safe across platforms; the legacy variant kept the
- * thread id mostly readable but allowed unsafe characters through. The
- * memory keys use a NUL-delimited (threadId, terminalId) pair so that
- * thread ids and terminal ids cannot collide.
- */
+// Keep memory keys collision-free and history filenames safe across supported filesystems.
+import { createHash } from "node:crypto";
 import { Encoding } from "effect";
 
 export function legacySafeThreadId(threadId: string): string {
@@ -24,4 +16,18 @@ export function toSafeTerminalId(terminalId: string): string {
 
 export function toSessionKey(threadId: string, terminalId: string): string {
   return `${threadId}\u0000${terminalId}`;
+}
+
+// eCryptfs has a 143-byte filename limit; ASCII encoded names also fit other filesystems.
+export const MAX_HISTORY_FILENAME_BYTES = 143;
+const hashId = (id: string) => createHash("sha256").update(id).digest("base64url");
+export const hashedHistoryThreadPart = (threadId: string) => `terminal_sha256.${hashId(threadId)}`;
+export function encodedHistoryName(threadId: string, terminalId: string): string {
+  return `${toSafeThreadId(threadId)}${terminalId === "default" ? "" : `_${toSafeTerminalId(terminalId)}`}.log`;
+}
+export function historyName(threadId: string, terminalId: string): string {
+  const encoded = encodedHistoryName(threadId, terminalId);
+  return encoded.length <= MAX_HISTORY_FILENAME_BYTES
+    ? encoded
+    : `${hashedHistoryThreadPart(threadId)}${terminalId === "default" ? "" : `_${hashId(terminalId)}`}.log`;
 }

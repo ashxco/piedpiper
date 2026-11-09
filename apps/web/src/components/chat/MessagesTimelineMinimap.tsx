@@ -79,22 +79,6 @@ function useHasPersistentGutter(
   return Boolean(scrollContainer && contentElement) && hasPersistentGutter;
 }
 
-const FINE_POINTER_QUERY = "(pointer: fine)";
-
-function useHasFinePointer(): boolean {
-  const [hasFinePointer, setHasFinePointer] = useState(
-    () => typeof window.matchMedia !== "function" || window.matchMedia(FINE_POINTER_QUERY).matches,
-  );
-  useEffect(() => {
-    if (typeof window.matchMedia !== "function") return;
-    const query = window.matchMedia(FINE_POINTER_QUERY);
-    const update = () => setHasFinePointer(query.matches);
-    query.addEventListener("change", update);
-    return () => query.removeEventListener("change", update);
-  }, []);
-  return hasFinePointer;
-}
-
 function useViewportPosition(
   scrollContainer: HTMLDivElement | null,
   contentElement: HTMLElement | null,
@@ -197,9 +181,7 @@ export function MessagesTimelineMinimap({
   onLeaveBottom,
 }: MessagesTimelineMinimapProps) {
   const hasPersistentGutter = useHasPersistentGutter(scrollContainer, contentElement);
-  const hasFinePointer = useHasFinePointer();
-  const visible =
-    hasPersistentGutter && hasFinePointer && items.length >= TIMELINE_MINIMAP_MIN_ITEMS;
+  const visible = hasPersistentGutter && items.length >= TIMELINE_MINIMAP_MIN_ITEMS;
   const { highlighted, currentIndex, scrollAtEnd } = useViewportPosition(
     scrollContainer,
     contentElement,
@@ -256,7 +238,7 @@ export function MessagesTimelineMinimap({
 
   return createPortal(
     <div
-      className="pointer-events-none absolute inset-y-0 left-0 z-20 hidden w-12 [@media(pointer:fine)]:block"
+      className="pointer-events-none absolute inset-y-0 left-0 z-20 w-12"
       data-testid="timeline-minimap"
     >
       <div

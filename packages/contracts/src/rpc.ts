@@ -15,6 +15,8 @@ import {
   GitCreateWorktreeInput,
   GitCreateWorktreeProgressEvent,
   GitCreateWorktreeResult,
+  GitListCommitsInput,
+  GitListCommitsResult,
   GitDiffPreviewInput,
   GitDiffPreviewResult,
   GitGitHubCliStatus,
@@ -85,6 +87,7 @@ import {
   TerminalMetadataStreamEvent,
   TerminalOpenInput,
   TerminalResizeInput,
+  TerminalDetachInput,
   TerminalRestartInput,
   TerminalSessionSnapshot,
   TerminalWriteInput,
@@ -132,6 +135,7 @@ export const WS_METHODS = {
   gitPull: "git.pull",
   gitStatus: "git.status",
   gitDiffPreview: "git.diffPreview",
+  gitListCommits: "git.listCommits",
   gitRunStackedAction: "git.runStackedAction",
   gitListBranches: "git.listBranches",
   gitCreateWorktree: "git.createWorktree",
@@ -151,6 +155,7 @@ export const WS_METHODS = {
   terminalOpen: "terminal.open",
   terminalWrite: "terminal.write",
   terminalResize: "terminal.resize",
+  terminalDetach: "terminal.detach",
   terminalClear: "terminal.clear",
   terminalRestart: "terminal.restart",
   terminalClose: "terminal.close",
@@ -319,6 +324,12 @@ const WsGitStatusRpc = Rpc.make(WS_METHODS.gitStatus, {
   error: GitManagerServiceError,
 });
 
+const WsGitListCommitsRpc = Rpc.make(WS_METHODS.gitListCommits, {
+  payload: GitListCommitsInput,
+  success: GitListCommitsResult,
+  error: GitCommandError,
+});
+
 const WsGitDiffPreviewRpc = Rpc.make(WS_METHODS.gitDiffPreview, {
   payload: GitDiffPreviewInput,
   success: GitDiffPreviewResult,
@@ -421,6 +432,12 @@ const WsTerminalOpenRpc = Rpc.make(WS_METHODS.terminalOpen, {
 
 const WsTerminalWriteRpc = Rpc.make(WS_METHODS.terminalWrite, {
   payload: TerminalWriteInput,
+  error: TerminalError,
+});
+
+const WsTerminalDetachRpc = Rpc.make(WS_METHODS.terminalDetach, {
+  payload: TerminalDetachInput,
+  success: Schema.Void,
   error: TerminalError,
 });
 
@@ -547,6 +564,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsShellOpenInEditorRpc,
   WsGitStatusRpc,
   WsGitDiffPreviewRpc,
+  WsGitListCommitsRpc,
   WsGitPullRpc,
   WsGitRunStackedActionRpc,
   WsGitResolvePullRequestRpc,
@@ -565,6 +583,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsTerminalOpenRpc,
   WsTerminalWriteRpc,
   WsTerminalResizeRpc,
+  WsTerminalDetachRpc,
   WsTerminalClearRpc,
   WsTerminalRestartRpc,
   WsTerminalCloseRpc,

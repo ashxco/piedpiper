@@ -308,7 +308,7 @@ describe("sweep contract additions", () => {
     ).toBe("failed");
   });
 
-  it("limits PDF attachments to application/pdf within the size limit", () => {
+  it("limits file attachments to PDF or text within the size limit", () => {
     const attachment = {
       type: "file",
       id: "file-1",
@@ -317,7 +317,12 @@ describe("sweep contract additions", () => {
       sizeBytes: PROVIDER_SEND_TURN_MAX_FILE_BYTES,
     };
     expect(decode(ChatFileAttachment, attachment).name).toBe("spec.pdf");
-    expect(() => decode(ChatFileAttachment, { ...attachment, mimeType: "text/plain" })).toThrow();
+    expect(decode(ChatFileAttachment, { ...attachment, mimeType: "text/plain" }).mimeType).toBe(
+      "text/plain",
+    );
+    expect(() =>
+      decode(ChatFileAttachment, { ...attachment, mimeType: "application/zip" }),
+    ).toThrow();
     expect(() =>
       decode(ChatFileAttachment, {
         ...attachment,

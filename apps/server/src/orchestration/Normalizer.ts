@@ -8,12 +8,11 @@ import {
   type UploadChatImageAttachment,
 } from "@piedpiper/contracts";
 
-import { resolveAttachmentRelativePath } from "../attachmentPaths";
 import { createAttachmentId, resolveAttachmentPath } from "../attachmentStore";
 import { ServerConfig } from "../config";
 import { parseBase64DataUrl } from "../imageMime";
 import { WorkspacePaths } from "../workspace/Services/WorkspacePaths";
-import { decodeUploadedPdf, pdfAttachmentRelativePath } from "./pdfAttachmentIntake";
+import { decodeUploadedFile } from "./fileAttachmentIntake";
 
 // Client clocks can be wrong, so every client command is stamped with the server's receive time.
 const canonicalizeClientCommandTimestamps = (
@@ -100,7 +99,7 @@ export const normalizeDispatchCommand = (clientCommand: ClientOrchestrationComma
         Effect.gen(function* () {
           const decoded =
             attachment.type === "file"
-              ? { ...decodeUploadedPdf(attachment), mimeType: "application/pdf" as const }
+              ? { ...decodeUploadedFile(attachment), mimeType: attachment.mimeType }
               : decodeUploadedImage(attachment);
           if (!decoded.ok) {
             return yield* new OrchestrationDispatchCommandError({ message: decoded.error });
@@ -125,7 +124,7 @@ export const normalizeDispatchCommand = (clientCommand: ClientOrchestrationComma
                   type: "file" as const,
                   id: attachmentId,
                   name: attachment.name,
-                  mimeType: "application/pdf" as const,
+                  mimeType: attachment.mimeType,
                   sizeBytes: bytes.byteLength,
                 }
               : {
@@ -136,16 +135,10 @@ export const normalizeDispatchCommand = (clientCommand: ClientOrchestrationComma
                   sizeBytes: bytes.byteLength,
                 };
 
-          const attachmentPath =
-            persistedAttachment.type === "file"
-              ? resolveAttachmentRelativePath({
-                  attachmentsDir: serverConfig.attachmentsDir,
-                  relativePath: pdfAttachmentRelativePath(attachmentId),
-                })
-              : resolveAttachmentPath({
-                  attachmentsDir: serverConfig.attachmentsDir,
-                  attachment: persistedAttachment,
-                });
+          const attachmentPath = resolveAttachmentPath({
+            attachmentsDir: serverConfig.attachmentsDir,
+            attachment: persistedAttachment,
+          });
           if (!attachmentPath) {
             return yield* new OrchestrationDispatchCommandError({
               message: `Failed to resolve persisted path for '${attachment.name}'.`,

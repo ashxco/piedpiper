@@ -135,6 +135,39 @@ const pdfDataUrl = (contents: string | Buffer) =>
   `data:application/pdf;base64,${Buffer.from(contents).toString("base64")}`;
 
 layer("normalizeDispatchCommand PDF attachments", (it) => {
+  it.effect("stores UTF-8 text under a .txt path using its decoded size", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const config = yield* ServerConfig;
+      const contents = "const greeting = 'こんにちは';";
+      const command = pdfTurnStart([]);
+      if (command.type !== "thread.turn.start") throw new Error("expected turn start");
+      const normalized = yield* normalizeDispatchCommand({
+        ...command,
+        message: {
+          ...command.message,
+          attachments: [
+            {
+              type: "file",
+              name: "source.ts",
+              mimeType: "text/plain",
+              sizeBytes: 1,
+              dataUrl: `data:text/plain;base64,${Buffer.from(contents).toString("base64")}`,
+            },
+          ],
+        },
+      });
+      if (normalized.type !== "thread.turn.start") throw new Error("expected turn start");
+      const attachment = normalized.message.attachments[0]!;
+      assert.equal(attachment.mimeType, "text/plain");
+      assert.equal(attachment.sizeBytes, Buffer.byteLength(contents));
+      assert.equal(
+        yield* fileSystem.readFileString(`${config.attachmentsDir}/${attachment.id}.txt`),
+        contents,
+      );
+    }),
+  );
+
   it.effect("stores a PDF with its real size under a .pdf name", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;

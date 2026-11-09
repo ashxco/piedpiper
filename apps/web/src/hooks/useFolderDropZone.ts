@@ -36,6 +36,11 @@ export function useFolderDropZone(onDropPath: (filePath: string) => void): UseFo
 
   const onDragEnter = useCallback((event: ReactDragEvent) => {
     if (!hasNativeFileDrop(event)) return;
+    if (event.target instanceof Element && event.target.closest("[data-file-drop-target]")) {
+      dropCounterRef.current = 0;
+      setIsDroppingFolder(false);
+      return;
+    }
     event.preventDefault();
     dropCounterRef.current += 1;
     setIsDroppingFolder(true);

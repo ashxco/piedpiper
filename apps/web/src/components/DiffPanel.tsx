@@ -1,6 +1,6 @@
 import { DEFAULT_VIRTUAL_FILE_METRICS, type SelectedLineRange } from "@pierre/diffs";
 import { FileDiff, type FileDiffMetadata, Virtualizer } from "@pierre/diffs/react";
-import { useQueries, useQuery } from "@tanstack/react-query";
+import { useInfiniteQuery, useQueries, useQuery } from "@tanstack/react-query";
 import { useNavigate, useParams, useSearch } from "@tanstack/react-router";
 import { ThreadId, type TurnId } from "@piedpiper/contracts";
 import type { DiffLayout } from "@piedpiper/contracts/settings";
@@ -32,7 +32,12 @@ import {
   useState,
 } from "react";
 import { openInPreferredEditor } from "../editorPreferences";
-import { gitDiffPreviewQueryOptions, gitStatusQueryOptions } from "~/lib/gitReactQuery";
+import { DiffCommitPicker } from "./DiffCommitPicker";
+import {
+  gitCommitHistoryQueryOptions,
+  gitDiffPreviewQueryOptions,
+  gitStatusQueryOptions,
+} from "~/lib/gitReactQuery";
 import { checkpointDiffQueryOptions } from "~/lib/providerReactQuery";
 import {
   buildTurnDiffFullContextScopeKey,
@@ -49,6 +54,9 @@ import { cn, randomUUID } from "~/lib/utils";
 import { readNativeApi } from "../nativeApi";
 import { showFileContextMenu } from "../fileContextMenu";
 import { resolveRepoRelativeFilePath } from "../lib/diffPathResolution";
+import { buildToolInputDiff } from "../lib/toolInputDiff";
+import { useToolDiffSelection } from "../toolDiffSelection";
+import { deriveWorkLogEntries } from "../session-logic";
 import { parseDiffRouteSearch, stripDiffSearchParams } from "../diffRouteSearch";
 import { resolveDiffFileRevealKey, useDiffFileRevealStore } from "../diffFileRevealStore";
 import { getSmoothScrollBehavior } from "../chat-scroll";
@@ -520,6 +528,8 @@ export { DiffWorkerPoolProvider } from "./DiffWorkerPoolProvider";
 
 export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
   const navigate = useNavigate();
+  const [turnPickerSearch, setTurnPickerSearch] = useState("");
+  const [turnPickerOpen, setTurnPickerOpen] = useState(false);
   const { resolvedTheme } = useTheme();
   const settings = useSettings();
   const { updateSettings } = useUpdateSettings();
@@ -571,11 +581,39 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
 
   const selectedTurnId = diffSearch.diffTurnId ?? null;
   const selectedFilePath = diffSearch.diffFilePath ?? null;
-  const panelScope = resolveDiffPanelScope({
-    requestedScope: diffSearch.diffTurnId ? undefined : diffSearch.diffScope,
-    hasTurns: orderedTurnDiffSummaries.length > 0,
-  });
-  const gitScope = panelScope === "turns" ? null : panelScope;
+  const toolId = diffSearch.diffToolId;
+  const toolSnapshot = useToolDiffSelection((state) => state.selection);
+  const liveToolInput = useStore((state) =>
+    activeThreadId && toolId ? state.toolInputPreviews[activeThreadId]?.[toolId] : undefined,
+  );
+  const toolInput = useMemo(() => {
+    if (!toolId) return undefined;
+    const persisted = deriveWorkLogEntries(activeThread?.activities ?? [], undefined).find(
+      (entry) => entry.providerItemId === toolId || entry.id === toolId,
+    )?.staticPreview;
+    return (
+      liveToolInput ??
+      persisted ??
+      (toolSnapshot?.threadId === activeThreadId && toolSnapshot.toolId === toolId
+        ? toolSnapshot.stream
+        : undefined)
+    );
+  }, [toolId, activeThread?.activities, activeThreadId, liveToolInput, toolSnapshot]);
+  const toolPatch = useMemo(
+    () => (toolInput ? buildToolInputDiff(toolInput, activeCwd, diffIgnoreWhitespace) : null),
+    [toolInput, activeCwd, diffIgnoreWhitespace],
+  );
+  const commitHistory = useInfiniteQuery(
+    gitCommitHistoryQueryOptions(activeCwd ?? null, diffOpen && turnPickerOpen && isGitRepo),
+  );
+  const commits = commitHistory.data?.pages.flatMap((page) => page.commits) ?? [];
+  const panelScope = toolId
+    ? "tool"
+    : resolveDiffPanelScope({
+        requestedScope: diffSearch.diffTurnId ? undefined : diffSearch.diffScope,
+        hasTurns: orderedTurnDiffSummaries.length > 0,
+      });
+  const gitScope = panelScope === "turns" || panelScope === "tool" ? null : panelScope;
   const selectedTurn =
     selectedTurnId === null
       ? undefined
@@ -636,13 +674,14 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
       toTurnCount: activeCheckpointRange?.toTurnCount ?? null,
       cacheScope: activeCheckpointCacheScope,
       ignoreWhitespace: diffIgnoreWhitespace,
-      enabled: isGitRepo && gitScope === null,
+      enabled: isGitRepo && panelScope === "turns",
     }),
   );
   const gitDiffPreviewQuery = useQuery(
     gitDiffPreviewQueryOptions({
       cwd: activeCwd ?? null,
       scope: gitScope,
+      commit: diffSearch.diffCommit,
       ignoreWhitespace: diffIgnoreWhitespace,
       cacheScope: buildGitDiffPreviewCacheScope({
         latestTurnId: orderedTurnDiffSummaries[0]?.turnId ?? null,
@@ -654,7 +693,9 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
     }),
   );
   const gitDiffPreview = gitScope ? gitDiffPreviewQuery.data : undefined;
-  const gitDiffPreviewNotices = resolveGitDiffPreviewNotices(gitDiffPreview, gitScope);
+  const gitDiffPreviewNotices = toolId
+    ? ["Tool input; line numbers are relative to this edit."]
+    : resolveGitDiffPreviewNotices(gitDiffPreview, gitScope);
   const selectedTurnCheckpointDiff = selectedTurn
     ? activeCheckpointDiffQuery.data?.diff
     : undefined;
@@ -662,10 +703,18 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
     ? undefined
     : activeCheckpointDiffQuery.data?.diff;
   // The preview query waits for the status, and a disabled query does not count as loading.
-  const isLoadingDiff = gitScope
-    ? gitDiffPreviewQuery.isLoading || gitStatusQuery.isLoading
-    : activeCheckpointDiffQuery.isLoading;
-  const activeDiffError = gitScope ? gitDiffPreviewQuery.error : activeCheckpointDiffQuery.error;
+  const isLoadingDiff = toolId
+    ? false
+    : gitScope
+      ? gitDiffPreviewQuery.isLoading || gitStatusQuery.isLoading
+      : activeCheckpointDiffQuery.isLoading;
+  const activeDiffError = toolId
+    ? toolInput
+      ? null
+      : new Error("This edit’s input is no longer available.")
+    : gitScope
+      ? gitDiffPreviewQuery.error
+      : activeCheckpointDiffQuery.error;
   const diffError =
     activeDiffError instanceof Error
       ? activeDiffError.message
@@ -673,11 +722,13 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
         ? "Failed to load diff."
         : null;
 
-  const selectedPatch = gitScope
-    ? gitDiffPreview?.diff
-    : selectedTurn
-      ? selectedTurnCheckpointDiff
-      : conversationCheckpointDiff;
+  const selectedPatch = toolId
+    ? (toolPatch ?? undefined)
+    : gitScope
+      ? gitDiffPreview?.diff
+      : selectedTurn
+        ? selectedTurnCheckpointDiff
+        : conversationCheckpointDiff;
   const hasResolvedPatch = typeof selectedPatch === "string";
   const hasNoNetChanges = hasResolvedPatch && selectedPatch.trim().length === 0;
   const renderablePatch = useMemo(
@@ -694,7 +745,7 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
   const renderableFiles = useUnchangedDiffFiles(orderedPatchFiles);
 
   const fullContextScopeKey = buildTurnDiffFullContextScopeKey({
-    threadId: gitScope === null ? activeThreadId : null,
+    threadId: panelScope === "turns" ? activeThreadId : null,
     range: activeCheckpointRange,
     cacheScope: activeCheckpointCacheScope,
     ignoreWhitespace: diffIgnoreWhitespace,
@@ -756,7 +807,8 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
   const diffFileKeys = useDiffFileKeys(shownFiles);
   const collapseScopeKey = buildDiffCollapseScopeKey(
     activeThreadId,
-    resolveDiffCollapseSection(panelScope, selectedTurn?.turnId ?? null),
+    resolveDiffCollapseSection(panelScope, selectedTurn?.turnId ?? null) +
+      (toolId ?? diffSearch.diffCommit ?? ""),
   );
   const diffFilesCollapsedBySetting = settings.diffFilesCollapsed;
   const [collapsedDiffFiles, setCollapsedDiffFiles] = useState<ScopedDiffCollapseState | null>(
@@ -1015,9 +1067,9 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
     : -1;
   // "All turns" is position -1, Turn 1 is 0, etc.
   const canGoPrev =
-    gitScope === null && orderedTurnDiffSummaries.length > 0 && selectedTurnIndex >= 0;
+    panelScope === "turns" && orderedTurnDiffSummaries.length > 0 && selectedTurnIndex >= 0;
   const canGoNext =
-    gitScope === null &&
+    panelScope === "turns" &&
     orderedTurnDiffSummaries.length > 0 &&
     selectedTurnIndex < orderedTurnDiffSummaries.length - 1;
   const goPrevTurn = () => {
@@ -1098,22 +1150,23 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
     return map;
   }, [activeThread, orderedTurnDiffSummaries]);
 
-  const [turnPickerSearch, setTurnPickerSearch] = useState("");
-  const [turnPickerOpen, setTurnPickerOpen] = useState(false);
-
   const selectedTurnLabel = selectedTurn
     ? `Turn ${selectedTurn.checkpointTurnCount ?? inferredCheckpointTurnCountByTurnId[selectedTurn.turnId] ?? "?"}`
     : "All turns";
-  const pickerLabel =
-    gitScope === "uncommitted"
-      ? "Uncommitted"
-      : gitScope === "branch"
-        ? "Branch"
-        : selectedTurnLabel;
+  const pickerLabel = toolId
+    ? "Tool edit"
+    : gitScope === "commit"
+      ? `Commit ${diffSearch.diffCommit?.slice(0, 8)}`
+      : gitScope === "uncommitted"
+        ? "Uncommitted"
+        : gitScope === "branch"
+          ? "Branch"
+          : selectedTurnLabel;
 
   const { sectionId: reviewSectionId, sectionTitle: reviewSectionTitle } = resolveDiffReviewSection(
     {
       scope: panelScope,
+      selectionId: toolId ?? diffSearch.diffCommit,
       selectedTurnId: selectedTurn?.turnId ?? null,
       selectedTurnLabel,
     },
@@ -1282,7 +1335,7 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
                 <SearchIcon className="size-3.5 shrink-0 text-muted-foreground/50" />
                 <input
                   className="min-w-0 flex-1 bg-transparent text-xs text-foreground placeholder:text-muted-foreground/40 focus:outline-none"
-                  placeholder="Search turns..."
+                  placeholder="Search turns and commits..."
                   value={turnPickerSearch}
                   onChange={(e) => setTurnPickerSearch(e.target.value)}
                   autoFocus
@@ -1316,7 +1369,7 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
                   type="button"
                   className={cn(
                     "flex w-full items-center gap-2.5 rounded-md px-2.5 py-1.5 text-left text-sm transition-colors hover:bg-accent",
-                    gitScope === null && selectedTurnId === null
+                    panelScope === "turns" && selectedTurnId === null
                       ? "text-foreground font-medium"
                       : "text-muted-foreground",
                   )}
@@ -1374,6 +1427,31 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
                   No turns found
                 </p>
               )}
+              <DiffCommitPicker
+                commits={commits}
+                search={turnPickerSearch}
+                selected={diffSearch.diffCommit}
+                loading={commitHistory.isFetching}
+                error={commitHistory.isError}
+                hasMore={commitHistory.hasNextPage}
+                onLoadMore={() => {
+                  void commitHistory.fetchNextPage();
+                }}
+                onSelect={(sha) => {
+                  if (!activeThreadId) return;
+                  void navigate({
+                    to: "/$threadId",
+                    params: { threadId: activeThreadId },
+                    search: (previous) => ({
+                      ...stripDiffSearchParams(previous),
+                      diff: "1",
+                      diffScope: "commit",
+                      diffCommit: sha,
+                    }),
+                  });
+                  setTurnPickerOpen(false);
+                }}
+              />
             </div>
           </PopoverPopup>
         </Popover>

@@ -51,20 +51,7 @@ export function createTerminalViewport(
   let session: ReturnType<typeof connectTerminalSession> | undefined;
 
   const fit = (onlyIfChanged = false) => {
-    if (disposed || !canFitTerminal(terminal, mount)) return;
-    const { cols, rows } = terminal;
-    const wasAtBottom = terminal.buffer.active.viewportY >= terminal.buffer.active.baseY;
-    fitAddon.fit();
-    if (onlyIfChanged && terminal.cols === cols && terminal.rows === rows) return;
-    if (wasAtBottom) terminal.scrollToBottom();
-    void api.terminal
-      .resize({
-        threadId: options.threadId,
-        terminalId: options.terminalId,
-        cols: terminal.cols,
-        rows: terminal.rows,
-      })
-      .catch(() => undefined);
+    if (!disposed) session?.fit(onlyIfChanged);
   };
 
   const dispose = () => {

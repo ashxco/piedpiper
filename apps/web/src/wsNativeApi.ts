@@ -53,6 +53,8 @@ export function createWsNativeApi(): NativeApi {
       clear: (input) => rpcClient.terminal.clear(input),
       // @ts-expect-error — `.Encoded` vs `.Type` mismatch on terminalId default
       restart: (input) => rpcClient.terminal.restart(input),
+      // @ts-expect-error — `.Encoded` vs `.Type` mismatch on terminalId default
+      detach: (input) => rpcClient.terminal.detach(input),
       close: (input) => rpcClient.terminal.close(input),
       onEvent: (callback, options?: { readonly onSubscribed?: () => void }) =>
         rpcClient.terminal.onEvent(callback, options),
@@ -83,6 +85,7 @@ export function createWsNativeApi(): NativeApi {
       pull: rpcClient.git.pull,
       status: rpcClient.git.status,
       diffPreview: rpcClient.git.diffPreview,
+      listCommits: rpcClient.git.listCommits,
       listBranches: rpcClient.git.listBranches,
       createWorktree: rpcClient.git.createWorktree,
       createWorktreeWithProgress: rpcClient.git.createWorktreeWithProgress,

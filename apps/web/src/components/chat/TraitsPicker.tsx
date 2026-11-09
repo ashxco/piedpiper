@@ -7,7 +7,6 @@ import {
   type ThreadId,
 } from "@piedpiper/contracts";
 import {
-  applyClaudePromptEffortPrefix,
   isClaudeUltrathinkPrompt,
   trimOrNull,
   getDefaultEffort,
@@ -31,7 +30,7 @@ import {
   MenuTrigger,
 } from "../ui/menu";
 import { useComposerDraftStore } from "../../composerDraftStore";
-import { ULTRATHINK_PROMPT_PREFIX } from "../../composer-logic";
+import { applyComposerEffortToPrompt, updateComposerEffortOptions } from "../../lib/composerEffort";
 import { getProviderModelCapabilities } from "../../providerModels";
 import { cn } from "~/lib/utils";
 import {
@@ -278,19 +277,14 @@ export const TraitsMenuContent = memo(function TraitsMenuContentImpl({
     const nextOption = effortLevels.find((option) => option.value === value);
     if (!nextOption) return;
     if (caps.promptInjectedEffortLevels.includes(nextOption.value)) {
-      editPrompt((current) =>
-        current.trim().length === 0
-          ? ULTRATHINK_PROMPT_PREFIX
-          : applyClaudePromptEffortPrefix(current, "ultrathink"),
-      );
+      editPrompt((current) => applyComposerEffortToPrompt(current, nextOption.value));
       return;
     }
     if (ultrathinkInBodyText) return;
     if (ultrathinkPromptControlled) {
-      editPrompt((current) => current.replace(/^Ultrathink:\s*/i, ""));
+      editPrompt((current) => applyComposerEffortToPrompt(current, nextOption.value));
     }
-    const effortKey = provider === "codex" ? "reasoningEffort" : "effort";
-    updateModelOptions(buildNextOptions(provider, modelOptions, { [effortKey]: nextOption.value }));
+    updateModelOptions(updateComposerEffortOptions(provider, modelOptions, nextOption.value));
   };
 
   if (

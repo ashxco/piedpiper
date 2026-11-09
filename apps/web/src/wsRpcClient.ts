@@ -57,6 +57,7 @@ export interface WsRpcClient {
     readonly open: RpcUnaryMethod<typeof WS_METHODS.terminalOpen>;
     readonly write: RpcUnaryMethod<typeof WS_METHODS.terminalWrite>;
     readonly resize: RpcUnaryMethod<typeof WS_METHODS.terminalResize>;
+    readonly detach: RpcUnaryMethod<typeof WS_METHODS.terminalDetach>;
     readonly clear: RpcUnaryMethod<typeof WS_METHODS.terminalClear>;
     readonly restart: RpcUnaryMethod<typeof WS_METHODS.terminalRestart>;
     readonly close: RpcUnaryMethod<typeof WS_METHODS.terminalClose>;
@@ -87,6 +88,7 @@ export interface WsRpcClient {
     readonly pull: RpcUnaryMethod<typeof WS_METHODS.gitPull>;
     readonly status: RpcUnaryMethod<typeof WS_METHODS.gitStatus>;
     readonly diffPreview: RpcUnaryMethod<typeof WS_METHODS.gitDiffPreview>;
+    readonly listCommits: RpcUnaryMethod<typeof WS_METHODS.gitListCommits>;
     readonly runStackedAction: (
       input: GitRunStackedActionInput,
       options?: GitRunStackedActionOptions,
@@ -176,6 +178,7 @@ export function createWsRpcClient(transport = new WsTransport()): WsRpcClient {
       open: (input) => transport.request((client) => client[WS_METHODS.terminalOpen](input)),
       write: (input) => transport.request((client) => client[WS_METHODS.terminalWrite](input)),
       resize: (input) => transport.request((client) => client[WS_METHODS.terminalResize](input)),
+      detach: (input) => transport.request((client) => client[WS_METHODS.terminalDetach](input)),
       clear: (input) => transport.request((client) => client[WS_METHODS.terminalClear](input)),
       restart: (input) => transport.request((client) => client[WS_METHODS.terminalRestart](input)),
       close: (input) => transport.request((client) => client[WS_METHODS.terminalClose](input)),
@@ -218,6 +221,8 @@ export function createWsRpcClient(transport = new WsTransport()): WsRpcClient {
     git: {
       pull: (input) => transport.request((client) => client[WS_METHODS.gitPull](input)),
       status: (input) => transport.request((client) => client[WS_METHODS.gitStatus](input)),
+      listCommits: (input) =>
+        transport.request((client) => client[WS_METHODS.gitListCommits](input)),
       diffPreview: (input) =>
         transport.request((client) => client[WS_METHODS.gitDiffPreview](input)),
       runStackedAction: async (input, options) => {

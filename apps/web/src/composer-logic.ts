@@ -4,7 +4,13 @@ import { INLINE_TERMINAL_CONTEXT_PLACEHOLDER } from "./lib/terminalContext";
 import { isMacPlatform } from "./lib/utils";
 
 export type ComposerTriggerKind = "path" | "slash-command" | "slash-model";
-export type ComposerSlashCommand = "model" | "plan" | "default" | "compact" | "usage-limits";
+export type ComposerSlashCommand =
+  | "model"
+  | "plan"
+  | "default"
+  | "compact"
+  | "usage-limits"
+  | "clear";
 
 export interface ComposerTrigger {
   kind: ComposerTriggerKind;

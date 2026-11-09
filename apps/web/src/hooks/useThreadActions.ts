@@ -1,3 +1,5 @@
+import { takeThreadFiles } from "../pendingThreadFiles";
+import { useComposerContextStore } from "../composerContextStore";
 import { ThreadId } from "@piedpiper/contracts";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useRouter } from "@tanstack/react-router";
@@ -278,6 +280,8 @@ export function useThreadActions() {
         threadId,
       });
       clearComposerDraftForThread(threadId);
+      takeThreadFiles(threadId);
+      useComposerContextStore.getState().setFreshContext(threadId, false);
       clearProjectDraftThreadById(thread.projectId, thread.id);
       clearTerminalState(threadId);
 

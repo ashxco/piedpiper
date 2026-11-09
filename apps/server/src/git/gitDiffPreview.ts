@@ -94,6 +94,48 @@ export const readGitDiffPreview = Effect.fn("readGitDiffPreview")(function* (
     });
 
   const root = (yield* run("root", input.cwd, ["rev-parse", "--show-toplevel"])).stdout.trim();
+  if (input.scope === "commit") {
+    if (!input.commit)
+      return yield* new GitCommandError({
+        operation: "GitCore.diffPreview",
+        command: "git diff",
+        cwd: input.cwd,
+        detail: "Select a commit to review.",
+      });
+    const commit = (yield* run("commit", root, [
+      "rev-parse",
+      "--verify",
+      "--end-of-options",
+      `${input.commit}^{commit}`,
+    ])).stdout.trim();
+    const parentResult = yield* run(
+      "parent",
+      root,
+      ["rev-parse", "--verify", "--quiet", `${commit}^1`],
+      { allowNonZeroExit: true },
+    );
+    const parent =
+      parentResult.code === 0
+        ? parentResult.stdout.trim()
+        : (yield* run("emptyTree", root, ["hash-object", "-t", "tree", "--stdin"], {
+            stdin: "",
+          })).stdout.trim();
+    const patch = yield* run(
+      "commitPatch",
+      root,
+      [...PATCH_ARGS, ...(input.ignoreWhitespace ? ["-w"] : []), parent, commit, "--"],
+      {
+        maxOutputBytes: GIT_DIFF_PREVIEW_MAX_OUTPUT_BYTES,
+        truncateOutputAtMaxBytes: true,
+      },
+    );
+    return {
+      diff: patch.stdoutTruncated ? trimTruncatedPatchToWholeFile(patch.stdout) : patch.stdout,
+      baseRef: parent,
+      truncated: patch.stdoutTruncated,
+      untrackedIncomplete: false,
+    } satisfies GitDiffPreviewResult;
+  }
   const headExists =
     (yield* run("head", root, ["rev-parse", "--verify", "--quiet", "HEAD^{commit}"], {
       allowNonZeroExit: true,

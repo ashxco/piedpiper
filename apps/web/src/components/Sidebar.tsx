@@ -1,3 +1,4 @@
+import { takeThreadFiles } from "../pendingThreadFiles";
 import {
   BuildingIcon,
   FolderIcon,
@@ -729,6 +730,8 @@ export default function Sidebar() {
     void navigate({
       to: "/$threadId",
       params: { threadId },
+    }).catch(() => {
+      takeThreadFiles(threadId);
     });
   });
 

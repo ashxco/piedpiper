@@ -21,6 +21,8 @@ import type {
   GitPullResult,
   GitRemoveWorktreeInput,
   GitResolvePullRequestResult,
+  GitListCommitsInput,
+  GitListCommitsResult,
   GitDiffPreviewInput,
   GitDiffPreviewResult,
   GitStatusInput,
@@ -51,6 +53,7 @@ import type {
   TerminalMetadataStreamEvent,
   TerminalOpenInput,
   TerminalResizeInput,
+  TerminalDetachInput,
   TerminalRestartInput,
   TerminalSessionSnapshot,
   TerminalWriteInput,
@@ -182,6 +185,7 @@ export interface NativeApi {
     open: (input: typeof TerminalOpenInput.Encoded) => Promise<TerminalSessionSnapshot>;
     write: (input: typeof TerminalWriteInput.Encoded) => Promise<void>;
     resize: (input: typeof TerminalResizeInput.Encoded) => Promise<void>;
+    detach?: (input: typeof TerminalDetachInput.Encoded) => Promise<void>;
     clear: (input: typeof TerminalClearInput.Encoded) => Promise<void>;
     restart: (input: typeof TerminalRestartInput.Encoded) => Promise<TerminalSessionSnapshot>;
     close: (input: typeof TerminalCloseInput.Encoded) => Promise<void>;
@@ -246,6 +250,7 @@ export interface NativeApi {
     pull: (input: GitPullInput) => Promise<GitPullResult>;
     status: (input: GitStatusInput) => Promise<GitStatusResult>;
     diffPreview: (input: GitDiffPreviewInput) => Promise<GitDiffPreviewResult>;
+    listCommits: (input: GitListCommitsInput) => Promise<GitListCommitsResult>;
   };
   contextMenu: {
     show: <T extends string>(

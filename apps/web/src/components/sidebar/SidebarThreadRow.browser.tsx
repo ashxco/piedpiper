@@ -1,3 +1,4 @@
+import { takeThreadFiles, usePendingThreadFiles } from "../../pendingThreadFiles";
 import "../../index.css";
 
 import type { GitStatusResult, NativeApi, ProjectId, ThreadId } from "@piedpiper/contracts";
@@ -998,5 +999,33 @@ describe("SidebarThreadRow git status lease", () => {
       ).toContain("#2"),
     );
     expect(onRender).toHaveBeenCalled();
+  });
+});
+
+describe("SidebarThreadRow file drops", () => {
+  afterEach(() => {
+    cleanup();
+    usePendingThreadFiles.setState({ byThread: new Map() });
+  });
+  it("keeps rapid drops attached to the target chat while navigation is pending", async () => {
+    setThreadTitle("Drop target");
+    const navigate = vi.fn();
+    const screen = await render(
+      <Harness commitRename={noopAsync} renamingThreadId={null} navigateToThread={navigate} />,
+    );
+    const row = screen.container.querySelector<HTMLElement>(`[data-sidebar-row="${THREAD_ID}"]`)!;
+    const files = [
+      new File(["first"], "first.txt", { type: "text/plain" }),
+      new File(["second"], "second.txt", { type: "text/plain" }),
+    ];
+    for (const file of files) {
+      const dataTransfer = new DataTransfer();
+      dataTransfer.items.add(file);
+      row.dispatchEvent(new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer }));
+    }
+    expect(navigate).toHaveBeenCalledWith(THREAD_ID);
+    expect(takeThreadFiles("other-chat")).toEqual([]);
+    expect(takeThreadFiles(THREAD_ID)).toEqual(files);
+    expect(takeThreadFiles(THREAD_ID)).toEqual([]);
   });
 });

@@ -1,3 +1,9 @@
+import { takeThreadFiles, usePendingThreadFiles } from "../pendingThreadFiles";
+import { useOpenToolDiff } from "../hooks/useOpenToolDiff";
+import { usePromptStashStore, type PromptStashEntry } from "../promptStashStore";
+import { hydrateImagesFromPersisted } from "../lib/composerAttachmentNormalization";
+import { shouldAttachPastedText, nextPastedTextFileName } from "../lib/pastedText";
+import { useComposerContextStore } from "../composerContextStore";
 import {
   type ApprovalRequestId,
   DEFAULT_MODEL_BY_PROVIDER,
@@ -238,7 +244,8 @@ import {
 } from "./chat/composerApprovalRedirect";
 import type { ComposerCommandItem } from "./chat/ComposerCommandMenu";
 import {
-  buildComposerPdfAttachment,
+  buildComposerFileAttachment,
+  readFileAsDataUrl,
   buildExpiredTerminalContextToastCopy,
   buildLocalDraftThread,
   cloneComposerImageForRetry,
@@ -269,7 +276,8 @@ import {
   threadHasStarted,
   waitForStartedServerThread,
   isComposerMenuOpen,
-  isComposerPdfAttachment,
+  isComposerFileAttachment,
+  isComposerTextFile,
   isComposerPdfFile,
   isPathSuggestionCurrent,
   resolveCompactDisabledReason,
@@ -395,7 +403,7 @@ function failRevertForImageRoom(): never {
 const ATTACHMENT_PREVIEW_HANDOFF_TTL_MS = 5000;
 const TIMELINE_POSITION_RESTORE_MAX_FRAMES = 30;
 const IMAGE_SIZE_LIMIT_LABEL = `${Math.round(PROVIDER_SEND_TURN_MAX_IMAGE_BYTES / (1024 * 1024))}MB`;
-const PDF_SIZE_LIMIT_LABEL = `${Math.round(PROVIDER_SEND_TURN_MAX_FILE_BYTES / (1024 * 1024))}MB`;
+const FILE_SIZE_LIMIT_LABEL = `${Math.round(PROVIDER_SEND_TURN_MAX_FILE_BYTES / (1024 * 1024))}MB`;
 const EMPTY_ACTIVITIES: OrchestrationThreadActivity[] = [];
 const EMPTY_PROJECT_ENTRIES: ProjectEntry[] = [];
 const EMPTY_PROVIDERS: ServerProvider[] = [];
@@ -529,6 +537,7 @@ export default function ChatView({ threadId }: ChatViewProps) {
   );
   const timestampFormat = settings.timestampFormat;
   const navigate = useNavigate();
+  const onOpenToolDiff = useOpenToolDiff(threadId);
   const rawSearch = useSearch({
     strict: false,
     select: (params) => parseDiffRouteSearch(params),
@@ -1582,6 +1591,13 @@ export default function ChatView({ threadId }: ChatViewProps) {
           command: "default",
           label: "/default",
           description: "Switch this thread back to normal chat mode",
+        },
+        {
+          id: "slash:clear",
+          type: "slash-command",
+          command: "clear",
+          label: "/clear",
+          description: "Start the next message with fresh context",
         },
         {
           id: "slash:usage-limits",
@@ -2736,7 +2752,7 @@ export default function ChatView({ threadId }: ChatViewProps) {
     if (isThreadReverting(activeThreadId)) {
       toastManager.add({
         type: "error",
-        title: "Attach images after the revert finishes.",
+        title: "Attach files after the revert finishes.",
       });
       return;
     }
@@ -2744,7 +2760,7 @@ export default function ChatView({ threadId }: ChatViewProps) {
     if (pendingUserInputs.length > 0) {
       toastManager.add({
         type: "error",
-        title: "Attach images after answering pending questions.",
+        title: "Attach files after answering pending questions.",
       });
       return;
     }
@@ -2752,12 +2768,13 @@ export default function ChatView({ threadId }: ChatViewProps) {
     // Fitting is async, so images still being fitted count toward the attachment limit.
     const targetThreadId = activeThreadId;
     const acceptedFiles: File[] = [];
-    const acceptedPdfs: ComposerImageAttachment[] = [];
-    // A PDF already in the draft uses the same budget, so "images" would misdescribe the limit.
-    const batchHasPdf =
-      files.some(isComposerPdfFile) || composerImagesRef.current.some(isComposerPdfAttachment);
-    const attachmentCountNoun = batchHasPdf ? "attachments" : "images";
-    const imageTotalSizeError = batchHasPdf
+    const acceptedDocuments: ComposerImageAttachment[] = [];
+    // Documents and images share the attachment count and total byte budget.
+    const batchHasDocument =
+      files.some((file) => isComposerPdfFile(file) || isComposerTextFile(file)) ||
+      composerImagesRef.current.some(isComposerFileAttachment);
+    const attachmentCountNoun = batchHasDocument ? "attachments" : "images";
+    const imageTotalSizeError = batchHasDocument
       ? COMPOSER_ATTACHMENT_TOTAL_SIZE_ERROR
       : COMPOSER_IMAGE_TOTAL_SIZE_ERROR;
     let nextImageCount =
@@ -2768,9 +2785,9 @@ export default function ChatView({ threadId }: ChatViewProps) {
     );
     let error: string | null = null;
     for (const file of files) {
-      if (isComposerPdfFile(file)) {
+      if (isComposerPdfFile(file) || isComposerTextFile(file)) {
         if (file.size > PROVIDER_SEND_TURN_MAX_FILE_BYTES) {
-          error = `'${file.name}' exceeds the ${PDF_SIZE_LIMIT_LABEL} attachment limit.`;
+          error = `'${file.name}' exceeds the ${FILE_SIZE_LIMIT_LABEL} attachment limit.`;
           continue;
         }
         if (nextImageCount >= PROVIDER_SEND_TURN_MAX_ATTACHMENTS) {
@@ -2781,14 +2798,14 @@ export default function ChatView({ threadId }: ChatViewProps) {
           error = COMPOSER_ATTACHMENT_TOTAL_SIZE_ERROR;
           continue;
         }
-        acceptedPdfs.push(buildComposerPdfAttachment(randomUUID(), file));
+        acceptedDocuments.push(buildComposerFileAttachment(randomUUID(), file));
         nextImageCount += 1;
         nextTotalBytes += file.size;
         continue;
       }
       const isHeicImage = isHeicImageFile(file);
       if (!file.type.startsWith("image/") && !isHeicImage) {
-        error = `Unsupported file type for '${file.name}'. Please attach images or PDFs.`;
+        error = `Unsupported file type for '${file.name}'. Please attach images, PDFs, or text files.`;
         continue;
       }
       if (!isHeicImage && !isProviderSendTurnSupportedImageMimeType(file.type)) {
@@ -2809,9 +2826,9 @@ export default function ChatView({ threadId }: ChatViewProps) {
       nextTotalBytes += budgetBytes;
     }
 
-    // A PDF needs no fitting, so it lands in the draft right away.
-    if (acceptedPdfs.length > 0) {
-      addComposerDraftImages(targetThreadId, acceptedPdfs);
+    // Documents need no fitting, so they land in the draft right away.
+    if (acceptedDocuments.length > 0) {
+      addComposerDraftImages(targetThreadId, acceptedDocuments);
     }
     if (acceptedFiles.length === 0) {
       setThreadError(targetThreadId, error);
@@ -2893,20 +2910,67 @@ export default function ChatView({ threadId }: ChatViewProps) {
   };
 
   const addComposerImagesStable = useStableCallback(addComposerImages);
+  const pendingThreadFiles = usePendingThreadFiles((state) =>
+    activeThreadId ? state.byThread.get(activeThreadId) : undefined,
+  );
+  useEffect(() => {
+    if (!activeThreadId || !activeThread || !pendingThreadFiles?.length) return;
+    const files = takeThreadFiles(activeThreadId);
+    if (files.length) addComposerImagesStable(files);
+  }, [activeThreadId, activeThread, pendingThreadFiles, addComposerImagesStable]);
+  const pasteAsTextUntilRef = useRef(0);
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      pasteAsTextUntilRef.current =
+        (event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === "v"
+          ? Date.now() + 1000
+          : 0;
+    };
+    document.addEventListener("keydown", onKeyDown, true);
+    return () => document.removeEventListener("keydown", onKeyDown, true);
+  }, []);
   const onComposerPaste = useCallback(
     (event: React.ClipboardEvent<HTMLElement>) => {
       const files = Array.from(event.clipboardData.files);
       if (files.length === 0) {
+        const text = event.clipboardData.getData("text/plain");
+        const bypass = Date.now() < pasteAsTextUntilRef.current;
+        pasteAsTextUntilRef.current = 0;
+        const images = composerImagesRef.current;
+        const bytes = shouldAttachPastedText(text, bypass)
+          ? new TextEncoder().encode(text).byteLength
+          : 0;
+        if (
+          bytes > 0 &&
+          activeThreadId &&
+          !isThreadReverting(activeThreadId) &&
+          pendingUserInputs.length === 0 &&
+          images.length + countPreparingComposerImages(activeThreadId) <
+            PROVIDER_SEND_TURN_MAX_ATTACHMENTS &&
+          bytes <= PROVIDER_SEND_TURN_MAX_FILE_BYTES &&
+          images.reduce((total, image) => total + image.sizeBytes, bytes) <=
+            PROVIDER_SEND_TURN_MAX_TOTAL_IMAGE_BYTES
+        ) {
+          event.preventDefault();
+          composerEditorRef.current?.deleteSelection();
+          addComposerImagesStable([
+            new File([text], nextPastedTextFileName(images.map((image) => image.name)), {
+              type: "text/plain",
+            }),
+          ]);
+        }
         return;
       }
-      const imageFiles = files.filter(isComposerImageFile);
+      const imageFiles = files.filter(
+        (file) => isComposerImageFile(file) || isComposerPdfFile(file) || isComposerTextFile(file),
+      );
       if (imageFiles.length === 0) {
         return;
       }
       event.preventDefault();
       addComposerImagesStable(imageFiles);
     },
-    [addComposerImagesStable],
+    [addComposerImagesStable, activeThreadId, pendingUserInputs.length],
   );
   const onComposerFileDrop = useCallback(
     (files: File[]) => {
@@ -3267,6 +3331,9 @@ export default function ChatView({ threadId }: ChatViewProps) {
       // Built outside the try block: the React Compiler cannot lower conditional expressions inside try/catch.
       const turnStartCommand = {
         type: "thread.turn.start" as const,
+        ...(useComposerContextStore.getState().freshContextThreads.has(threadIdForSend)
+          ? { freshContext: true }
+          : {}),
         commandId: newCommandId(),
         threadId: threadIdForSend,
         message: {
@@ -3305,6 +3372,7 @@ export default function ChatView({ threadId }: ChatViewProps) {
         setComposerDraftInteractionMode(threadIdForSend, nextInteractionMode);
 
         await api.orchestration.dispatchCommand(turnStartCommand);
+        useComposerContextStore.getState().setFreshContext(threadIdForSend, false);
         // Optimistically open the plan sidebar when implementing (not refining).
         // "default" mode here means the agent is executing the plan, which produces
         // step-tracking activities that the sidebar will display.
@@ -3439,6 +3507,114 @@ export default function ChatView({ threadId }: ChatViewProps) {
     setComposerTrigger(null);
   };
 
+  const freshContext = useComposerContextStore((state) => state.freshContextThreads.has(threadId));
+  const setFreshContext = useComposerContextStore((state) => state.setFreshContext);
+
+  const [isStashingPrompt, setIsStashingPrompt] = useState(false);
+  const stashingPromptRef = useRef(false);
+  const onStashError = useStableCallback((error: unknown) => {
+    toastManager.add({
+      type: "error",
+      title: "Could not update stashed prompts",
+      description: error instanceof Error ? error.message : "Device storage is unavailable.",
+    });
+  });
+  const onStashPrompt = useStableCallback(async () => {
+    if (stashingPromptRef.current || countPreparingComposerImages(threadId) > 0) return;
+    const draft = useComposerDraftStore.getState().draftsByThreadId[threadId];
+    const comments = useReviewCommentDraftStore.getState().commentsByThreadId[threadId] ?? [];
+    if (
+      !draft ||
+      (!draft.prompt.trim() &&
+        draft.images.length === 0 &&
+        draft.terminalContexts.length === 0 &&
+        comments.length === 0)
+    )
+      return;
+    if (draft.images.reduce((bytes, image) => bytes + image.sizeBytes, 0) > 2 * 1024 * 1024) {
+      onStashError(
+        new Error(
+          "This prompt has too much attachment data to stash on this device. Remove some attachments and try again.",
+        ),
+      );
+      return;
+    }
+    stashingPromptRef.current = true;
+    setIsStashingPrompt(true);
+    try {
+      const attachments = await Promise.all(
+        draft.images.map(async (image) => ({
+          id: image.id,
+          name: image.name,
+          mimeType: image.mimeType,
+          sizeBytes: image.sizeBytes,
+          dataUrl: await readFileAsDataUrl(image.file),
+        })),
+      );
+      usePromptStashStore.getState().add({
+        id: randomUUID(),
+        prompt: draft.prompt,
+        attachments,
+        terminalContexts: draft.terminalContexts,
+        reviewComments: comments,
+        provider: selectedProvider,
+        modelSelection: selectedModelSelection,
+        runtimeMode,
+        interactionMode,
+        freshContext,
+      });
+      const current = useComposerDraftStore.getState().draftsByThreadId[threadId];
+      const currentComments =
+        useReviewCommentDraftStore.getState().commentsByThreadId[threadId] ?? [];
+      if (
+        current?.prompt === draft.prompt &&
+        current.images === draft.images &&
+        current.terminalContexts === draft.terminalContexts &&
+        currentComments.length === comments.length &&
+        currentComments.every((comment, i) => comment === comments[i])
+      ) {
+        clearComposerForSend(threadId);
+        for (const image of draft.images) revokeBlobPreviewUrl(image.previewUrl);
+        clearReviewComments(threadId);
+        setFreshContext(threadId, false);
+      }
+    } catch (error) {
+      onStashError(error);
+    }
+    stashingPromptRef.current = false;
+    setIsStashingPrompt(false);
+  });
+  const onRestorePrompt = useStableCallback((entry: PromptStashEntry) => {
+    if (
+      composerDraftHasUserContent(threadId) ||
+      (useReviewCommentDraftStore.getState().commentsByThreadId[threadId]?.length ?? 0) > 0
+    )
+      return;
+    try {
+      const images = hydrateImagesFromPersisted(entry.attachments);
+      if (images.length !== entry.attachments.length) {
+        for (const image of images) revokeBlobPreviewUrl(image.previewUrl);
+        onStashError(
+          new Error("A saved attachment could not be read. The stashed prompt was kept."),
+        );
+        return;
+      }
+      const store = useComposerDraftStore.getState();
+      store.setPrompt(threadId, entry.prompt);
+      store.addImages(threadId, images);
+      store.setTerminalContexts(threadId, [...entry.terminalContexts]);
+      store.setModelSelection(threadId, entry.modelSelection);
+      store.setRuntimeMode(threadId, entry.runtimeMode);
+      store.setInteractionMode(threadId, entry.interactionMode);
+      restoreReviewComments(threadId, entry.reviewComments);
+      setFreshContext(threadId, entry.freshContext);
+      usePromptStashStore.getState().remove(entry.id);
+      scheduleComposerFocus();
+    } catch (error) {
+      onStashError(error);
+    }
+  });
+
   const onSend = async (
     e?: { preventDefault: () => void },
     options?: { followUp?: ComposerSendFollowUp },
@@ -3456,6 +3632,12 @@ export default function ChatView({ threadId }: ChatViewProps) {
       isRevertingCheckpoint ||
       sendInFlightThreadIdsRef.current.has(activeThread.id)
     ) {
+      return;
+    }
+    if (/^\/clear\s*$/i.test(promptRef.current.trim())) {
+      setFreshContext(activeThread.id, true);
+      setPrompt("");
+      setComposerTrigger(null);
       return;
     }
     composerTypingGuard.onSend();
@@ -3831,6 +4013,7 @@ export default function ChatView({ threadId }: ChatViewProps) {
           createdAt: messageCreatedAt,
           attachments: turnAttachmentsPromise,
         },
+        freshContext,
         settings: { modelSelection: selectedModelSelection, runtimeMode, interactionMode },
         threadCreateModelSelection: buildThreadCreateModelSelection({
           provider: selectedProvider,
@@ -3871,6 +4054,7 @@ export default function ChatView({ threadId }: ChatViewProps) {
       },
     );
     const turnStartSucceeded = sendResult.status === "sent";
+    if (turnStartSucceeded) setFreshContext(threadIdForSend, false);
     if (sendResult.status === "failed") {
       const { error: err, createdServerThread: createdServerThreadForLocalDraft } = sendResult;
       const sendErrorMessage = resolveFailedSendErrorMessage(err);
@@ -4593,6 +4777,35 @@ export default function ChatView({ threadId }: ChatViewProps) {
         return;
       }
 
+      if (command === "composer.stash") {
+        // User overrides can remove the default condition; still never capture editor/terminal saves.
+        if (
+          !(event.target instanceof Element) ||
+          !event.target.closest('[data-chat-composer-form="true"]')
+        )
+          return;
+        event.preventDefault();
+        event.stopPropagation();
+        if (!event.repeat) {
+          if (composerDraftHasUserContent(threadId) || composerReviewComments.length > 0)
+            void onStashPrompt();
+          else composerControlsRef.current?.openStash();
+        }
+        return;
+      }
+      if (command === "composer.increaseEffort" || command === "composer.decreaseEffort") {
+        if (event.repeat) {
+          event.preventDefault();
+          return;
+        }
+        if (
+          composerControlsRef.current?.stepEffort(command === "composer.increaseEffort" ? 1 : -1)
+        ) {
+          event.preventDefault();
+          event.stopPropagation();
+        }
+        return;
+      }
       if (isComposerControlCommand(command)) {
         if (command === "modelPicker.toggle" || command === "composer.effort") {
           if (event.repeat) {
@@ -4637,6 +4850,9 @@ export default function ChatView({ threadId }: ChatViewProps) {
   }, [
     activePendingApproval,
     activeProject,
+    onStashPrompt,
+    composerReviewComments.length,
+    threadId,
     applyPromptReplacement,
     isConnecting,
     missingCwd,
@@ -4733,6 +4949,17 @@ export default function ChatView({ threadId }: ChatViewProps) {
       return;
     }
     if (item.type === "slash-command") {
+      if (item.command === "clear") {
+        if (
+          applyPromptReplacement(trigger.rangeStart, trigger.rangeEnd, "", {
+            expectedText: snapshot.value.slice(trigger.rangeStart, trigger.rangeEnd),
+          })
+        ) {
+          setFreshContext(threadId, true);
+          setComposerHighlightedItemId(null);
+        }
+        return;
+      }
       if (item.command === "compact" || item.command === "usage-limits") {
         const applied = applyPromptReplacement(trigger.rangeStart, trigger.rangeEnd, "", {
           expectedText: snapshot.value.slice(trigger.rangeStart, trigger.rangeEnd),
@@ -5146,6 +5373,7 @@ export default function ChatView({ threadId }: ChatViewProps) {
                 expandedWorkGroups={expandedWorkGroups}
                 onToggleWorkGroup={onToggleWorkGroup}
                 onOpenTurnDiff={onOpenTurnDiff}
+                onOpenToolDiff={onOpenToolDiff}
                 revertTurnCountByUserMessageId={revertTurnCountByUserMessageId}
                 onRevertUserMessage={onRevertUserMessage}
                 isRevertingCheckpoint={isRevertingCheckpoint}
@@ -5295,6 +5523,12 @@ export default function ChatView({ threadId }: ChatViewProps) {
                   planSidebarOpen={planSidebarOpen}
                   activePlan={activePlan}
                   sidebarProposedPlan={sidebarProposedPlan}
+                  onStashPrompt={onStashPrompt}
+                  onRestorePrompt={onRestorePrompt}
+                  onStashError={onStashError}
+                  isStashingPrompt={isStashingPrompt}
+                  freshContext={freshContext}
+                  onCancelFreshContext={() => setFreshContext(threadId, false)}
                   onSend={onSendStable}
                   onInterrupt={onInterrupt}
                   onImplementPlanInNewThread={onImplementPlanInNewThread}

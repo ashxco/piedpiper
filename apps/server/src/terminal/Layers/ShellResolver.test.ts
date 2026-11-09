@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { PtySpawnError } from "../Services/PTY";
 import {
   defaultShellResolver,
+  shellCandidateFromCommand,
   isRetryableShellSpawnError,
   resolveShellCandidates,
 } from "./ShellResolver";
@@ -86,4 +87,12 @@ describe("isRetryableShellSpawnError", () => {
   it("does not retry an unrelated failure", () => {
     expect(isRetryableShellSpawnError(spawnError("Out of memory"))).toBe(false);
   });
+});
+
+it("starts Bash as a login shell only on macOS", () => {
+  expect(shellCandidateFromCommand("/bin/bash", "darwin")).toEqual({
+    shell: "/bin/bash",
+    args: ["-l"],
+  });
+  expect(shellCandidateFromCommand("/bin/bash", "linux")).toEqual({ shell: "/bin/bash" });
 });

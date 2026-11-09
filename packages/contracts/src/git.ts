@@ -276,12 +276,13 @@ export const GitCreateWorktreeProgressEvent = Schema.Union([
 ]);
 export type GitCreateWorktreeProgressEvent = typeof GitCreateWorktreeProgressEvent.Type;
 
-export const GitDiffPreviewScope = Schema.Literals(["uncommitted", "branch"]);
+export const GitDiffPreviewScope = Schema.Literals(["uncommitted", "branch", "commit"]);
 export type GitDiffPreviewScope = typeof GitDiffPreviewScope.Type;
 
 export const GitDiffPreviewInput = Schema.Struct({
   cwd: TrimmedNonEmptyStringSchema,
   scope: GitDiffPreviewScope,
+  commit: Schema.optional(Schema.String.check(Schema.isPattern(/^[a-f0-9]{40,64}$/i))),
   ignoreWhitespace: Schema.optional(Schema.Boolean),
 });
 export type GitDiffPreviewInput = typeof GitDiffPreviewInput.Type;
@@ -293,6 +294,25 @@ export const GitDiffPreviewResult = Schema.Struct({
   untrackedIncomplete: Schema.Boolean,
 });
 export type GitDiffPreviewResult = typeof GitDiffPreviewResult.Type;
+
+export const GitListCommitsInput = Schema.Struct({
+  cwd: TrimmedNonEmptyStringSchema,
+  cursor: Schema.optional(NonNegativeInt),
+  limit: Schema.optional(PositiveInt.check(Schema.isLessThanOrEqualTo(100))),
+});
+export type GitListCommitsInput = typeof GitListCommitsInput.Type;
+export const GitListCommitsResult = Schema.Struct({
+  commits: Schema.Array(
+    Schema.Struct({
+      sha: Schema.String,
+      subject: Schema.String,
+      author: Schema.String,
+      authoredAt: Schema.String,
+    }),
+  ),
+  nextCursor: Schema.NullOr(NonNegativeInt),
+});
+export type GitListCommitsResult = typeof GitListCommitsResult.Type;
 
 export const GitResolvePullRequestResult = Schema.Struct({
   pullRequest: GitResolvedPullRequest,

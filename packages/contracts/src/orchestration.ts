@@ -132,7 +132,7 @@ export const ChatFileAttachment = Schema.Struct({
   type: Schema.Literal("file"),
   id: ChatAttachmentId,
   name: TrimmedNonEmptyString.check(Schema.isMaxLength(255)),
-  mimeType: Schema.Literal("application/pdf"),
+  mimeType: Schema.Literals(["application/pdf", "text/plain"]),
   sizeBytes: NonNegativeInt.check(Schema.isLessThanOrEqualTo(PROVIDER_SEND_TURN_MAX_FILE_BYTES)),
 });
 export type ChatFileAttachment = typeof ChatFileAttachment.Type;
@@ -140,7 +140,7 @@ export type ChatFileAttachment = typeof ChatFileAttachment.Type;
 export const UploadChatFileAttachment = Schema.Struct({
   type: Schema.Literal("file"),
   name: TrimmedNonEmptyString.check(Schema.isMaxLength(255)),
-  mimeType: Schema.Literal("application/pdf"),
+  mimeType: Schema.Literals(["application/pdf", "text/plain"]),
   sizeBytes: NonNegativeInt.check(Schema.isLessThanOrEqualTo(PROVIDER_SEND_TURN_MAX_FILE_BYTES)),
   dataUrl: TrimmedNonEmptyString.check(
     Schema.isMaxLength(PROVIDER_SEND_TURN_MAX_FILE_DATA_URL_CHARS),
@@ -519,6 +519,7 @@ const ThreadMetaUpdateCommand = Schema.Struct({
   branch: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   // Compare-and-set guard: branch/worktreePath apply only if the thread's branch still equals this.
   expectedBranch: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
+  expectedWorktreePath: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   worktreePath: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
 });
 
@@ -549,6 +550,7 @@ export const ThreadTurnStartCommand = Schema.Struct({
     attachments: Schema.Array(ChatAttachment),
   }),
   modelSelection: Schema.optional(ModelSelection),
+  freshContext: Schema.optional(Schema.Boolean),
   titleSeed: Schema.optional(TrimmedNonEmptyString),
   runtimeMode: RuntimeMode.pipe(Schema.withDecodingDefault(() => DEFAULT_RUNTIME_MODE)),
   interactionMode: ProviderInteractionMode.pipe(
@@ -569,6 +571,7 @@ const ClientThreadTurnStartCommand = Schema.Struct({
     attachments: Schema.Array(UploadChatAttachment),
   }),
   modelSelection: Schema.optional(ModelSelection),
+  freshContext: Schema.optional(Schema.Boolean),
   titleSeed: Schema.optional(TrimmedNonEmptyString),
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,
@@ -927,6 +930,7 @@ export const ThreadTurnStartRequestedPayload = Schema.Struct({
   threadId: ThreadId,
   messageId: MessageId,
   modelSelection: Schema.optional(ModelSelection),
+  freshContext: Schema.optional(Schema.Boolean),
   titleSeed: Schema.optional(TrimmedNonEmptyString),
   runtimeMode: RuntimeMode.pipe(Schema.withDecodingDefault(() => DEFAULT_RUNTIME_MODE)),
   interactionMode: ProviderInteractionMode.pipe(

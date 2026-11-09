@@ -184,8 +184,12 @@ export async function serializeComposerImages(
   );
   const staged = await Promise.all(
     images.map(async (image): Promise<PersistedComposerImageAttachment | null> => {
-      // A PDF of up to 20 MB would overrun draft storage, so it lasts until a reload.
-      if (isComposerPdfAttachment(image)) return null;
+      // Large documents can overrun device storage; small text pastes can safely survive a reload.
+      if (
+        isComposerPdfAttachment(image) ||
+        (image.mimeType === "text/plain" && image.sizeBytes > 256 * 1024)
+      )
+        return null;
       const existingPersisted = existingPersistedById.get(image.id);
       try {
         const dataUrl = existingPersisted?.dataUrl ?? (await readDataUrl(image.file));
@@ -910,7 +914,7 @@ export type TurnStartImageAttachment =
   | {
       type: "file";
       name: string;
-      mimeType: "application/pdf";
+      mimeType: "application/pdf" | "text/plain";
       sizeBytes: number;
       dataUrl: string;
     };
@@ -922,25 +926,39 @@ export function isComposerPdfFile(file: Pick<File, "name" | "type">): boolean {
   return file.type.toLowerCase() === COMPOSER_PDF_MIME_TYPE || /\.pdf$/i.test(file.name);
 }
 
-/** Drafts are image-shaped: a PDF is told apart by its MIME type and has no preview. */
-export function isComposerPdfAttachment(image: Pick<ComposerImageAttachment, "mimeType">): boolean {
-  return image.mimeType === COMPOSER_PDF_MIME_TYPE;
+export function isComposerTextFile(file: Pick<File, "name" | "type">): boolean {
+  return (
+    file.type.startsWith("text/") ||
+    /^(application\/(json|xml|javascript|x-sh|toml|yaml))$/i.test(file.type) ||
+    /\.(txt|md|mdx|log|csv|tsv|json|jsonl|xml|yaml|yml|toml|ini|cfg|conf|env|gitignore|js|jsx|ts|tsx|mjs|cjs|css|scss|html|htm|py|rb|go|rs|java|c|h|cpp|hpp|cs|sh|bash|zsh|sql|swift|kt|lua|r|vue|svelte)$/i.test(
+      file.name,
+    ) ||
+    /^(Dockerfile|Makefile|LICENSE|README|\.gitignore|\.env)$/i.test(file.name)
+  );
 }
 
-export function buildComposerPdfAttachment(id: string, file: File): ComposerImageAttachment {
+export function isComposerFileAttachment(
+  image: Pick<ComposerImageAttachment, "mimeType">,
+): boolean {
+  return image.mimeType === "text/plain" || isComposerPdfAttachment(image);
+}
+
+export function buildComposerFileAttachment(id: string, file: File): ComposerImageAttachment {
+  const mimeType = isComposerPdfFile(file) ? COMPOSER_PDF_MIME_TYPE : "text/plain";
   return {
     type: "image",
     id,
-    name: file.name || "document.pdf",
-    mimeType: COMPOSER_PDF_MIME_TYPE,
+    name: file.name || "attachment.txt",
+    mimeType,
     sizeBytes: file.size,
     previewUrl: "",
-    // The data URL's type comes from the file, and the server rejects anything but a PDF.
-    file:
-      file.type === COMPOSER_PDF_MIME_TYPE
-        ? file
-        : new File([file], file.name, { type: COMPOSER_PDF_MIME_TYPE }),
+    file: file.type === mimeType ? file : new File([file], file.name, { type: mimeType }),
   };
+}
+
+/** Drafts share one attachment shape; non-images have no preview. */
+export function isComposerPdfAttachment(image: Pick<ComposerImageAttachment, "mimeType">): boolean {
+  return image.mimeType === COMPOSER_PDF_MIME_TYPE;
 }
 
 export function buildTurnStartImageAttachments(
@@ -954,8 +972,8 @@ export function buildTurnStartImageAttachments(
         sizeBytes: image.sizeBytes,
         dataUrl: await readDataUrl(image.file),
       };
-      return isComposerPdfAttachment(image)
-        ? { ...fields, type: "file", mimeType: COMPOSER_PDF_MIME_TYPE }
+      return isComposerFileAttachment(image)
+        ? { ...fields, type: "file", mimeType: image.mimeType as "application/pdf" | "text/plain" }
         : { ...fields, type: "image", mimeType: image.mimeType };
     }),
   );
@@ -975,7 +993,7 @@ export function buildOptimisticUserMessage(input: {
       mimeType: image.mimeType,
       sizeBytes: image.sizeBytes,
     };
-    return isComposerPdfAttachment(image)
+    return isComposerFileAttachment(image)
       ? { ...fields, type: "file" }
       : { ...fields, type: "image", previewUrl: image.previewUrl };
   });

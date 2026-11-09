@@ -65,6 +65,29 @@ describe("MessagesTimelineMinimap", () => {
     await screen.unmount();
   });
 
+  it("keeps navigation available without a fine pointer when a gutter fits", async () => {
+    const media = vi.spyOn(window, "matchMedia").mockImplementation((query) => ({
+      matches: false,
+      media: query,
+      onchange: null,
+      addListener() {},
+      removeListener() {},
+      addEventListener() {},
+      removeEventListener() {},
+      dispatchEvent: () => true,
+    }));
+    try {
+      const screen = await render(<Harness width={1000} onSelect={() => {}} />);
+      await expect.element(screen.getByRole("button", { name: /Jump to message/ })).toBeVisible();
+      expect(document.querySelector('[data-testid="timeline-minimap"]')?.className).not.toContain(
+        "pointer:fine",
+      );
+      await screen.unmount();
+    } finally {
+      media.mockRestore();
+    }
+  });
+
   it("selects the focused item with the keyboard", async () => {
     const onSelect = vi.fn();
     const screen = await render(<Harness width={1000} onSelect={onSelect} />);

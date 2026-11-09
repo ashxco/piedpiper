@@ -8,6 +8,7 @@ import { cn } from "~/lib/utils";
 interface ToolInputCodePreviewProps {
   readonly stream: ToolInputStream;
   readonly defaultCollapsed?: boolean;
+  readonly onOpenDiff?: (() => void) | undefined;
 }
 
 const MAX_PREVIEW_HEIGHT_PX = 180;
@@ -352,6 +353,15 @@ export const ToolInputCodePreview = memo(function ToolInputCodePreview(
           </span>
         )}
       </button>
+      {!isBashCommand && props.onOpenDiff && (
+        <button
+          type="button"
+          onClick={props.onOpenDiff}
+          className="px-2.5 py-1 text-xs text-muted-foreground hover:text-foreground"
+        >
+          Open edit in Diff
+        </button>
+      )}
       {!isCollapsed && (
         <div
           ref={scrollContainerRef}
