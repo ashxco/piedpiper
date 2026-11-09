@@ -20,7 +20,7 @@
       "version": "0.0.15",
       "dependencies": {
         "effect": "catalog:",
-        "electron": "40.10.6",
+        "electron": "44.10.2",
         "electron-updater": "^6.6.2",
       },
       "devDependencies": {
@@ -190,6 +190,8 @@
     "node-pty",
   ],
   "patchedDependencies": {
+    "@effect/platform-bun@4.0.0-beta.43": "patches/@effect%2Fplatform-bun@4.0.0-beta.43.patch",
+    "@effect/platform-node@4.0.0-beta.43": "patches/@effect%2Fplatform-node@4.0.0-beta.43.patch",
     "@effect/platform-node-shared@4.0.0-beta.43": "patches/@effect%2Fplatform-node-shared@4.0.0-beta.43.patch",
   },
   "overrides": {
@@ -1162,7 +1164,7 @@
 
     "effect": ["effect@4.0.0-beta.43", "", { "dependencies": { "@standard-schema/spec": "^1.1.0", "fast-check": "^4.5.3", "find-my-way-ts": "^0.1.6", "ini": "^6.0.0", "kubernetes-types": "^1.30.0", "msgpackr": "^1.11.8", "multipasta": "^0.2.7", "toml": "^3.0.0", "uuid": "^13.0.0", "yaml": "^2.8.2" } }, "sha512-AJYyDimIwJOn87uUz/JzmgDc5GfjxJbXvEbTvNzMa+M3Uer344bLo/O5mMRkqc1vBleA+Ygs4+dbE3QsqOkKTQ=="],
 
-    "electron": ["electron@40.10.6", "", { "dependencies": { "@electron-internal/extract-zip": "^1.0.1", "@electron/get": "^5.0.0", "@types/node": "^24.9.0" }, "bin": { "electron": "cli.js" } }, "sha512-TGjlkOU9Lg6K4KjDbsErywCWCIDaNgLh0q+xj0nlpRoQhevI7VBIxBTtJI/V30lypyLAaXMpnP9O9jui1/qRFw=="],
+    "electron": ["electron@44.10.2", "", { "dependencies": { "@electron-internal/extract-zip": "^1.0.1", "@electron/get": "^5.0.0", "@types/node": "^24.9.0" }, "bin": { "electron": "cli.js", "install-electron": "install.js" } }, "sha512-Bz+GV+9Xj++3RW95NYfzp5Wgivf61BgWTPBxYTOUETytVB1uLUAOdSM39Dn/V3PGYeGTE6LYeCTR5SCiu3BR2A=="],
 
     "electron-to-chromium": ["electron-to-chromium@1.5.313", "", {}, "sha512-QBMrTWEf00GXZmJyx2lbYD45jpI3TUFnNIzJ5BBc8piGUDwMPa1GV6HJWTZVvY/eiN3fSopl7NRbgGp9sZ9LTA=="],
 

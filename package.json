@@ -80,7 +80,9 @@
     ]
   },
   "patchedDependencies": {
-    "@effect/platform-node-shared@4.0.0-beta.43": "patches/@effect%2Fplatform-node-shared@4.0.0-beta.43.patch"
+    "@effect/platform-node-shared@4.0.0-beta.43": "patches/@effect%2Fplatform-node-shared@4.0.0-beta.43.patch",
+    "@effect/platform-node@4.0.0-beta.43": "patches/@effect%2Fplatform-node@4.0.0-beta.43.patch",
+    "@effect/platform-bun@4.0.0-beta.43": "patches/@effect%2Fplatform-bun@4.0.0-beta.43.patch"
   },
   "trustedDependencies": [
     "node-pty",

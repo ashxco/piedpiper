@@ -103,6 +103,10 @@
     "./threadRevert": {
       "types": "./src/threadRevert.ts",
       "import": "./src/threadRevert.ts"
+    },
+    "./editorUrl": {
+      "types": "./src/editorUrl.ts",
+      "import": "./src/editorUrl.ts"
     }
   },
   "scripts": {

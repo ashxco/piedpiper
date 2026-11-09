@@ -1,0 +1,25 @@
+diff --git a/src/NodeHttpServer.ts b/src/NodeHttpServer.ts
+--- a/src/NodeHttpServer.ts
++++ b/src/NodeHttpServer.ts
+@@ -101,7 +101,7 @@
+   const address = server.address()!
+ 
+   const wss = yield* Effect.acquireRelease(
+-    Effect.sync(() => new NodeWS.WebSocketServer({ noServer: true })),
++    Effect.sync(() => new NodeWS.WebSocketServer({ noServer: true, perMessageDeflate: true })),
+     (wss) =>
+       Effect.callback<void>((resume) => {
+         wss.close(() => resume(Effect.void))
+diff --git a/dist/NodeHttpServer.js b/dist/NodeHttpServer.js
+--- a/dist/NodeHttpServer.js
++++ b/dist/NodeHttpServer.js
+@@ -68,7 +68,8 @@
+   });
+   const address = server.address();
+   const wss = yield* Effect.acquireRelease(Effect.sync(() => new NodeWS.WebSocketServer({
+-    noServer: true
++    noServer: true,
++    perMessageDeflate: true
+   })), wss => Effect.callback(resume => {
+     wss.close(() => resume(Effect.void));
+   })).pipe(Scope.provide(scope), Effect.cached);

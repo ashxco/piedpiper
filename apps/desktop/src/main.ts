@@ -1,3 +1,4 @@
+import { isLocalEditorFileUrl } from "@piedpiper/shared/editorUrl";
 import * as ChildProcess from "node:child_process";
 import * as Crypto from "node:crypto";
 import * as FS from "node:fs";
@@ -30,6 +31,7 @@ import {
   type QuitConfirmationMode,
 } from "@piedpiper/contracts";
 import { autoUpdater } from "electron-updater";
+import { hasCachedUpdate, selectUpdateFile } from "./cachedUpdate";
 
 import type { ContextMenuItem } from "@piedpiper/contracts";
 import { NetService } from "@piedpiper/shared/Net";
@@ -288,7 +290,11 @@ function getSafeExternalUrl(rawUrl: unknown): string | null {
     return null;
   }
 
-  if (parsedUrl.protocol !== "https:" && parsedUrl.protocol !== "http:") {
+  if (
+    parsedUrl.protocol !== "https:" &&
+    parsedUrl.protocol !== "http:" &&
+    !isLocalEditorFileUrl(parsedUrl)
+  ) {
     return null;
   }
 
@@ -832,6 +838,31 @@ async function downloadAvailableUpdate(): Promise<{ accepted: boolean; completed
   }
 }
 
+async function resumeCachedUpdate(version: string, files: unknown): Promise<void> {
+  const file = selectUpdateFile(files, process.platform, desktopRuntimeInfo.hostArch);
+  if (!file) return;
+  try {
+    const helper = await (
+      autoUpdater as unknown as {
+        getOrCreateDownloadHelper(): Promise<{ cacheDirForPendingUpdate: string }>;
+      }
+    ).getOrCreateDownloadHelper();
+    if (!(await hasCachedUpdate(helper.cacheDirForPendingUpdate, file))) return;
+    // The available event is raised before checkForUpdates releases its reservation.
+    if (runningUpdateCheck) await runningUpdateCheck.catch(() => undefined);
+    if (
+      isQuitting ||
+      updateCheckInFlight ||
+      updateState.status !== "available" ||
+      updateState.availableVersion !== version
+    )
+      return;
+    await downloadAvailableUpdate();
+  } catch (error) {
+    console.info("[desktop-updater] Unable to restore cached update:", formatErrorMessage(error));
+  }
+}
+
 async function installDownloadedUpdate(): Promise<{ accepted: boolean; completed: boolean }> {
   // A poll can start while the renderer's confirm dialog is open; it must not drop the install.
   if (runningUpdateCheck) await waitUntilSettled(runningUpdateCheck, INSTALL_UPDATE_CHECK_WAIT_MS);
@@ -970,6 +1001,7 @@ function configureAutoUpdater(): void {
     );
     lastLoggedDownloadMilestone = -1;
     console.info(`[desktop-updater] Update available: ${info.version}`);
+    void resumeCachedUpdate(info.version, info.files);
   });
   autoUpdater.on("update-not-available", () => {
     setUpdateState(reduceDesktopUpdateStateOnNoUpdate(updateState, new Date().toISOString()));

@@ -1,3 +1,4 @@
+import { isLocalEditorFileHref } from "@piedpiper/shared/editorUrl";
 import {
   mayContainCodexDirectives,
   remarkCodexDirectives,
@@ -273,7 +274,7 @@ export function getHighlighterPromise(language: string): Promise<DiffsHighlighte
 // Local file hrefs skip the default sanitizer; the link renderer opens them or renders them inert.
 // Image sources do too, and the image renderer decides how each one loads.
 function chatMarkdownUrlTransform(url: string, key: string): string {
-  if (key === "href" && isLocalFileMarkdownHref(url)) return url;
+  if (key === "href" && (isLocalFileMarkdownHref(url) || isLocalEditorFileHref(url))) return url;
   if (key === "src" && isPreservedMarkdownImageSource(url)) return url;
   return defaultUrlTransform(url);
 }
@@ -822,10 +823,10 @@ function handleChatMarkdownDoubleClick(event: ReactMouseEvent<HTMLElement>) {
 
 // Chromium turns an Option/Alt-click into a download, so desktop opens the link while the key is down.
 function handleExternalLinkClick(event: ReactMouseEvent<HTMLAnchorElement>) {
-  if (event.defaultPrevented || !isElectron || !event.altKey) return;
+  if (event.defaultPrevented || !isElectron) return;
   // The resolved URL, since the desktop shell opens only absolute http(s) links.
   const url = event.currentTarget.href;
-  if (!/^https?:\/\//i.test(url)) return;
+  if (!isLocalEditorFileHref(url) && (!event.altKey || !/^https?:\/\//i.test(url))) return;
   event.preventDefault();
   event.stopPropagation();
   void readNativeApi()

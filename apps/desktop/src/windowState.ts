@@ -23,7 +23,7 @@ export interface WindowStateSource {
 }
 
 // Small enough to tile into half-screen slots on scaled displays; also the enforced window minimum.
-export const MAIN_WINDOW_MIN_SIZE = { width: 600, height: 480 } as const;
+export const MAIN_WINDOW_MIN_SIZE = { width: 400, height: 360 } as const;
 export const DEFAULT_MAIN_WINDOW_SIZE = { width: 1100, height: 780 } as const;
 const WINDOW_STATE_PERSIST_DEBOUNCE_MS = 500;
 const EMPTY_WINDOW_STATE: PersistedWindowState = { bounds: null, maximized: false };
