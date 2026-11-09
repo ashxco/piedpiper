@@ -16,7 +16,12 @@ const entry: PromptStashEntry = {
   interactionMode: "default",
   freshContext: false,
 };
-afterEach(() => usePromptStashStore.setState({ entries: [] }));
+afterEach(() => {
+  usePromptStashStore.setState({ entries: [] });
+  for (const key of Object.keys(localStorage)) {
+    if (key.startsWith("piedpiper:prompt-stash:")) localStorage.removeItem(key);
+  }
+});
 
 it("restores a saved prompt only into an empty composer", async () => {
   usePromptStashStore.setState({ entries: [entry] });
@@ -56,4 +61,42 @@ it("keeps prompts for a different provider out of the current queue", async () =
   await expect.element(screen.getByRole("menuitem", { name: "No stashed prompts" })).toBeVisible();
   await expect.element(screen.getByText(entry.prompt)).not.toBeInTheDocument();
   await screen.unmount();
+});
+
+it("synchronizes saved prompts and deletions between open windows", async () => {
+  const frame = document.createElement("iframe");
+  frame.srcdoc = `<script type="module">
+    import { usePromptStashStore } from "/src/promptStashStore.ts";
+    window.stash = usePromptStashStore;
+  </script>`;
+  document.body.append(frame);
+  const peer = () => (frame.contentWindow as Window & { stash?: typeof usePromptStashStore }).stash;
+  try {
+    await vi.waitFor(() => expect(peer()).toBeDefined());
+    usePromptStashStore.getState().add(entry);
+    await vi.waitFor(() => expect(peer()?.getState().entries).toEqual([entry]));
+    peer()!
+      .getState()
+      .add({ ...entry, id: "peer", prompt: "Saved in another window" });
+    await vi.waitFor(() =>
+      expect(
+        usePromptStashStore
+          .getState()
+          .entries.map((item) => item.id)
+          .toSorted(),
+      ).toEqual(["peer", "saved"]),
+    );
+    usePromptStashStore.getState().remove(entry.id);
+    await vi.waitFor(() =>
+      expect(
+        peer()
+          ?.getState()
+          .entries.map((item) => item.id),
+      ).toEqual(["peer"]),
+    );
+    peer()!.getState().remove("peer");
+    await vi.waitFor(() => expect(usePromptStashStore.getState().entries).toEqual([]));
+  } finally {
+    frame.remove();
+  }
 });

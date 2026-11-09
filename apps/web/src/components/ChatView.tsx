@@ -148,7 +148,6 @@ import {
 import { SnoozedThreadBanner } from "./sidebar/SnoozedThreadBanner";
 import { isInsideConfirmationDialog } from "../lib/confirmationDialogGuard";
 import { workspaceAreaProps } from "../lib/workspaceFocus";
-import { appendReviewCommentsToPrompt } from "~/reviewCommentContext";
 import { selectReviewComments, useReviewCommentDraftStore } from "~/reviewCommentDraftStore";
 import { resolveThreadBranchUpdateForNextTurn } from "./BranchToolbar.logic";
 import { requestDiffFileReveal } from "../diffFileRevealStore";
@@ -3275,9 +3274,11 @@ export default function ChatView({ threadId }: ChatViewProps) {
   const onSubmitPlanFollowUp = useCallback(
     async ({
       text,
+      images,
       interactionMode: nextInteractionMode,
     }: {
       text: string;
+      images: ReadonlyArray<ComposerImageAttachment>;
       interactionMode: "default" | "plan";
     }): Promise<boolean> => {
       const api = readNativeApi();
@@ -3292,21 +3293,14 @@ export default function ChatView({ threadId }: ChatViewProps) {
         return false;
       }
 
-      const trimmed = text.trim();
-      if (!trimmed) {
+      const outgoingMessageText = text.trim();
+      if (!outgoingMessageText) {
         return false;
       }
 
       const threadIdForSend = activeThread.id;
       const messageIdForSend = newMessageId();
       const messageCreatedAt = new Date().toISOString();
-      const outgoingMessageText = formatOutgoingPrompt({
-        provider: selectedProvider,
-        model: selectedModel,
-        models: selectedProviderModels,
-        effort: selectedPromptEffort,
-        text: trimmed,
-      });
       const lengthError = getComposerPromptLengthValidationMessage(outgoingMessageText);
       if (lengthError) {
         setThreadError(threadIdForSend, lengthError);
@@ -3318,13 +3312,12 @@ export default function ChatView({ threadId }: ChatViewProps) {
       setThreadError(threadIdForSend, null);
       setOptimisticUserMessages((existing) => [
         ...existing,
-        {
+        buildOptimisticUserMessage({
           id: messageIdForSend,
-          role: "user",
           text: outgoingMessageText,
+          images,
           createdAt: messageCreatedAt,
-          streaming: false,
-        },
+        }),
       ]);
       shouldAutoScrollRef.current = true;
       forceStickToBottom();
@@ -3340,7 +3333,6 @@ export default function ChatView({ threadId }: ChatViewProps) {
           messageId: messageIdForSend,
           role: "user" as const,
           text: outgoingMessageText,
-          attachments: [],
         },
         modelSelection: selectedModelSelection,
         titleSeed: activeThread.title,
@@ -3359,6 +3351,7 @@ export default function ChatView({ threadId }: ChatViewProps) {
       const openPlanPanel = () => planPanelRef.current?.open();
 
       try {
+        const attachments = await buildTurnStartImageAttachments(images);
         await persistThreadSettingsForNextTurn({
           threadId: threadIdForSend,
           createdAt: messageCreatedAt,
@@ -3371,7 +3364,10 @@ export default function ChatView({ threadId }: ChatViewProps) {
         // while the same-thread implementation turn is starting.
         setComposerDraftInteractionMode(threadIdForSend, nextInteractionMode);
 
-        await api.orchestration.dispatchCommand(turnStartCommand);
+        await api.orchestration.dispatchCommand({
+          ...turnStartCommand,
+          message: { ...turnStartCommand.message, attachments },
+        });
         useComposerContextStore.getState().setFreshContext(threadIdForSend, false);
         // Optimistically open the plan sidebar when implementing (not refining).
         // "default" mode here means the agent is executing the plan, which produces
@@ -3382,9 +3378,11 @@ export default function ChatView({ threadId }: ChatViewProps) {
         sendInFlightThreadIdsRef.current.delete(threadIdForSend);
         return true;
       } catch (err) {
-        setOptimisticUserMessages((existing) =>
-          existing.filter((message) => message.id !== messageIdForSend),
-        );
+        setOptimisticUserMessages((existing) => {
+          const removed = existing.find((message) => message.id === messageIdForSend);
+          if (removed) revokeUserMessagePreviewUrls(removed);
+          return existing.filter((message) => message.id !== messageIdForSend);
+        });
         setThreadError(
           threadIdForSend,
           err instanceof Error ? err.message : "Failed to send plan follow-up.",
@@ -3405,13 +3403,9 @@ export default function ChatView({ threadId }: ChatViewProps) {
       persistThreadSettingsForNextTurn,
       resetLocalDispatch,
       runtimeMode,
-      selectedPromptEffort,
       selectedModelSelection,
-      selectedProvider,
-      selectedProviderModels,
       setComposerDraftInteractionMode,
       setThreadError,
-      selectedModel,
     ],
   );
 
@@ -3763,10 +3757,22 @@ export default function ChatView({ threadId }: ChatViewProps) {
       reviewCommentCount: composerReviewComments.length,
     });
     if (showPlanFollowUpPrompt && activeProposedPlan) {
-      // An empty draft with review comments refines the plan with just those comments: implementing
-      // it would leave the comments behind without saying so.
+      // Any sendable draft content refines the plan, including attachments without typed text.
       const followUp = resolvePlanFollowUpSubmission({
-        draftText: appendReviewCommentsToPrompt(trimmed, composerReviewComments),
+        draftText: hasSendableContent
+          ? buildComposerOutgoingMessageText({
+              prompt: promptForSend,
+              terminalContexts: sendableComposerTerminalContexts,
+              reviewComments: composerReviewComments,
+              hasNonImageAttachment: composerImages.some(
+                (attachment) => !attachment.mimeType.startsWith("image/"),
+              ),
+              provider: selectedProvider,
+              model: selectedModel,
+              models: selectedProviderModels,
+              effort: null,
+            })
+          : "",
         planMarkdown: activeProposedPlan.planMarkdown,
       });
       const followUpOutgoingText = formatOutgoingPrompt({
@@ -3795,7 +3801,8 @@ export default function ChatView({ threadId }: ChatViewProps) {
       clearComposerForSend(followUpThreadId);
       clearReviewComments(followUpThreadId);
       const followUpSent = await onSubmitPlanFollowUp({
-        text: followUp.text,
+        text: followUpOutgoingText,
+        images: followUpSnapshot.images,
         interactionMode: followUp.interactionMode,
       });
       if (!followUpSent) {

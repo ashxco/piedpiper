@@ -508,8 +508,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     [composerImages.length, composerTerminalContexts, prompt],
   );
   const composerHasSendableContent = composerSendState.hasSendableContent || reviewCommentCount > 0;
-  // Comments alone refine the plan on send, so the button must not promise to implement it.
-  const planFollowUpHasContent = prompt.trim().length > 0 || reviewCommentCount > 0;
+  // Attachments and context alone refine the plan too.
+  const planFollowUpHasContent = composerHasSendableContent;
   const composerFooterHasWideActions =
     showPlanFollowUpPrompt || activePendingProgress !== null || isStopPending;
   const composerFooterActionLayoutKey = useMemo(() => {

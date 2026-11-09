@@ -4553,6 +4553,106 @@ describe("ChatView timeline estimator parity (full app)", () => {
       }
     });
 
+    it.each([
+      { kind: "normal", prompt: "Read the attached requirements" },
+      { kind: "plan", prompt: "Refine using these requirements" },
+      { kind: "plan", prompt: "" },
+    ])("sends attached files in $kind mode with prompt '$prompt'", async ({ kind, prompt }) => {
+      const mounted = await mountChatView({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot:
+          kind === "plan"
+            ? createSnapshotWithPlanFollowUpPrompt()
+            : createSnapshotForTargetUser({
+                targetMessageId: "msg-file-send" as MessageId,
+                targetText: "previous message",
+              }),
+        resolveRpc: (body) =>
+          body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand ? { sequence: 1 } : undefined,
+      });
+      try {
+        await waitForComposerEditor();
+        pickFiles([
+          new File(["Important requirements\n"], "requirements.txt", { type: "text/plain" }),
+        ]);
+        await vi.waitFor(() => expect(readDraftImages()).toHaveLength(1));
+        if (prompt) await typeComposerPrompt(prompt);
+        if (kind === "plan") {
+          const refine = await waitForButtonByText("Refine");
+          await vi.waitFor(() => expect(refine.disabled).toBe(false));
+          refine.click();
+        } else {
+          await userEvent.keyboard("{Enter}");
+        }
+        await vi.waitFor(() => expect(hasTurnStartRequest()).toBe(true));
+        const request = wsRequests.find(
+          (item) =>
+            item._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+            item.type === "thread.turn.start",
+        ) as { interactionMode?: string; message?: { text?: string; attachments?: unknown[] } };
+        expect(readDraftImages()).toHaveLength(0);
+        expect(request.message?.attachments).toEqual([
+          expect.objectContaining({
+            type: "file",
+            name: "requirements.txt",
+            mimeType: "text/plain",
+            dataUrl: `data:text/plain;base64,${btoa("Important requirements\n")}`,
+          }),
+        ]);
+        if (prompt) expect(request.message?.text).toContain(prompt);
+        if (kind === "plan") expect(request.interactionMode).toBe("plan");
+      } finally {
+        await mounted.cleanup();
+      }
+    });
+
+    it.each([true, false])(
+      "keeps plan follow-up context and files when send succeeds=%s",
+      async (succeeds) => {
+        const mounted = await mountChatView({
+          viewport: DEFAULT_VIEWPORT,
+          snapshot: createSnapshotWithPlanFollowUpPrompt(),
+          resolveRpc: (body) =>
+            succeeds && body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand
+              ? { sequence: 1 }
+              : undefined,
+        });
+        try {
+          await waitForComposerEditor();
+          pickFiles([new File(["requirements"], "requirements.txt", { type: "text/plain" })]);
+          await vi.waitFor(() => expect(readDraftImages()).toHaveLength(1));
+          await typeComposerPrompt("Refine this plan");
+          useComposerDraftStore.getState().addTerminalContext(
+            THREAD_ID,
+            createTerminalContext({
+              id: "plan-context",
+              terminalLabel: "Terminal 1",
+              lineStart: 1,
+              lineEnd: 1,
+              text: "Important terminal output",
+            }),
+          );
+          const refine = await waitForButtonByText("Refine");
+          await vi.waitFor(() => expect(refine.disabled).toBe(false));
+          refine.click();
+          if (succeeds) {
+            await vi.waitFor(() => expect(hasTurnStartRequest()).toBe(true));
+            expect(findTurnStartRequest()?.message?.text).toContain("Important terminal output");
+            expect(findTurnStartRequest()?.message?.text).toContain("<terminal_context>");
+            expect(findTurnStartRequest()?.message?.attachments).toHaveLength(1);
+          } else {
+            await vi.waitFor(() => expect(readDraftImages()).toHaveLength(1));
+            expect(await readDraftImages()[0]?.file.text()).toBe("requirements");
+            const draft = useComposerDraftStore.getState().draftsByThreadId[THREAD_ID];
+            expect(draft?.prompt).toContain("Refine this plan");
+            expect(draft?.terminalContexts[0]?.text).toBe("Important terminal output");
+          }
+        } finally {
+          await mounted.cleanup();
+        }
+      },
+    );
+
     it("stashes and restores a text attachment with a fresh-context prompt", async () => {
       usePromptStashStore.setState({ entries: [] });
       const mounted = await mountChatView({
