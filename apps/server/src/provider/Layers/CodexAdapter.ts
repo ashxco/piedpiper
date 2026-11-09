@@ -13,6 +13,7 @@ import {
   ProviderSendTurnInput,
   type ThreadId,
 } from "@piedpiper/contracts";
+import { redactProviderRuntimeEvent } from "../providerErrorRedaction.ts";
 import { Effect, FileSystem, Layer, Queue, ServiceMap, Stream } from "effect";
 
 import {
@@ -392,7 +393,7 @@ const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         });
         return;
       }
-      yield* Queue.offerAll(runtimeEventQueue, runtimeEvents);
+      yield* Queue.offerAll(runtimeEventQueue, runtimeEvents.map(redactProviderRuntimeEvent));
     });
     // Storing an image is async, and the turn's later events must not overtake it.
     const inFlightByThread = new Map<string, Promise<void>>();

@@ -1102,6 +1102,8 @@ export const buildUserMessageWithPdfBudgetEffect = Effect.fn("buildUserMessageWi
         parts.push({ kind: "image", block: image.block });
         continue;
       }
+      // Text attachments are referenced by their saved path in the prompt.
+      if (attachment.mimeType !== "application/pdf") continue;
       // A session with no pages left would only read the file to drop it again.
       if (dependencies.pdfBudget.remainingPages() <= 0) continue;
       const bytes = yield* readClaudePdfAttachmentBytes(

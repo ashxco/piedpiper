@@ -7382,6 +7382,27 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect("starts fresh despite background tasks without resuming the old session", () => {
+    const harness = makeHarness({ newQueryPerSession: true });
+    return Effect.gen(function* () {
+      const { adapter, session } = yield* startTurnWithLiveTasks(harness);
+      yield* adapter.startSession({
+        threadId: session.threadId,
+        provider: "claudeAgent",
+        runtimeMode: "full-access",
+        freshContext: true,
+        resumeCursor: { resume: "must-not-resume" },
+      });
+      assert.equal(harness.query.closeCalls, 1);
+      assert.equal(harness.getCreateQueryInputs().length, 2);
+      assert.isUndefined(harness.getLastCreateQueryInput()?.options.resume);
+      assert.equal(yield* adapter.countLiveBackgroundTasks!(session.threadId), 0);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect("refuses a session restart while background tasks are still running", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
@@ -11021,3 +11042,99 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 });
+
+it.effect("redacts SDK error messages and details before publishing failure events", () => {
+  const harness = makeHarness();
+  return Effect.gen(function* () {
+    const adapter = yield* ClaudeAdapter;
+    yield* adapter.startSession({
+      threadId: THREAD_ID,
+      provider: "claudeAgent",
+      runtimeMode: "full-access",
+    });
+    yield* adapter.sendTurn({ threadId: THREAD_ID, input: "hello", attachments: [] });
+    const eventsFiber = yield* adapter.streamEvents.pipe(
+      Stream.takeUntil((event) => event.type === "turn.completed"),
+      Stream.runCollect,
+      Effect.forkChild,
+    );
+    harness.query.fail(new Error("SDK rejected client_secret=synthetic-sdk-private"));
+    const events = yield* Fiber.join(eventsFiber);
+    const failures = events.filter(
+      (event) => event.type === "runtime.error" || event.type === "turn.completed",
+    );
+    assert.equal(failures.length, 2);
+    assert.notInclude(JSON.stringify(failures), "synthetic-sdk-private");
+    assert.include(JSON.stringify(failures), "[redacted]");
+  }).pipe(
+    Effect.provideService(Random.Random, makeDeterministicRandomService()),
+    Effect.provide(harness.layer),
+  );
+});
+
+it.effect(
+  "applies launch tool-search settings and reports model-specific compaction thresholds",
+  () => {
+    const harness = makeHarness({
+      settings: {
+        providers: {
+          claudeAgent: {
+            launchArgs:
+              '--settings \'{"env":{"ENABLE_TOOL_SEARCH":"auto:25","CUSTOM":"keep"},"modelSettings":{"claude-opus-4-6":{"autoCompactWindow":150000}}}\'',
+          },
+        },
+      },
+    });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: "claudeAgent",
+        runtimeMode: "full-access",
+        modelSelection: { provider: "claudeAgent", model: "claude-opus-4-6" },
+      });
+      assert.deepEqual(
+        (harness.getLastCreateQueryInput()?.options.settings as { env?: unknown } | undefined)?.env,
+        { ENABLE_TOOL_SEARCH: "true", CUSTOM: "keep" },
+      );
+      yield* adapter.sendTurn({ threadId: THREAD_ID, input: "hello", attachments: [] });
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.takeUntil((event) => event.type === "turn.completed"),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      harness.query.emit({
+        type: "stream_event",
+        session_id: "test",
+        uuid: "usage-1",
+        parent_tool_use_id: null,
+        event: {
+          type: "message_start",
+          message: {
+            id: "message-1",
+            usage: { input_tokens: 100, cache_read_input_tokens: 1000, output_tokens: 1 },
+          },
+        },
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        num_turns: 1,
+        result: "done",
+        session_id: "test",
+        usage: { input_tokens: 100, output_tokens: 1 },
+        modelUsage: { "claude-opus-4-6": { contextWindow: 200000 } },
+      } as unknown as SDKMessage);
+      const events = yield* Fiber.join(eventsFiber);
+      const usage = events.flatMap((event) =>
+        event.type === "thread.token-usage.updated" ? [event.payload.usage] : [],
+      );
+      assert.isAtLeast(usage.length, 1);
+      for (const snapshot of usage) assert.equal(snapshot.autoCompactThreshold, 117_000);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  },
+);

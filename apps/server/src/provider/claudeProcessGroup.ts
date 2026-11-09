@@ -18,44 +18,8 @@ const CLAUDE_STDERR_TAIL_BYTES = 4_096;
 /** Characters of that tail shown with the exit error on the thread. */
 const CLAUDE_STDERR_MESSAGE_CHARS = 500;
 
-/** Keys naming a credential; `token\b` leaves `max_tokens` alone. Authorization has its own rules. */
-const CREDENTIAL_KEY_PATTERN = String.raw`[\w-]*(?:(?:api[_-]?key|credentials?|password|secret)[\w-]*|token)`;
-/** A quoted value, honouring escapes; a value cut off when the CLI died runs to the line's end. */
-const QUOTED_VALUE_PATTERN = String.raw`"(?:\\.|[^"\\\n])*(?:"|\\?$)|'(?:\\.|[^'\\\n])*(?:'|\\?$)`;
-/** One level of stringified JSON: an inner quote has more backslashes than the delimiter. */
-const STRINGIFIED_VALUE_PATTERN = String.raw`(\\+["'])[^\n]*?(?:(?<!\\)\3|$)`;
-const QUOTED_CREDENTIAL_PATTERN = new RegExp(
-  String.raw`(\\*["'](?:[\w-]*authorization|${CREDENTIAL_KEY_PATTERN})\\*["']\s*:\s*)(${QUOTED_VALUE_PATTERN}|${STRINGIFIED_VALUE_PATTERN}|-?\d[\w.+-]*)`,
-  "gim",
-);
-const AUTHORIZATION_ASSIGNMENT_PATTERN = new RegExp(
-  String.raw`((?<![\w-])[\w-]*authorization\s*[:=]\s*)(?:${QUOTED_VALUE_PATTERN}|(?:(bearer|basic)\s+)?\S+)`,
-  "gim",
-);
-const CREDENTIAL_ASSIGNMENT_PATTERN = new RegExp(
-  String.raw`((?<![\w-])${CREDENTIAL_KEY_PATTERN}\b\s*[:=]\s*)(?:${QUOTED_VALUE_PATTERN}|\S+)`,
-  "gim",
-);
-const UPPERCASE_CREDENTIAL_ASSIGNMENT_PATTERN = new RegExp(
-  String.raw`\b([A-Z0-9_]*(?:API_KEY|TOKEN|SECRET|PASSWORD)[A-Z0-9_]*\s*[=:]\s*)(?:${QUOTED_VALUE_PATTERN}|\S+)`,
-  "gm",
-);
-
-/** Masks API keys, bearer tokens and secret-looking assignments in CLI stderr. */
-export function redactClaudeStderr(text: string): string {
-  return text
-    .replace(/\bsk-ant-[\w-]+/g, "sk-ant-[redacted]")
-    .replace(QUOTED_CREDENTIAL_PATTERN, (_match, prefix: string, value: string) => {
-      const quote = /^\\*["']/.exec(value)?.[0] ?? "";
-      return `${prefix}${quote}[redacted]${quote}`;
-    })
-    .replace(AUTHORIZATION_ASSIGNMENT_PATTERN, (_match, prefix, scheme) =>
-      scheme ? `${prefix}${scheme} [redacted]` : `${prefix}[redacted]`,
-    )
-    .replace(/\b(bearer\s+)[\w.~+/=-]{8,}/gi, "$1[redacted]")
-    .replace(CREDENTIAL_ASSIGNMENT_PATTERN, "$1[redacted]")
-    .replace(UPPERCASE_CREDENTIAL_ASSIGNMENT_PATTERN, "$1[redacted]");
-}
+export { redactProviderErrorText as redactClaudeStderr } from "./providerErrorRedaction.ts";
+import { redactProviderErrorText as redactClaudeStderr } from "./providerErrorRedaction.ts";
 
 /**
  * The SDK only adds stderr to "exited with code N" when it spawns the CLI itself, so a custom

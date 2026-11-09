@@ -7,6 +7,7 @@
  * @module ClaudeAdapterLive
  */
 import * as OS from "node:os";
+import * as Path from "node:path";
 
 import {
   type CanUseTool,
@@ -68,6 +69,8 @@ import {
 } from "./ClaudeTasks.ts";
 import { ToolInputStreamExtractor } from "./ClaudeToolInputStream.ts";
 
+import { redactProviderRuntimeEvent } from "../providerErrorRedaction.ts";
+import { readClaudeRuntimeSettings, claudeAutoCompactThreshold } from "./ClaudeRuntimeSettings.ts";
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { getClaudeModelCapabilities } from "./ClaudeProvider.ts";
@@ -368,6 +371,10 @@ interface ClaudeSessionContext {
   readonly inFlightTools: Map<number, ToolInFlight>;
   turnState: ClaudeTurnState | undefined;
   lastKnownContextWindow: number | undefined;
+  autoCompactWindow: string;
+  readonly readRuntimeSettings: (
+    model: string | undefined,
+  ) => Effect.Effect<{ autoCompactWindow: string; toolSearchOverride: "true" | undefined }>;
   /** The model the init frame names, for a session started without one; never drives setModel. */
   initApiModelId: string | undefined;
   /** Claude had no answer on Auto when last asked, which is not a refusal. */
@@ -526,8 +533,25 @@ const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   const nextEventId = Effect.map(Random.nextUUIDv4, (id) => EventId.makeUnsafe(id));
   const makeEventStamp = () => Effect.all({ eventId: nextEventId, createdAt: nowIso });
 
-  const offerRuntimeEvent = (event: ProviderRuntimeEvent): Effect.Effect<void> =>
-    Queue.offer(runtimeEventQueue, event).pipe(Effect.asVoid);
+  const offerRuntimeEvent = (event: ProviderRuntimeEvent): Effect.Effect<void> => {
+    const context = sessions.get(event.threadId);
+    const enriched =
+      event.type === "thread.token-usage.updated" && context
+        ? {
+            ...event,
+            payload: {
+              usage: {
+                ...event.payload.usage,
+                ...claudeAutoCompactThreshold(
+                  context.autoCompactWindow,
+                  event.payload.usage.maxTokens,
+                ),
+              },
+            },
+          }
+        : event;
+    return Queue.offer(runtimeEventQueue, redactProviderRuntimeEvent(enriched)).pipe(Effect.asVoid);
+  };
 
   const logNativeSdkMessage = Effect.fn("logNativeSdkMessage")(function* (
     context: ClaudeSessionContext,
@@ -3483,9 +3507,31 @@ const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         serverConfig.attachmentsDir,
         ...launchDirectories,
       ];
+      const childEnv = buildClaudeChildEnv(undefined, { homePath: claudeSettings.homePath });
+      const readRuntimeSettings = (model: string | undefined) =>
+        readClaudeRuntimeSettings({
+          fileSystem,
+          cwd,
+          model,
+          configDir: childEnv.CLAUDE_CONFIG_DIR ?? Path.join(OS.homedir(), ".claude"),
+          autoCompactWindow: claudeSettings.autoCompactWindow,
+          launchSettings,
+          environment: childEnv,
+        });
+      const runtimeSettings = yield* readRuntimeSettings(apiModelId);
       // The user's --settings sit beneath what Pied Piper sets itself.
       const settings = {
         ...launchSettings,
+        ...(runtimeSettings.toolSearchOverride
+          ? {
+              env: {
+                ...(typeof launchSettings?.env === "object" && launchSettings.env !== null
+                  ? launchSettings.env
+                  : {}),
+                ENABLE_TOOL_SEARCH: runtimeSettings.toolSearchOverride,
+              },
+            }
+          : {}),
         ...(typeof thinking === "boolean" ? { alwaysThinkingEnabled: thinking } : {}),
         ...(thinkingConfig ? { showThinkingSummaries: true } : {}),
         ...(fastMode ? { fastMode: true } : {}),
@@ -3504,7 +3550,6 @@ const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         .filter((text) => text !== undefined && text.length > 0)
         .join("\n\n");
 
-      const childEnv = buildClaudeChildEnv(undefined, { homePath: claudeSettings.homePath });
       const taskOutputRoot = claudeTaskOutputRoot({
         environment: childEnv,
         cwd: yield* fileSystem.realPath(cwd).pipe(Effect.orElseSucceed(() => cwd)),
@@ -3634,6 +3679,8 @@ const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         inFlightTools,
         turnState: undefined,
         lastKnownContextWindow: claudeContextWindowForApiModel(apiModelId),
+        autoCompactWindow: runtimeSettings.autoCompactWindow,
+        readRuntimeSettings,
         initApiModelId: undefined,
         autoPermissionUnconfirmed: false,
         reportedContextWindows: new Map(),
@@ -3745,6 +3792,8 @@ const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
   const startSession: ClaudeAdapterShape["startSession"] = (input) =>
     Effect.suspend(() => {
+      if (input.freshContext === true)
+        return startSessionUnguarded({ ...input, resumeCursor: null });
       const previousContext = sessions.get(input.threadId);
       return previousContext && !previousContext.stopped && liveBackgroundWork(previousContext) > 0
         ? Effect.fail(
@@ -3788,6 +3837,11 @@ const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       yield* completeTurn(context, "completed");
     }
 
+    context.autoCompactWindow = (yield* context.readRuntimeSettings(
+      modelSelection
+        ? resolveApiModelId(modelSelection)
+        : (context.currentApiModelId ?? context.initApiModelId),
+    )).autoCompactWindow;
     let modelChanged = false;
     if (modelSelection?.model) {
       // Model, effort and fast mode apply to the live query from this turn on.

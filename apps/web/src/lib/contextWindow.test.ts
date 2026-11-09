@@ -26,6 +26,7 @@ describe("contextWindow", () => {
         usedTokens: 14_000,
         maxTokens: 258_000,
         compactsAutomatically: true,
+        autoCompactThreshold: 117_000,
       }),
     ]);
 
@@ -34,6 +35,7 @@ describe("contextWindow", () => {
     expect(snapshot?.totalProcessedTokens).toBeNull();
     expect(snapshot?.maxTokens).toBe(258_000);
     expect(snapshot?.compactsAutomatically).toBe(true);
+    expect(snapshot?.autoCompactThreshold).toBe(117_000);
   });
 
   it("keeps a zero-usage snapshot so the meter can show empty after compaction", () => {

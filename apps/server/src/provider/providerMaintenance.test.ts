@@ -199,7 +199,7 @@ describe("classifyProviderInstall", () => {
     [
       "/Users/me/.local/share/mise/installs/node/22/lib/node_modules/@openai/codex/bin.js",
       CODEX_PACKAGE,
-      "mise",
+      "npmGlobal",
     ],
     [
       "/nix/store/abc-claude-code-1/lib/node_modules/@anthropic-ai/claude-code/cli.js",
@@ -445,7 +445,16 @@ describe("makeProviderWithVersionAdvisory", () => {
       const settings = yield* makeLiveSettings;
       const { provider, publishBase } = yield* makeHarness(baseSnapshot);
       let lookups = 0;
+      let miseProbes = 0;
       const decorated = yield* makeProviderWithVersionAdvisory(provider, CLAUDE_CLI_MAINTENANCE, {
+        resolveMiseMaintenance: Object.assign(
+          () =>
+            Effect.sync(() => {
+              miseProbes += 1;
+              return null;
+            }),
+          { invalidate: () => {} },
+        ),
         lookupLatestVersion: () =>
           Effect.sync(() => {
             lookups += 1;
@@ -467,6 +476,7 @@ describe("makeProviderWithVersionAdvisory", () => {
         updateCommand: null,
       });
       assert.equal(lookups, 0);
+      assert.equal(miseProbes, 0);
     }).pipe(Effect.scoped),
   );
 

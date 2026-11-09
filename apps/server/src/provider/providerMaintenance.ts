@@ -18,6 +18,7 @@ import { resolveWindowsExecutable } from "@piedpiper/shared/windowsCommand";
 import { Clock, Effect, Equal, PubSub, Queue, Ref, Scope, Stream } from "effect";
 import * as Semaphore from "effect/Semaphore";
 
+import { makeMiseMaintenanceResolver } from "./miseMaintenance.ts";
 import { expandCodexHomePath } from "../codex/homePath";
 import { ServerSettingsService } from "../serverSettings";
 import { compareCliVersions } from "./cliVersion";
@@ -83,8 +84,12 @@ export function classifyProviderInstall(
   const path = slashPath.toLowerCase();
   // A read-only store that only its own tool can change, whatever layout the package has inside.
   if (path.includes("/nix/store/")) return "unattributed";
-  // These own their tree, including a node they installed, so they come before the npm paths.
-  if (path.includes("/.local/share/mise/") || path.includes("/mise/installs/")) return "mise";
+  // npm globals installed under mise's Node remain npm-owned.
+  if (
+    (path.includes("/.local/share/mise/") || path.includes("/mise/installs/")) &&
+    !path.includes("/mise/installs/node/")
+  )
+    return "mise";
   if (path.includes("/cellar/") || path.includes("/caskroom/")) return "homebrew";
   if (path.includes("/.local/share/claude/") || /\/\.local\/bin\/claude(?:\.exe)?$/.test(path)) {
     return "native";
@@ -134,6 +139,7 @@ export interface ProviderUpdateCommandContext {
 
 export interface ProviderCliMaintenance {
   readonly packageName: string;
+  readonly miseTool: string;
   readonly readBinaryPath: (settings: ServerSettings) => string;
   readonly readHomePath?: (settings: ServerSettings) => string;
   readonly resolveUpdateCommand: (
@@ -146,6 +152,7 @@ export interface ProviderCliMaintenance {
 
 export const CLAUDE_CLI_MAINTENANCE: ProviderCliMaintenance = {
   packageName: "@anthropic-ai/claude-code",
+  miseTool: "claude",
   readBinaryPath: (settings) => settings.providers.claudeAgent.binaryPath,
   resolveUpdateCommand: (install, binaryPath, platform) =>
     install === "native" || install === "npmGlobal" || install === "pnpmGlobal"
@@ -157,6 +164,7 @@ const CODEX_PACKAGE_NAME = "@openai/codex";
 
 export const CODEX_CLI_MAINTENANCE: ProviderCliMaintenance = {
   packageName: CODEX_PACKAGE_NAME,
+  miseTool: "codex",
   readBinaryPath: (settings) => settings.providers.codex.binaryPath,
   readHomePath: (settings) => settings.providers.codex.homePath,
   resolveUpdateCommand: (install, commandPath, platform = process.platform, context) => {
@@ -305,12 +313,14 @@ export const makeProviderWithVersionAdvisory = Effect.fn("makeProviderWithVersio
       readonly lookupLatestVersion?: LatestVersionLookup &
         Partial<InvalidatableLatestVersionLookup>;
       readonly readCommandPaths?: (binaryPath: string) => Effect.Effect<ProviderCommandPaths>;
+      readonly resolveMiseMaintenance?: ReturnType<typeof makeMiseMaintenanceResolver>;
     } = {},
   ): Effect.fn.Return<Shape, never, Scope.Scope | ServerSettingsService> {
     const serverSettings = yield* ServerSettingsService;
     const lookupLatestVersion: LatestVersionLookup & Partial<InvalidatableLatestVersionLookup> =
       options.lookupLatestVersion ?? makeCachedLatestVersionLookup(fetchNpmLatestVersion);
     const readPaths = options.readCommandPaths ?? readCommandPaths;
+    const resolveMiseMaintenance = options.resolveMiseMaintenance ?? makeMiseMaintenanceResolver();
     const advisoryRef = yield* Ref.make<ServerProviderVersionAdvisory | undefined>(undefined);
     const publishLock = yield* Semaphore.make(1);
     const changes = yield* Effect.acquireRelease(
@@ -360,6 +370,28 @@ export const makeProviderWithVersionAdvisory = Effect.fn("makeProviderWithVersio
       const binaryPath = maintenance.readBinaryPath(settings);
       const { commandPath, realCommandPath } = yield* readPaths(binaryPath);
       const install = classifyProviderInstall(realCommandPath, maintenance.packageName);
+      // Known installations need no mise I/O. Its own binary may be installed by
+      // Homebrew, though, while serving as the resolved target of a CLI shim.
+      const mayUseMise =
+        install === "mise" ||
+        install === "unattributed" ||
+        /(?:^|[/\\])mise(?:\.exe)?$/i.test(realCommandPath ?? "");
+      const mise = mayUseMise
+        ? yield* resolveMiseMaintenance({
+            commandPath,
+            realCommandPath,
+            tool: maintenance.miseTool,
+          })
+        : null;
+      if (mise) {
+        return deriveProviderVersionAdvisory({
+          currentVersion: snapshot.version,
+          latestVersion: mise.latestVersion,
+          updateCommand: mise.canUpgrade
+            ? `${quoteCommandExecutable(mise.misePath)} upgrade ${mise.tool}`
+            : null,
+        });
+      }
       // Homebrew lags npm on every release, so comparing with npm would announce an update it lacks.
       if (install === "homebrew") {
         return deriveProviderVersionAdvisory({
@@ -408,9 +440,10 @@ export const makeProviderWithVersionAdvisory = Effect.fn("makeProviderWithVersio
       getSnapshot: provider.getSnapshot.pipe(Effect.flatMap(applyAdvisory)),
       refresh: provider.refresh.pipe(
         Effect.tap(() =>
-          Effect.sync(() => lookupLatestVersion.invalidate?.(maintenance.packageName)).pipe(
-            Effect.andThen(Queue.offer(recheck, undefined)),
-          ),
+          Effect.sync(() => {
+            lookupLatestVersion.invalidate?.(maintenance.packageName);
+            resolveMiseMaintenance.invalidate?.();
+          }).pipe(Effect.andThen(Queue.offer(recheck, undefined))),
         ),
         Effect.flatMap(applyAdvisory),
       ),

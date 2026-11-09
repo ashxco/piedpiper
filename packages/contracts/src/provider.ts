@@ -47,6 +47,8 @@ export const ProviderSession = Schema.Struct({
 export type ProviderSession = typeof ProviderSession.Type;
 
 export const ProviderSessionStartInput = Schema.Struct({
+  /** Explicit user request to replace the session, including its background tasks. */
+  freshContext: Schema.optional(Schema.Boolean),
   threadId: ThreadId,
   provider: Schema.optional(ProviderKind),
   cwd: Schema.optional(TrimmedNonEmptyString),
