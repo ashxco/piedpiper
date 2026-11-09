@@ -16,14 +16,7 @@ export const CODEX_REASONING_EFFORT_OPTIONS = [
   "none",
 ] as const;
 export type CodexReasoningEffort = (typeof CODEX_REASONING_EFFORT_OPTIONS)[number];
-export const CLAUDE_CODE_EFFORT_OPTIONS = [
-  "low",
-  "medium",
-  "high",
-  "xhigh",
-  "max",
-  "ultrathink",
-] as const;
+const CLAUDE_CODE_EFFORT_OPTIONS = ["low", "medium", "high", "xhigh", "max", "ultrathink"] as const;
 export type ClaudeCodeEffort = (typeof CLAUDE_CODE_EFFORT_OPTIONS)[number];
 export type ProviderReasoningEffort = CodexReasoningEffort | ClaudeCodeEffort;
 
@@ -58,7 +51,7 @@ export const EffortOption = Schema.Struct({
 });
 export type EffortOption = typeof EffortOption.Type;
 
-export const ContextWindowOption = Schema.Struct({
+const ContextWindowOption = Schema.Struct({
   value: TrimmedNonEmptyString,
   label: TrimmedNonEmptyString,
   isDefault: Schema.optional(Schema.Boolean),

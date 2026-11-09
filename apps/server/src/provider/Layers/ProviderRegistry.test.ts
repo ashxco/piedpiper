@@ -2,6 +2,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, it, assert } from "@effect/vitest";
 import {
   Cause,
+  Deferred,
   Effect,
   Exit,
   Fiber,
@@ -234,31 +235,38 @@ it.layer(
     it.effect("waits past the 4 s default for a slow `codex login status`", () =>
       Effect.gen(function* () {
         yield* withTempCodexHome();
-        const fiber = yield* checkCodexProviderStatus().pipe(Effect.forkChild);
+        const authStarted = yield* Deferred.make<void>();
+        const spawner = Layer.succeed(
+          ChildProcessSpawner.ChildProcessSpawner,
+          ChildProcessSpawner.make((command) => {
+            const joined = (command as unknown as { args: ReadonlyArray<string> }).args.join(" ");
+            if (joined === "--version") {
+              return Effect.succeed(mockHandle({ stdout: "codex 1.0.0\n", stderr: "", code: 0 }));
+            }
+            const handle = mockHandle({ stdout: "Logged in\n", stderr: "", code: 0 });
+            return Effect.succeed(
+              ChildProcessSpawner.makeHandle({
+                ...handle,
+                exitCode: Deferred.succeed(authStarted, undefined).pipe(
+                  Effect.andThen(Effect.sleep("6 seconds")),
+                  Effect.andThen(handle.exitCode),
+                ),
+              }),
+            );
+          }),
+        );
+        const fiber = yield* checkCodexProviderStatus().pipe(
+          Effect.provide(spawner),
+          Effect.forkChild,
+        );
+        // Config-file reads use real I/O; wait until auth reaches its timed delay before
+        // advancing the test clock, or that delay can start after the only clock advance.
+        yield* Deferred.await(authStarted);
         yield* TestClock.adjust("7 seconds");
         const status = yield* Fiber.join(fiber);
         assert.strictEqual(status.status, "ready");
         assert.strictEqual(status.auth.status, "authenticated");
-      }).pipe(
-        Effect.provide(
-          Layer.succeed(
-            ChildProcessSpawner.ChildProcessSpawner,
-            ChildProcessSpawner.make((command) => {
-              const joined = (command as unknown as { args: ReadonlyArray<string> }).args.join(" ");
-              if (joined === "--version") {
-                return Effect.succeed(mockHandle({ stdout: "codex 1.0.0\n", stderr: "", code: 0 }));
-              }
-              const handle = mockHandle({ stdout: "Logged in\n", stderr: "", code: 0 });
-              return Effect.succeed(
-                ChildProcessSpawner.makeHandle({
-                  ...handle,
-                  exitCode: Effect.sleep("6 seconds").pipe(Effect.andThen(handle.exitCode)),
-                }),
-              );
-            }),
-          ),
-        ),
-      ),
+      }),
     );
 
     it.effect("escalates a hung probe to SIGKILL when it is interrupted", () =>

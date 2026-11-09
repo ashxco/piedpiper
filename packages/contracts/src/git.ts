@@ -3,7 +3,7 @@ import { NonNegativeInt, PositiveInt, TrimmedNonEmptyString } from "./baseSchema
 
 const TrimmedNonEmptyStringSchema = TrimmedNonEmptyString;
 // File names may start or end with spaces, so paths are kept exactly as Git reports them.
-export const GitFilePath = Schema.String.check(Schema.isNonEmpty());
+const GitFilePath = Schema.String.check(Schema.isNonEmpty());
 const GIT_LIST_BRANCHES_MAX_LIMIT = 200;
 
 // Domain Types
@@ -12,7 +12,7 @@ export const GitStackedAction = Schema.Literals(["commit", "push", "commit_push"
 export type GitStackedAction = typeof GitStackedAction.Type;
 export const GitActionProgressPhase = Schema.Literals(["branch", "commit", "push", "pr"]);
 export type GitActionProgressPhase = typeof GitActionProgressPhase.Type;
-export const GitActionProgressKind = Schema.Literals([
+const GitActionProgressKind = Schema.Literals([
   "action_started",
   "phase_started",
   "hook_started",
@@ -22,7 +22,7 @@ export const GitActionProgressKind = Schema.Literals([
   "action_failed",
 ]);
 export type GitActionProgressKind = typeof GitActionProgressKind.Type;
-export const GitActionProgressStream = Schema.Literals(["stdout", "stderr"]);
+const GitActionProgressStream = Schema.Literals(["stdout", "stderr"]);
 export type GitActionProgressStream = typeof GitActionProgressStream.Type;
 const GitCommitStepStatus = Schema.Literals([
   "created",
@@ -40,7 +40,7 @@ const GitStatusPrState = Schema.Literals(["open", "closed", "merged"]);
 const GitPullRequestReference = TrimmedNonEmptyStringSchema;
 const GitPullRequestState = Schema.Literals(["open", "closed", "merged"]);
 const GitPreparePullRequestThreadMode = Schema.Literals(["local", "worktree"]);
-export const GitRunStackedActionToastRunAction = Schema.Struct({
+const GitRunStackedActionToastRunAction = Schema.Struct({
   kind: GitStackedAction,
 });
 export type GitRunStackedActionToastRunAction = typeof GitRunStackedActionToastRunAction.Type;

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 
 // Keeps the next few rows warm without leasing every mounted row below the fold.
-export const SIDEBAR_ROW_LEASE_OVERSCAN_PX = 160;
+const SIDEBAR_ROW_LEASE_OVERSCAN_PX = 160;
 
 /** Holds a live-status lease while a sidebar row is on screen or near it; the open thread always holds one. */
 export function useSidebarRowSubscriptionLease(isActive: boolean): {

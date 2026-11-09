@@ -1,4 +1,8 @@
 import {
+  retainThreadMessagesAfterRevert,
+  retainThreadItemsAfterRevert,
+} from "@piedpiper/shared/threadRevert";
+import {
   type OrchestrationEvent,
   type OrchestrationReadModel,
   ThreadId,
@@ -32,9 +36,6 @@ import {
   readActivityProviderItemId,
   rebindTurnDiffSummariesForAssistantMessage,
   removeThreadIdByProjectId,
-  retainThreadActivitiesAfterRevert,
-  retainThreadMessagesAfterRevert,
-  retainThreadProposedPlansAfterRevert,
   settledTurnStateForSessionStatus,
   updateProject,
   upsertStreamedMessage,
@@ -759,11 +760,11 @@ export function applyOrchestrationEvent(state: AppState, event: OrchestrationEve
           retainedTurnIds,
           event.payload.turnCount,
         ).slice(-MAX_THREAD_MESSAGES);
-        const proposedPlans = retainThreadProposedPlansAfterRevert(
+        const proposedPlans = retainThreadItemsAfterRevert(
           thread.proposedPlans,
           retainedTurnIds,
         ).slice(-MAX_THREAD_PROPOSED_PLANS);
-        const activities = retainThreadActivitiesAfterRevert(thread.activities, retainedTurnIds);
+        const activities = retainThreadItemsAfterRevert(thread.activities, retainedTurnIds);
         const latestCheckpoint = turnDiffSummaries.at(-1) ?? null;
 
         return {

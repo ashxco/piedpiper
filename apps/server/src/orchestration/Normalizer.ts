@@ -16,7 +16,7 @@ import { WorkspacePaths } from "../workspace/Services/WorkspacePaths";
 import { decodeUploadedPdf, pdfAttachmentRelativePath } from "./pdfAttachmentIntake";
 
 // Client clocks can be wrong, so every client command is stamped with the server's receive time.
-export const canonicalizeClientCommandTimestamps = (
+const canonicalizeClientCommandTimestamps = (
   command: ClientOrchestrationCommand,
   receivedAt: string,
 ): ClientOrchestrationCommand => {

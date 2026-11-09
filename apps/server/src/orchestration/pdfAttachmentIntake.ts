@@ -4,7 +4,7 @@ import { parseBase64DataUrl } from "../imageMime.ts";
 
 const PDF_MAGIC = Buffer.from("%PDF-", "latin1");
 
-export const hasPdfMagicBytes = (bytes: Uint8Array): boolean =>
+const hasPdfMagicBytes = (bytes: Uint8Array): boolean =>
   bytes.length >= PDF_MAGIC.length && PDF_MAGIC.equals(bytes.subarray(0, PDF_MAGIC.length));
 
 export const pdfAttachmentRelativePath = (attachmentId: string): string => `${attachmentId}.pdf`;

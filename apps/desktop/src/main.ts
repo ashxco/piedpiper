@@ -33,7 +33,7 @@ import { autoUpdater } from "electron-updater";
 
 import type { ContextMenuItem } from "@piedpiper/contracts";
 import { NetService } from "@piedpiper/shared/Net";
-import { RotatingFileSink } from "@piedpiper/shared/logging";
+import { createDesktopLogging, sanitizeLogValue } from "./desktopLogging";
 import { parsePersistedServerObservabilitySettings } from "@piedpiper/shared/serverSettings";
 import {
   BACKEND_QUIT_STOP_TIMEOUT_MS,
@@ -162,9 +162,6 @@ const USER_DATA_DIR_NAME = isDevelopment ? "piedpiper-dev" : "piedpiper";
 const COMMIT_HASH_PATTERN = /^[0-9a-f]{7,40}$/i;
 const COMMIT_HASH_DISPLAY_LENGTH = 12;
 const LOG_DIR = Path.join(STATE_DIR, "logs");
-const LOG_FILE_MAX_BYTES = 10 * 1024 * 1024;
-const LOG_FILE_MAX_FILES = 10;
-const APP_RUN_ID = Crypto.randomBytes(6).toString("hex");
 const SERVER_SETTINGS_PATH = Path.join(STATE_DIR, "settings.json");
 const WINDOW_STATE_PATH = Path.join(STATE_DIR, "window-state.json");
 const DESKTOP_APP_URL = `${DESKTOP_SCHEME}://app/index.html`;
@@ -199,9 +196,10 @@ let isQuitting = false;
 let bootstrapComplete = false;
 let desktopProtocolRegistered = false;
 let aboutCommitHashCache: string | null | undefined;
-let desktopLogSink: RotatingFileSink | null = null;
-let backendLogSink: RotatingFileSink | null = null;
-let restoreStdIoCapture: (() => void) | null = null;
+const desktopLogging = createDesktopLogging({
+  directory: LOG_DIR,
+  onBackendOutput: (buffer) => backendOutputTail.append(buffer),
+});
 let backendObservabilitySettings = readPersistedBackendObservabilitySettings();
 
 let destructiveMenuIconCache: Electron.NativeImage | null | undefined;
@@ -234,7 +232,7 @@ let backendStartedAtMs = 0;
 if (hasSingleInstanceLock) {
   shellEnvironmentReady = shellEnvironmentSync.applyCached();
   shellEnvironmentHydrated = shellEnvironmentReady;
-  initializePackagedLogging();
+  if (app.isPackaged) desktopLogging.start();
 } else {
   console.warn(
     "[desktop] another Pied Piper instance already owns this profile; handing off and exiting",
@@ -242,18 +240,6 @@ if (hasSingleInstanceLock) {
   isQuitting = true;
   quitGuard.allow();
   app.quit();
-}
-
-function logTimestamp(): string {
-  return new Date().toISOString();
-}
-
-function logScope(scope: string): string {
-  return `${scope} run=${APP_RUN_ID}`;
-}
-
-function sanitizeLogValue(value: string): string {
-  return value.replace(/\s+/g, " ").trim();
 }
 
 function readPersistedBackendObservabilitySettings(): {
@@ -281,19 +267,6 @@ function backendChildEnv(): NodeJS.ProcessEnv {
   delete env.PIEDPIPER_HOST;
   delete env.PIEDPIPER_DESKTOP_WS_URL;
   return env;
-}
-
-function writeDesktopLogHeader(message: string): void {
-  if (!desktopLogSink) return;
-  desktopLogSink.write(`[${logTimestamp()}] [${logScope("desktop")}] ${message}\n`);
-}
-
-function writeBackendSessionBoundary(phase: "START" | "END", details: string): void {
-  if (!backendLogSink) return;
-  const normalizedDetails = sanitizeLogValue(details);
-  backendLogSink.write(
-    `[${logTimestamp()}] ---- APP SESSION ${phase} run=${APP_RUN_ID} ${normalizedDetails} ----\n`,
-  );
 }
 
 function formatErrorMessage(error: unknown): string {
@@ -332,93 +305,6 @@ function getSafeTheme(rawTheme: unknown): DesktopTheme | null {
   }
 
   return null;
-}
-
-function writeDesktopStreamChunk(
-  streamName: "stdout" | "stderr",
-  chunk: unknown,
-  encoding: BufferEncoding | undefined,
-): void {
-  if (!desktopLogSink) return;
-  const buffer = Buffer.isBuffer(chunk)
-    ? chunk
-    : Buffer.from(String(chunk), typeof chunk === "string" ? encoding : undefined);
-  desktopLogSink.write(`[${logTimestamp()}] [${logScope(streamName)}] `);
-  desktopLogSink.write(buffer);
-  if (buffer.length === 0 || buffer[buffer.length - 1] !== 0x0a) {
-    desktopLogSink.write("\n");
-  }
-}
-
-function installStdIoCapture(): void {
-  if (!app.isPackaged || desktopLogSink === null || restoreStdIoCapture !== null) {
-    return;
-  }
-
-  const originalStdoutWrite = process.stdout.write.bind(process.stdout);
-  const originalStderrWrite = process.stderr.write.bind(process.stderr);
-
-  const patchWrite =
-    (streamName: "stdout" | "stderr", originalWrite: typeof process.stdout.write) =>
-    (
-      chunk: string | Uint8Array,
-      encodingOrCallback?: BufferEncoding | ((error?: Error | null) => void),
-      callback?: (error?: Error | null) => void,
-    ): boolean => {
-      const encoding = typeof encodingOrCallback === "string" ? encodingOrCallback : undefined;
-      writeDesktopStreamChunk(streamName, chunk, encoding);
-      if (typeof encodingOrCallback === "function") {
-        return originalWrite(chunk, encodingOrCallback);
-      }
-      if (callback !== undefined) {
-        return originalWrite(chunk, encoding, callback);
-      }
-      if (encoding !== undefined) {
-        return originalWrite(chunk, encoding);
-      }
-      return originalWrite(chunk);
-    };
-
-  process.stdout.write = patchWrite("stdout", originalStdoutWrite);
-  process.stderr.write = patchWrite("stderr", originalStderrWrite);
-
-  restoreStdIoCapture = () => {
-    process.stdout.write = originalStdoutWrite;
-    process.stderr.write = originalStderrWrite;
-    restoreStdIoCapture = null;
-  };
-}
-
-function initializePackagedLogging(): void {
-  if (!app.isPackaged) return;
-  try {
-    desktopLogSink = new RotatingFileSink({
-      filePath: Path.join(LOG_DIR, "desktop-main.log"),
-      maxBytes: LOG_FILE_MAX_BYTES,
-      maxFiles: LOG_FILE_MAX_FILES,
-    });
-    backendLogSink = new RotatingFileSink({
-      filePath: Path.join(LOG_DIR, "server-child.log"),
-      maxBytes: LOG_FILE_MAX_BYTES,
-      maxFiles: LOG_FILE_MAX_FILES,
-    });
-    installStdIoCapture();
-    writeDesktopLogHeader(`runtime log capture enabled logDir=${LOG_DIR}`);
-  } catch (error) {
-    // Logging setup should never block app startup.
-    console.error("[desktop] failed to initialize packaged logging", error);
-  }
-}
-
-function captureBackendOutput(child: ChildProcess.ChildProcess): void {
-  if (!app.isPackaged || backendLogSink === null) return;
-  const writeChunk = (chunk: unknown): void => {
-    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), "utf8");
-    backendOutputTail.append(buffer);
-    backendLogSink?.write(buffer);
-  };
-  child.stdout?.on("data", writeChunk);
-  child.stderr?.on("data", writeChunk);
 }
 
 if (process.platform === "linux") {
@@ -681,7 +567,7 @@ function handleFatalStartupError(stage: string, error: unknown): void {
   const message = formatErrorMessage(error);
   const detail =
     error instanceof Error && typeof error.stack === "string" ? `\n${error.stack}` : "";
-  writeDesktopLogHeader(`fatal startup error stage=${stage} message=${message}`);
+  desktopLogging.writeHeader(`fatal startup error stage=${stage} message=${message}`);
   console.error(`[desktop] fatal startup error (${stage})`, error);
   if (!isQuitting) {
     isQuitting = true;
@@ -1062,7 +948,7 @@ function configureAutoUpdater(): void {
 
   // The quit follows as soon as this returns, so anything async here would race the exit.
   electronAutoUpdater.on("before-quit-for-update", () => {
-    writeDesktopLogHeader("before-quit-for-update received");
+    desktopLogging.writeHeader("before-quit-for-update received");
     // A failed spawn reported first and recovery already restored the app; keep it running.
     if (!updateInstallRecovery.acceptUpdaterQuit()) return;
     isQuitting = true;
@@ -1157,7 +1043,7 @@ function scheduleBackendRestart(reason: string, options?: { readonly fatal?: boo
 async function showBackendFailureDialog(reason: string): Promise<void> {
   backendFailureDialogOpen = true;
   console.error(`[desktop] backend failed to start repeatedly (${reason}); giving up`);
-  writeDesktopLogHeader(`backend crash loop detected reason=${sanitizeLogValue(reason)}`);
+  desktopLogging.writeHeader(`backend crash loop detected reason=${sanitizeLogValue(reason)}`);
   const detail = formatBackendFailureDetail({
     reason,
     outputTail: backendOutputTail.text(),
@@ -1199,7 +1085,7 @@ async function showBackendFailureDialog(reason: string): Promise<void> {
 
 /** Another server owns the state directory: restarting like a crash could never succeed. */
 function retryBackendWhileStateDirOwned(delayMs: number): void {
-  writeDesktopLogHeader(`backend refused: state directory is owned; retrying in ${delayMs}ms`);
+  desktopLogging.writeHeader(`backend refused: state directory is owned; retrying in ${delayMs}ms`);
   restartTimer = setTimeout(() => {
     restartTimer = null;
     startBackend();
@@ -1208,7 +1094,7 @@ function retryBackendWhileStateDirOwned(delayMs: number): void {
 
 async function showBackendStateDirOwnedDialog(): Promise<void> {
   backendFailureDialogOpen = true;
-  writeDesktopLogHeader("backend refused: state directory is still owned; asking the user");
+  desktopLogging.writeHeader("backend refused: state directory is still owned; asking the user");
   try {
     const options: Electron.MessageBoxOptions = {
       type: "error",
@@ -1253,7 +1139,7 @@ function startBackend(): void {
     return;
   }
 
-  const captureBackendLogs = app.isPackaged && backendLogSink !== null;
+  const captureBackendLogs = desktopLogging.isCapturing();
   // `--require` rather than NODE_COMPILE_CACHE so the cache does not leak into provider and terminal children.
   const compileCacheArgs = app.isPackaged
     ? ["--require", Path.join(__dirname, "compileCache.js")]
@@ -1308,13 +1194,13 @@ function startBackend(): void {
   const closeBackendSession = (details: string) => {
     if (backendSessionClosed) return;
     backendSessionClosed = true;
-    writeBackendSessionBoundary("END", details);
+    desktopLogging.writeBackendBoundary("END", details);
   };
-  writeBackendSessionBoundary(
+  desktopLogging.writeBackendBoundary(
     "START",
     `pid=${child.pid ?? "unknown"} port=${backendPort} cwd=${resolveBackendCwd()}`,
   );
-  captureBackendOutput(child);
+  desktopLogging.captureBackendOutput(child);
 
   // The attempt counter only resets once the backend proves stable, so a crash loop keeps backing off.
   let stability: { readonly cancel: () => void } | null = null;
@@ -1364,19 +1250,21 @@ async function refreshShellEnvironment(): Promise<void> {
   if (isQuitting) return;
   if (!shellEnvironmentReady) {
     shellEnvironmentReady = true;
-    writeDesktopLogHeader("login shell environment ready; starting backend");
+    desktopLogging.writeHeader("login shell environment ready; starting backend");
     startBackend();
     return;
   }
   if (!changed) return;
   // Only a just-started backend is restarted: later restarts could interrupt a running turn.
   if (backendProcess && Date.now() - backendStartedAtMs < SHELL_ENVIRONMENT_RESTART_WINDOW_MS) {
-    writeDesktopLogHeader("login shell environment changed; restarting backend");
+    desktopLogging.writeHeader("login shell environment changed; restarting backend");
     await stopBackendAndWaitForExit();
     startBackend();
     return;
   }
-  writeDesktopLogHeader("login shell environment changed; it applies on the next backend start");
+  desktopLogging.writeHeader(
+    "login shell environment changed; it applies on the next backend start",
+  );
 }
 
 async function stopBackendAndWaitForExit(
@@ -1419,17 +1307,17 @@ async function shutdownForQuit(source: string): Promise<void> {
     removeUpdateInstallRecord(resolveUpdateInstallRecordPath());
   }
   updateInstallRecovery.abandon();
-  writeDesktopLogHeader(`${source}: stopping backend`);
+  desktopLogging.writeHeader(`${source}: stopping backend`);
   clearUpdatePollTimer();
   themeSourceController.stop();
   // Windows go away immediately so the quit feels instant while the backend drains.
   destroyAllWindows();
   const outcome = await stopBackendAndWaitForExit();
-  writeDesktopLogHeader(`${source}: backend stop finished outcome=${outcome}`);
+  desktopLogging.writeHeader(`${source}: backend stop finished outcome=${outcome}`);
 }
 
 function exitNow(): void {
-  restoreStdIoCapture?.();
+  desktopLogging.dispose();
   app.exit(0);
 }
 
@@ -1440,7 +1328,7 @@ const requestQuit = createQuitController({
   exit: exitNow,
   // Already allowed (shutdown done, or the updater owns the quit): still quit, never ignore a signal.
   proceed: () => app.quit(),
-  log: writeDesktopLogHeader,
+  log: desktopLogging.writeHeader,
   onShutdownError: (source, error) => {
     console.error(`[desktop] shutdown failed (${source})`, error);
   },
@@ -1833,7 +1721,7 @@ function createWindow(): BrowserWindow {
       rendererRecovery.shouldRecover(details.reason, Date.now());
     const summary = `reason=${details.reason} exitCode=${details.exitCode} recovering=${recovering}`;
     console.error(`[desktop] renderer process gone ${summary}`);
-    writeDesktopLogHeader(`renderer process gone ${summary}`);
+    desktopLogging.writeHeader(`renderer process gone ${summary}`);
     if (!recovering) return;
     setTimeout(() => {
       if (isQuitting || window.isDestroyed()) return;
@@ -1870,29 +1758,29 @@ app.on("browser-window-focus", () => {
 configureAppIdentity();
 
 async function bootstrap(): Promise<void> {
-  writeDesktopLogHeader("bootstrap start");
+  desktopLogging.writeHeader("bootstrap start");
   backendPort = await Effect.service(NetService).pipe(
     Effect.flatMap((net) => net.reserveLoopbackPort()),
     Effect.provide(NetService.layer),
     Effect.runPromise,
   );
-  writeDesktopLogHeader(`reserved backend port via NetService port=${backendPort}`);
+  desktopLogging.writeHeader(`reserved backend port via NetService port=${backendPort}`);
   backendAuthToken = Crypto.randomBytes(24).toString("hex");
   const baseUrl = `ws://127.0.0.1:${backendPort}`;
   backendWsUrl = `${baseUrl}/?token=${encodeURIComponent(backendAuthToken)}`;
-  writeDesktopLogHeader(`bootstrap resolved websocket endpoint baseUrl=${baseUrl}`);
+  desktopLogging.writeHeader(`bootstrap resolved websocket endpoint baseUrl=${baseUrl}`);
 
   registerIpcHandlers();
-  writeDesktopLogHeader("bootstrap ipc handlers registered");
+  desktopLogging.writeHeader("bootstrap ipc handlers registered");
   startBackend();
-  writeDesktopLogHeader(
+  desktopLogging.writeHeader(
     shellEnvironmentReady
       ? "bootstrap backend start requested"
       : "bootstrap backend waiting for the login shell environment",
   );
   mainWindow = createWindow();
   bootstrapComplete = true;
-  writeDesktopLogHeader("bootstrap main window created");
+  desktopLogging.writeHeader("bootstrap main window created");
   void refreshShellEnvironment().catch((error) => {
     console.warn("[desktop] failed to refresh the login shell environment", error);
     shellEnvironmentHydrated = false;
@@ -1902,7 +1790,7 @@ async function bootstrap(): Promise<void> {
 }
 
 app.on("before-quit", (event) => {
-  writeDesktopLogHeader("before-quit received");
+  desktopLogging.writeHeader("before-quit received");
   if (updateInstallRecovery.consumeRefusedUpdaterQuit()) {
     event.preventDefault();
     return;
@@ -1918,7 +1806,7 @@ app.on("before-quit", (event) => {
     updateInstallRecovery.abandon();
     clearUpdatePollTimer();
     themeSourceController.stop();
-    restoreStdIoCapture?.();
+    desktopLogging.dispose();
     return;
   }
   // Electron would exit before the backend's SIGKILL timer fires; hold the quit until it stopped.
@@ -1930,7 +1818,7 @@ app
   .whenReady()
   .then(() => {
     if (!hasSingleInstanceLock) return;
-    writeDesktopLogHeader("app ready");
+    desktopLogging.writeHeader("app ready");
     configureAppIdentity();
     configureApplicationMenu();
     registerDesktopProtocol();
@@ -1964,12 +1852,12 @@ app.on("window-all-closed", () => {
 
 if (process.platform !== "win32") {
   process.on("SIGINT", () => {
-    writeDesktopLogHeader("SIGINT received");
+    desktopLogging.writeHeader("SIGINT received");
     requestQuit("SIGINT");
   });
 
   process.on("SIGTERM", () => {
-    writeDesktopLogHeader("SIGTERM received");
+    desktopLogging.writeHeader("SIGTERM received");
     requestQuit("SIGTERM");
   });
 }

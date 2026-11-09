@@ -161,7 +161,7 @@ function readPersistedModelSelection(
 }
 
 /** Stopped rows with no active turn are settled; shutdown leaves them untouched. */
-export function isSettledBinding(binding: ProviderRuntimeBinding): boolean {
+function isSettledBinding(binding: ProviderRuntimeBinding): boolean {
   if (binding.status !== "stopped") return false;
   const payload = binding.runtimePayload;
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) return true;

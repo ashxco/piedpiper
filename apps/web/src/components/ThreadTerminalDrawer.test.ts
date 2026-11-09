@@ -6,19 +6,21 @@ import {
   isTerminalEventInSnapshot,
   isTerminalRightClickClaimedByApplication,
   isTerminalSessionGoneError,
-  normalizePreferredDrawerHeight,
-  resolveRenderedDrawerHeight,
-  resolveTerminalDrawerMaxHeight,
   resolveTerminalSelectionActionPosition,
   selectPendingTerminalEventEntries,
   selectTerminalEventEntriesAfterSnapshot,
   shouldHandleTerminalSelectionMouseUp,
   terminalContextMenuItems,
-  terminalGroupHeader,
-  terminalGroupHeaderAccessibleName,
   terminalSelectionActionDelayForClickCount,
   terminalSelectionMenuItems,
   type TerminalBufferTarget,
+} from "./terminalViewportHelpers";
+import {
+  normalizePreferredDrawerHeight,
+  resolveRenderedDrawerHeight,
+  resolveTerminalDrawerMaxHeight,
+  terminalGroupHeader,
+  terminalGroupHeaderAccessibleName,
 } from "./ThreadTerminalDrawer";
 
 const sequencedOutput = (id: number, createdAt: string, sequence?: number) => ({

@@ -2,8 +2,8 @@ import { WS_METHODS } from "@piedpiper/contracts";
 import * as Effect from "effect/Effect";
 import type { RpcServer } from "effect/unstable/rpc";
 
-export const MAX_PENDING_OUTPUT_CHUNKS = 8;
-export const MAX_PENDING_OUTPUT_BYTES = 64 * 1024;
+const MAX_PENDING_OUTPUT_CHUNKS = 8;
+const MAX_PENDING_OUTPUT_BYTES = 64 * 1024;
 
 const isFull = (sizes: ReadonlyArray<number>) =>
   sizes.length >= MAX_PENDING_OUTPUT_CHUNKS ||

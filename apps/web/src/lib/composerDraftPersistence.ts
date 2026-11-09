@@ -32,7 +32,7 @@ import { DEFAULT_INTERACTION_MODE, DEFAULT_RUNTIME_MODE } from "../types";
 
 export const isPersistedRuntimeMode = Schema.is(RuntimeMode);
 
-export const DraftThreadEnvModeSchema = Schema.Literals(["local", "worktree"]);
+const DraftThreadEnvModeSchema = Schema.Literals(["local", "worktree"]);
 export type DraftThreadEnvMode = typeof DraftThreadEnvModeSchema.Type;
 
 export const PersistedComposerThreadDraftState = Schema.Struct({
@@ -81,7 +81,7 @@ type LegacyPersistedComposerDraftStoreState = PersistedComposerDraftStoreState &
   LegacyStickyModelFields &
   LegacyV2StoreFields;
 
-export const PersistedDraftThreadState = Schema.Struct({
+const PersistedDraftThreadState = Schema.Struct({
   projectId: ProjectId,
   createdAt: Schema.String,
   runtimeMode: RuntimeMode,
@@ -108,7 +108,7 @@ export const PersistedComposerDraftStoreStorage = Schema.Struct({
   state: PersistedComposerDraftStoreState,
 });
 
-export const EMPTY_PERSISTED_DRAFT_STORE_STATE = Object.freeze<PersistedComposerDraftStoreState>({
+const EMPTY_PERSISTED_DRAFT_STORE_STATE = Object.freeze<PersistedComposerDraftStoreState>({
   draftsByThreadId: {},
   draftThreadsByThreadId: {},
   projectDraftThreadIdByProjectId: {},

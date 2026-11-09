@@ -47,7 +47,7 @@ function alphaLength(value: number): number {
 }
 
 /** The list-style-type `.chat-markdown` gives an `ol` nested `depth` ordered lists deep (1 = top level). */
-export function orderedListStyleAtDepth(depth: number): "decimal" | "lower-alpha" | "lower-roman" {
+function orderedListStyleAtDepth(depth: number): "decimal" | "lower-alpha" | "lower-roman" {
   if (depth <= 1) return "decimal";
   return depth === 2 ? "lower-alpha" : "lower-roman";
 }

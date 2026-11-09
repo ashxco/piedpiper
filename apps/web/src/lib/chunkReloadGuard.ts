@@ -67,7 +67,7 @@ export function installChunkLoadErrorReload(
 }
 
 /** How long after the first resolved route a chunk failure still counts as part of the boot. */
-export const CHUNK_RELOAD_GUARD_REARM_DELAY_MS = 10_000;
+const CHUNK_RELOAD_GUARD_REARM_DELAY_MS = 10_000;
 
 /**
  * Clears the guard a while after the first resolved route, so React.lazy chunks requested while

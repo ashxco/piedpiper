@@ -59,7 +59,7 @@ export class WorkspacePathOutsideRootError extends Schema.TaggedErrorClass<Works
   }
 }
 
-export const WorkspacePathsError = Schema.Union([
+const WorkspacePathsError = Schema.Union([
   WorkspaceRootNotExistsError,
   WorkspaceRootStatFailedError,
   WorkspaceRootNotDirectoryError,

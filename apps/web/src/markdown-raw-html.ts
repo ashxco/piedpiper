@@ -147,7 +147,7 @@ const bothSpellings = (...properties: string[]) =>
 
 const SCHEMA_ATTRIBUTES = defaultSchema.attributes ?? {};
 
-export const CHAT_MARKDOWN_SANITIZE_SCHEMA: Options = {
+const CHAT_MARKDOWN_SANITIZE_SCHEMA: Options = {
   ...defaultSchema,
   tagNames: [...(defaultSchema.tagNames ?? []), "mark"],
   // remark-rehype already prefixed footnote ids, and prefixing again would break their links.

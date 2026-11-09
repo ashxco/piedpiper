@@ -24,7 +24,7 @@ export function findThreadById(
   return readModel.threads.get(threadId);
 }
 
-export function findProjectById(
+function findProjectById(
   readModel: ServerReadModel,
   projectId: ProjectId,
 ): OrchestrationProject | undefined {

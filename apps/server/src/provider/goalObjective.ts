@@ -1,5 +1,5 @@
 // Mirrors codex_protocol's MAX_THREAD_GOAL_OBJECTIVE_CHARS.
-export const CODEX_GOAL_OBJECTIVE_MAX_CHARS = 4_000;
+const CODEX_GOAL_OBJECTIVE_MAX_CHARS = 4_000;
 
 /** Why Codex would refuse this objective, or null when it fits. Counts code points, as Codex does. */
 export function codexGoalObjectiveError(objective: string): string | null {

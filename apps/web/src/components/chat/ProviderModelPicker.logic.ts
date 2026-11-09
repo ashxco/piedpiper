@@ -83,7 +83,7 @@ export function claudeUpdateRequiredNote(
   return `Update Claude Code to v${highest} to use ${nameList}.`;
 }
 
-export function isSameModelRef(a: ModelPickerRef, b: ModelPickerRef): boolean {
+function isSameModelRef(a: ModelPickerRef, b: ModelPickerRef): boolean {
   return a.provider === b.provider && a.model === b.model;
 }
 

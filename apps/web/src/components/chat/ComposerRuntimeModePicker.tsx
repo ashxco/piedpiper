@@ -7,7 +7,7 @@ import { COMPOSER_ICON_ONLY_LABEL_CLASS_NAME } from "../composerFooterLayout";
 import { Button } from "../ui/button";
 import { Menu, MenuPopup, MenuRadioGroup, MenuRadioItem, MenuTrigger } from "../ui/menu";
 
-export const COMPOSER_RUNTIME_MODE_OPTIONS: ReadonlyArray<{
+const COMPOSER_RUNTIME_MODE_OPTIONS: ReadonlyArray<{
   value: RuntimeMode;
   label: string;
   description: string;
@@ -33,7 +33,7 @@ export const COMPOSER_RUNTIME_MODE_OPTIONS: ReadonlyArray<{
   },
 ];
 
-export function runtimeModeOption(mode: RuntimeMode) {
+function runtimeModeOption(mode: RuntimeMode) {
   return (
     COMPOSER_RUNTIME_MODE_OPTIONS.find((option) => option.value === mode) ??
     COMPOSER_RUNTIME_MODE_OPTIONS[0]!

@@ -1,6 +1,6 @@
 import { toastManager } from "../ui/toast";
 
-export const THREAD_UNDO_TOAST_TIMEOUT_MS = 5_000;
+const THREAD_UNDO_TOAST_TIMEOUT_MS = 5_000;
 
 // Undo toasts still on screen, oldest first, so the `thread.undo` shortcut runs the newest one.
 const liveUndos: Array<() => Promise<void> | null> = [];

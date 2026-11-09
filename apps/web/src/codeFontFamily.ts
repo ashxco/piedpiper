@@ -3,7 +3,7 @@ import { useSettings } from "./hooks/useSettings";
 import { DEFAULT_TERMINAL_FONT_STACK, resolveTerminalFontFamily } from "./terminalAppearanceFonts";
 
 /** Read by the `pre, code` rule in index.css; form fields deliberately keep the fixed stack. */
-export const CODE_FONT_FAMILY_CSS_VARIABLE = "--code-font-family";
+const CODE_FONT_FAMILY_CSS_VARIABLE = "--code-font-family";
 
 const CODE_FONT_FAMILY_CSS_VARIABLES = [
   CODE_FONT_FAMILY_CSS_VARIABLE,

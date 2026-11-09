@@ -61,20 +61,20 @@ const makeRowTolerantArraySetting = <S extends Schema.Codec<any, any, never, nev
 
 export const TimestampFormat = Schema.Literals(["locale", "12-hour", "24-hour"]);
 export type TimestampFormat = typeof TimestampFormat.Type;
-export const DEFAULT_TIMESTAMP_FORMAT: TimestampFormat = "locale";
+const DEFAULT_TIMESTAMP_FORMAT: TimestampFormat = "locale";
 
 export const SidebarProjectSortOrder = Schema.Literals(["updated_at", "created_at", "manual"]);
 export type SidebarProjectSortOrder = typeof SidebarProjectSortOrder.Type;
-export const DEFAULT_SIDEBAR_PROJECT_SORT_ORDER: SidebarProjectSortOrder = "updated_at";
+const DEFAULT_SIDEBAR_PROJECT_SORT_ORDER: SidebarProjectSortOrder = "updated_at";
 
 export const SidebarThreadSortOrder = Schema.Literals(["updated_at", "created_at"]);
 export type SidebarThreadSortOrder = typeof SidebarThreadSortOrder.Type;
-export const DEFAULT_SIDEBAR_THREAD_SORT_ORDER: SidebarThreadSortOrder = "updated_at";
+const DEFAULT_SIDEBAR_THREAD_SORT_ORDER: SidebarThreadSortOrder = "updated_at";
 
 /** Which key sends a composer message. `mod` is Cmd on macOS and Ctrl elsewhere. */
 export const SendShortcut = Schema.Literals(["enter", "mod-enter-multiline", "mod-enter"]);
 export type SendShortcut = typeof SendShortcut.Type;
-export const DEFAULT_SEND_SHORTCUT: SendShortcut = "enter";
+const DEFAULT_SEND_SHORTCUT: SendShortcut = "enter";
 
 /**
  * Whether tool-call and work-log rows show in the thread timeline. `hideSuccessful`
@@ -83,16 +83,16 @@ export const DEFAULT_SEND_SHORTCUT: SendShortcut = "enter";
  */
 export const ToolCallVisibility = Schema.Literals(["showAll", "hideSuccessful", "hideAll", "zen"]);
 export type ToolCallVisibility = typeof ToolCallVisibility.Type;
-export const DEFAULT_TOOL_CALL_VISIBILITY: ToolCallVisibility = "showAll";
+const DEFAULT_TOOL_CALL_VISIBILITY: ToolCallVisibility = "showAll";
 
 export const DiffLayout = Schema.Literals(["stacked", "split"]);
 export type DiffLayout = typeof DiffLayout.Type;
-export const DEFAULT_DIFF_LAYOUT: DiffLayout = "stacked";
+const DEFAULT_DIFF_LAYOUT: DiffLayout = "stacked";
 
 /** `blue-orange` is the red-green colour-blind friendly palette. */
 export const DiffColorScheme = Schema.Literals(["red-green", "blue-orange"]);
 export type DiffColorScheme = typeof DiffColorScheme.Type;
-export const DEFAULT_DIFF_COLOR_SCHEME: DiffColorScheme = "red-green";
+const DEFAULT_DIFF_COLOR_SCHEME: DiffColorScheme = "red-green";
 
 /** Desktop-only guard on the quit shortcut (Cmd/Ctrl+Q). Browser clients ignore it. */
 export const QuitConfirmationMode = Schema.Literals(["direct", "hold", "double-click"]);
@@ -107,15 +107,15 @@ export const NotificationMode = Schema.Literals([
   "notifications-and-sound",
 ]);
 export type NotificationMode = typeof NotificationMode.Type;
-export const DEFAULT_NOTIFICATION_MODE: NotificationMode = "off";
+const DEFAULT_NOTIFICATION_MODE: NotificationMode = "off";
 
 /** Maximum width of the chat timeline and composer on wide screens. */
 export const ChatWidth = Schema.Literals(["comfortable", "wide", "full"]);
 export type ChatWidth = typeof ChatWidth.Type;
-export const DEFAULT_CHAT_WIDTH: ChatWidth = "comfortable";
+const DEFAULT_CHAT_WIDTH: ChatWidth = "comfortable";
 
 /** A model named by provider, as stored in the favorites and hidden-model lists. */
-export const ProviderModelRef = Schema.Struct({
+const ProviderModelRef = Schema.Struct({
   provider: ProviderKind,
   model: TrimmedNonEmptyString,
 });
@@ -216,7 +216,7 @@ export type ThreadEnvMode = typeof ThreadEnvMode.Type;
 /** How a new worktree checks out the repository's git submodules. */
 export const WorktreeSubmodules = Schema.Literals(["recursive", "top-level", "none"]);
 export type WorktreeSubmodules = typeof WorktreeSubmodules.Type;
-export const DEFAULT_WORKTREE_SUBMODULES: WorktreeSubmodules = "recursive";
+const DEFAULT_WORKTREE_SUBMODULES: WorktreeSubmodules = "recursive";
 
 /** Style rules for generated commit messages. */
 export const CommitMessageStyleMode = Schema.Literals([
@@ -225,7 +225,7 @@ export const CommitMessageStyleMode = Schema.Literals([
   "custom",
 ]);
 export type CommitMessageStyleMode = typeof CommitMessageStyleMode.Type;
-export const DEFAULT_COMMIT_MESSAGE_STYLE_MODE: CommitMessageStyleMode = "repo_conventions";
+const DEFAULT_COMMIT_MESSAGE_STYLE_MODE: CommitMessageStyleMode = "repo_conventions";
 
 export const CommitMessageStyleSettings = Schema.Struct({
   mode: CommitMessageStyleMode.pipe(
@@ -242,8 +242,8 @@ export type CommitMessageStyleSettings = typeof CommitMessageStyleSettings.Type;
  */
 export const BranchNamingMode = Schema.Literals(["static", "semantic", "custom"]);
 export type BranchNamingMode = typeof BranchNamingMode.Type;
-export const DEFAULT_BRANCH_NAMING_MODE: BranchNamingMode = "static";
-export const DEFAULT_BRANCH_NAME_PREFIX = "piedpiper";
+const DEFAULT_BRANCH_NAMING_MODE: BranchNamingMode = "static";
+const DEFAULT_BRANCH_NAME_PREFIX = "piedpiper";
 
 export interface BranchNamingOptions {
   readonly mode: BranchNamingMode;
@@ -315,7 +315,7 @@ export const ClaudeSettings = Schema.Struct({
 });
 export type ClaudeSettings = typeof ClaudeSettings.Type;
 
-export const ObservabilitySettings = Schema.Struct({
+const ObservabilitySettings = Schema.Struct({
   otlpTracesUrl: TrimmedString.pipe(Schema.withDecodingDefault(() => "")),
   otlpMetricsUrl: TrimmedString.pipe(Schema.withDecodingDefault(() => "")),
   otlpLogsUrl: TrimmedString.pipe(Schema.withDecodingDefault(() => "")),

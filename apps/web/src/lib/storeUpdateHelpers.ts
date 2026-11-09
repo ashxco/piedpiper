@@ -85,7 +85,7 @@ export function capThreadActivities(activities: Thread["activities"]): Thread["a
   }
   return kept.length === activities.length ? activities : kept.toReversed();
 }
-export const EMPTY_THREAD_IDS: ThreadId[] = [];
+const EMPTY_THREAD_IDS: ThreadId[] = [];
 
 export function updateThread(
   threads: Thread[],
@@ -202,7 +202,7 @@ export function checkpointStatusToLatestTurnState(status: "ready" | "missing" | 
   return "completed" as const;
 }
 
-export function compareActivities(
+function compareActivities(
   left: Thread["activities"][number],
   right: Thread["activities"][number],
 ): number {
@@ -264,7 +264,7 @@ export function appendThreadActivity(
 }
 
 /** Merge a thread.message-sent payload into the message it updates. */
-export function mergeStreamedMessage(entry: ChatMessage, message: ChatMessage): ChatMessage {
+function mergeStreamedMessage(entry: ChatMessage, message: ChatMessage): ChatMessage {
   return {
     ...entry,
     text: message.streaming
@@ -369,93 +369,4 @@ export function rebindTurnDiffSummariesForAssistantMessage(
     };
   });
   return changed ? nextSummaries : (turnDiffSummaries as Thread["turnDiffSummaries"]);
-}
-
-export function retainThreadMessagesAfterRevert(
-  messages: ReadonlyArray<ChatMessage>,
-  retainedTurnIds: ReadonlySet<string>,
-  turnCount: number,
-): ChatMessage[] {
-  const retainedMessageIds = new Set<string>();
-  for (const message of messages) {
-    if (message.role === "system") {
-      retainedMessageIds.add(message.id);
-      continue;
-    }
-    if (
-      message.turnId !== undefined &&
-      message.turnId !== null &&
-      retainedTurnIds.has(message.turnId)
-    ) {
-      retainedMessageIds.add(message.id);
-    }
-  }
-
-  const retainedUserCount = messages.filter(
-    (message) => message.role === "user" && retainedMessageIds.has(message.id),
-  ).length;
-  const missingUserCount = Math.max(0, turnCount - retainedUserCount);
-  if (missingUserCount > 0) {
-    const fallbackUserMessages = messages
-      .filter(
-        (message) =>
-          message.role === "user" &&
-          !retainedMessageIds.has(message.id) &&
-          (message.turnId === undefined ||
-            message.turnId === null ||
-            retainedTurnIds.has(message.turnId)),
-      )
-      .toSorted(
-        (left, right) =>
-          left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id),
-      )
-      .slice(0, missingUserCount);
-    for (const message of fallbackUserMessages) {
-      retainedMessageIds.add(message.id);
-    }
-  }
-
-  const retainedAssistantCount = messages.filter(
-    (message) => message.role === "assistant" && retainedMessageIds.has(message.id),
-  ).length;
-  const missingAssistantCount = Math.max(0, turnCount - retainedAssistantCount);
-  if (missingAssistantCount > 0) {
-    const fallbackAssistantMessages = messages
-      .filter(
-        (message) =>
-          message.role === "assistant" &&
-          !retainedMessageIds.has(message.id) &&
-          (message.turnId === undefined ||
-            message.turnId === null ||
-            retainedTurnIds.has(message.turnId)),
-      )
-      .toSorted(
-        (left, right) =>
-          left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id),
-      )
-      .slice(0, missingAssistantCount);
-    for (const message of fallbackAssistantMessages) {
-      retainedMessageIds.add(message.id);
-    }
-  }
-
-  return messages.filter((message) => retainedMessageIds.has(message.id));
-}
-
-export function retainThreadActivitiesAfterRevert(
-  activities: ReadonlyArray<Thread["activities"][number]>,
-  retainedTurnIds: ReadonlySet<string>,
-): Thread["activities"] {
-  return activities.filter(
-    (activity) => activity.turnId === null || retainedTurnIds.has(activity.turnId),
-  );
-}
-
-export function retainThreadProposedPlansAfterRevert(
-  proposedPlans: ReadonlyArray<Thread["proposedPlans"][number]>,
-  retainedTurnIds: ReadonlySet<string>,
-): Thread["proposedPlans"] {
-  return proposedPlans.filter(
-    (proposedPlan) => proposedPlan.turnId === null || retainedTurnIds.has(proposedPlan.turnId),
-  );
 }

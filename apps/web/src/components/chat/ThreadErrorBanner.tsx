@@ -35,7 +35,7 @@ export function getThreadErrorDisplayMessage(error: string): string {
 // error must not resurface it, while a different error on the thread still shows.
 const dismissedThreadErrorKeys = new Set<string>();
 
-export function getThreadErrorDismissalKey(threadId: string, error: string): string {
+function getThreadErrorDismissalKey(threadId: string, error: string): string {
   return `${threadId}\u0000${error}`;
 }
 

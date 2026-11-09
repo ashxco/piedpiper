@@ -366,7 +366,7 @@ export const hasCustomModelProvider = readCodexConfigModelProvider().pipe(
 
 const CAPABILITIES_PROBE_TIMEOUT_MS = CODEX_ACCOUNT_PROBE_TIMEOUT_MS;
 // `codex login status` can exceed the 4 s default on slow machines and show a bogus auth warning.
-export const CODEX_AUTH_PROBE_TIMEOUT_MS = AUTH_PROBE_TIMEOUT_MS;
+const CODEX_AUTH_PROBE_TIMEOUT_MS = AUTH_PROBE_TIMEOUT_MS;
 const CODEX_PROBE_FORCE_KILL_AFTER = "1 second";
 
 /** The account probe's app-server exited at startup; `detail` is its exit reason. */

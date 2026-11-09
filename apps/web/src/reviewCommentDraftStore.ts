@@ -5,7 +5,7 @@ import { createJSONStorage, persist, type StateStorage } from "zustand/middlewar
 
 import { ReviewCommentContextSchema, type ReviewCommentContext } from "./reviewCommentContext";
 
-export const REVIEW_COMMENT_DRAFT_STORAGE_KEY = "piedpiper:review-comment-drafts:v1";
+const REVIEW_COMMENT_DRAFT_STORAGE_KEY = "piedpiper:review-comment-drafts:v1";
 
 const EMPTY_REVIEW_COMMENTS: ReadonlyArray<ReviewCommentContext> = [];
 const isReviewCommentContext = Schema.is(ReviewCommentContextSchema);

@@ -159,7 +159,7 @@ interface CreatedWorktree {
 }
 
 /** Runs a project script in a thread other than the visible one, so it opens no UI. */
-export async function runProjectScriptForThread(
+async function runProjectScriptForThread(
   api: Pick<MultiModelApi, "terminal">,
   input: { threadId: ThreadId; script: ProjectScript; projectCwd: string; worktreePath: string },
 ): Promise<void> {

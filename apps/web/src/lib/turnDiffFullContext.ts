@@ -14,7 +14,7 @@ type TurnDiffFileContents = Pick<
 >;
 
 /** What `git diff -w` ignores: all whitespace, where jsdiff's `ignoreWhitespace` only trims line ends. */
-export function linesEqualIgnoringWhitespace(left: string, right: string): boolean {
+function linesEqualIgnoringWhitespace(left: string, right: string): boolean {
   return left.replace(/\s+/g, "") === right.replace(/\s+/g, "");
 }
 

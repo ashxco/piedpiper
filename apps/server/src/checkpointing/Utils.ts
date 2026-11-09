@@ -1,7 +1,7 @@
 import { Encoding } from "effect";
 import { CheckpointRef, ProjectId, type ThreadId } from "@piedpiper/contracts";
 
-export const CHECKPOINT_REFS_PREFIX = "refs/piedpiper/checkpoints";
+const CHECKPOINT_REFS_PREFIX = "refs/piedpiper/checkpoints";
 
 export function checkpointRefForThreadTurn(threadId: ThreadId, turnCount: number): CheckpointRef {
   return CheckpointRef.makeUnsafe(

@@ -2,7 +2,7 @@
  * Status message for a provider CLI that could not be started: names the configured command
  * and where to change it, since a missing CLI is usually a PATH or binary-path problem.
  */
-export const formatMissingProviderCliMessage = (input: {
+const formatMissingProviderCliMessage = (input: {
   /** Product name shown to the user, e.g. "Codex CLI". */
   readonly cliName: string;
   /** The configured command or path that failed to start. */

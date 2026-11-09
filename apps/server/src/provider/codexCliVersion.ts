@@ -2,10 +2,10 @@ import { compareCliVersions, normalizeCliVersion, parseCliSemver } from "./cliVe
 
 const CODEX_VERSION_PATTERN = /\bv?(\d+\.\d+(?:\.\d+)?(?:-[0-9A-Za-z.-]+)?)\b/;
 
-export const MINIMUM_CODEX_CLI_VERSION = "0.37.0";
+const MINIMUM_CODEX_CLI_VERSION = "0.37.0";
 
 /** First Codex CLI whose app-server accepts `approvalsReviewer: "auto_review"` on thread/start and resume. */
-export const MINIMUM_CODEX_APPROVALS_REVIEWER_VERSION = "0.124.0";
+const MINIMUM_CODEX_APPROVALS_REVIEWER_VERSION = "0.124.0";
 
 export const compareCodexCliVersions = compareCliVersions;
 

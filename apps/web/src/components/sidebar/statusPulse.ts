@@ -1,6 +1,6 @@
 import type { AnimationEvent } from "react";
 
-export const STATUS_PULSE_ANIMATION_NAME = "status-pulse";
+const STATUS_PULSE_ANIMATION_NAME = "status-pulse";
 
 /** Pin a newly started status pulse to the document clock so every row pulses in phase. */
 export function synchronizeStatusPulse(event: AnimationEvent<Element>): void {

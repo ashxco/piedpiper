@@ -8,7 +8,6 @@ import {
   type ProjectEntry,
   type ProjectId,
   type ProviderApprovalDecision,
-  isProviderSendTurnSupportedImageMimeType,
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
   PROVIDER_SEND_TURN_MAX_FILE_BYTES,
   PROVIDER_SEND_TURN_MAX_IMAGE_BYTES,
@@ -24,12 +23,13 @@ import {
   type TerminalSessionSnapshot,
 } from "@piedpiper/contracts";
 import { normalizeModelSlug } from "@piedpiper/shared/model";
+import { isProviderSendTurnSupportedImageMimeType } from "@piedpiper/shared/attachments";
 import { truncate } from "@piedpiper/shared/String";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { useDebouncedValue } from "@tanstack/react-pacer";
 import { useNavigate, useSearch } from "@tanstack/react-router";
-import { gitCreateWorktreeMutationOptions, gitStatusQueryOptions } from "~/lib/gitReactQuery";
+import { gitStatusQueryOptions } from "~/lib/gitReactQuery";
 import { buildAssistantQuoteInsertion } from "~/lib/assistantTextSelection";
 import { projectSearchEntriesQueryOptions } from "~/lib/projectReactQuery";
 import { isElectron } from "../env";
@@ -134,7 +134,6 @@ import {
 } from "~/projectScripts";
 import { BranchToolbarMismatchNotice } from "./BranchToolbarMismatchNotice";
 import { beginThreadStop, clearThreadStop } from "./chat/composerThreadStop";
-import { type ComposerWorktreeProgressValue } from "./chat/ComposerWorktreeProgress";
 import {
   buildThreadMessageRevealPosition,
   takeThreadMessageReveal,
@@ -212,6 +211,8 @@ import {
 import { useWorktreeBaseBranch } from "./BranchToolbarWorktreeBase";
 import { isModelHiddenWhileBrowsing } from "./chat/ProviderModelPicker.logic";
 import { sendComposerMultiModel } from "./chat/composerMultiModelSend";
+import { runComposerSingleSend } from "./chat/composerSingleSend";
+import { useComposerWorktreeCreation } from "../hooks/useComposerWorktreeCreation";
 import { useThreadFindStore } from "./chat/threadFindStore";
 import { TooltipScrollDismissArea } from "./ui/tooltip";
 import { refreshProviderStatuses } from "./chat/ProviderStatusBanner";
@@ -240,7 +241,6 @@ import {
   buildComposerPdfAttachment,
   buildExpiredTerminalContextToastCopy,
   buildLocalDraftThread,
-  buildTemporaryWorktreeBranchName,
   cloneComposerImageForRetry,
   collectUserMessageBlobPreviewUrls,
   composerSendFollowUpRequiresModifier,
@@ -297,9 +297,7 @@ import {
   ComposerSendCancelledError,
   resolveFailedSendErrorMessage,
   resolveWorktreeSendPlan,
-  settleWorktreeCreation,
   type ComposerPathSearchTarget,
-  type WorktreeCreationAbortIntent,
 } from "./ChatView.logic";
 import {
   captureTimelinePosition,
@@ -437,16 +435,6 @@ const terminalContextIdListsEqual = (
 ): boolean =>
   contexts.length === ids.length && contexts.every((context, index) => context.id === ids[index]);
 
-interface WorktreeCreationHandle {
-  readonly controller: AbortController;
-  abortIntent: WorktreeCreationAbortIntent | null;
-}
-
-interface WorktreeCreationState {
-  readonly progress: ComposerWorktreeProgressValue | null;
-  readonly canWorkLocally: boolean;
-}
-
 interface ChatViewProps {
   threadId: ThreadId;
 }
@@ -546,8 +534,6 @@ export default function ChatView({ threadId }: ChatViewProps) {
     select: (params) => parseDiffRouteSearch(params),
   });
   const { resolvedTheme } = useTheme();
-  const queryClient = useQueryClient();
-  const createWorktreeMutation = useMutation(gitCreateWorktreeMutationOptions({ queryClient }));
   // The prompt text is deliberately not subscribed here: ChatComposer owns that
   // subscription so a keystroke does not re-render the whole chat view. The latest
   // text is mirrored into promptRef for the handlers below.
@@ -708,11 +694,13 @@ export default function ChatView({ threadId }: ChatViewProps) {
   // ChatView stays mounted across threads, so sends and worktree creations are tracked per thread:
   // one in flight blocks only its own thread, and only that thread offers its controls.
   const sendInFlightThreadIdsRef = useRef(new Set<ThreadId>());
-  const worktreeCreationsRef = useRef(new Map<ThreadId, WorktreeCreationHandle>());
-  const [worktreeCreations, setWorktreeCreations] = useState<
-    Readonly<Record<string, WorktreeCreationState>>
-  >({});
-  const activeWorktreeCreation = worktreeCreations[threadId] ?? null;
+  const {
+    activeCreation: activeWorktreeCreation,
+    createWorktree,
+    prepareWorktree,
+    cancel: onCancelPreparingWorktree,
+    workLocally: onWorkLocallyInstead,
+  } = useComposerWorktreeCreation(threadId);
   const [queuedSendThreadId, setQueuedSendThreadId] = useState<ThreadId | null>(null);
   // Follow-up of a send held while images were fitted; read and cleared when the queue flushes.
   const queuedSendFollowUpRef = useRef<ComposerSendFollowUp | null>(null);
@@ -3427,15 +3415,6 @@ export default function ChatView({ threadId }: ChatViewProps) {
     }
   });
 
-  const abortWorktreeCreation = (intent: WorktreeCreationAbortIntent) => {
-    const creation = worktreeCreationsRef.current.get(threadId);
-    if (!creation) return;
-    creation.abortIntent = intent;
-    creation.controller.abort();
-  };
-  const onCancelPreparingWorktree = useStableCallback(() => abortWorktreeCreation("cancel"));
-  const onWorkLocallyInstead = useStableCallback(() => abortWorktreeCreation("work-locally"));
-
   // The figures go stale once quota is being spent again.
   const usagePanelTurnKey = `${activeThread?.latestTurn?.turnId ?? ""}:${activePendingUserInput?.requestId ?? ""}`;
   const usagePanelTurnKeyRef = useRef(usagePanelTurnKey);
@@ -3449,6 +3428,15 @@ export default function ChatView({ threadId }: ChatViewProps) {
     setUsageLimitsPanelThreadId(activeThreadId);
     // Same RPC as the Refresh buttons: opening the panel re-probes on purpose so usage is fresh.
     void refreshProviderStatuses();
+  };
+
+  const clearComposerForSend = (targetThreadId: ThreadId) => {
+    clearComposerDraftContent(targetThreadId);
+    if (currentThreadIdRef.current !== targetThreadId) return;
+    promptRef.current = "";
+    setComposerHighlightedItemId(null);
+    setComposerCursor(0);
+    setComposerTrigger(null);
   };
 
   const onSend = async (
@@ -3483,11 +3471,7 @@ export default function ChatView({ threadId }: ChatViewProps) {
       isStandaloneUsageLimitsSlashCommand(promptRef.current)
     ) {
       openUsageLimitsPanel();
-      promptRef.current = "";
-      clearComposerDraftContent(activeThread.id);
-      setComposerHighlightedItemId(null);
-      setComposerCursor(0);
-      setComposerTrigger(null);
+      clearComposerForSend(activeThread.id);
       return;
     }
     // Sending during an approval declines it and stops the turn; the message follows once it ends.
@@ -3511,11 +3495,7 @@ export default function ChatView({ threadId }: ChatViewProps) {
           : null;
       if (redirectSlashCommand) {
         handleInteractionModeChange(redirectSlashCommand);
-        promptRef.current = "";
-        clearComposerDraftContent(activeThread.id);
-        setComposerHighlightedItemId(null);
-        setComposerCursor(0);
-        setComposerTrigger(null);
+        clearComposerForSend(activeThread.id);
         return;
       }
       const redirectLengthError = getComposerPromptLengthValidationMessage(
@@ -3630,12 +3610,8 @@ export default function ChatView({ threadId }: ChatViewProps) {
         images: [...composerImages],
       };
       const followUpReviewComments = [...composerReviewComments];
-      promptRef.current = "";
-      clearComposerDraftContent(followUpThreadId);
+      clearComposerForSend(followUpThreadId);
       clearReviewComments(followUpThreadId);
-      setComposerHighlightedItemId(null);
-      setComposerCursor(0);
-      setComposerTrigger(null);
       const followUpSent = await onSubmitPlanFollowUp({
         text: followUp.text,
         interactionMode: followUp.interactionMode,
@@ -3676,11 +3652,7 @@ export default function ChatView({ threadId }: ChatViewProps) {
         : null;
     if (standaloneSlashCommand) {
       handleInteractionModeChange(standaloneSlashCommand);
-      promptRef.current = "";
-      clearComposerDraftContent(activeThread.id);
-      setComposerHighlightedItemId(null);
-      setComposerCursor(0);
-      setComposerTrigger(null);
+      clearComposerForSend(activeThread.id);
       return;
     }
     if (!hasSendableContent) {
@@ -3733,17 +3705,12 @@ export default function ChatView({ threadId }: ChatViewProps) {
         runtimeMode,
         interactionMode,
         api,
-        createWorktree: (input) => createWorktreeMutation.mutateAsync(input),
+        createWorktree,
         isThreadCurrent: () => currentThreadIdRef.current === multiThreadId,
         reportError: (message) => setThreadError(multiThreadId, message),
         clearComposer: () => {
-          clearComposerDraftContent(multiThreadId);
+          clearComposerForSend(multiThreadId);
           clearReviewComments(multiThreadId);
-          if (currentThreadIdRef.current !== multiThreadId) return;
-          promptRef.current = "";
-          setComposerHighlightedItemId(null);
-          setComposerCursor(0);
-          setComposerTrigger(null);
         },
         onComposerRestored: (restoredPrompt) => {
           if (currentThreadIdRef.current !== multiThreadId) return;
@@ -3833,182 +3800,79 @@ export default function ChatView({ threadId }: ChatViewProps) {
         description: toastCopy.description,
       });
     }
-    promptRef.current = "";
-    clearComposerDraftContent(threadIdForSend);
+    clearComposerForSend(threadIdForSend);
     clearReviewComments(threadIdForSend);
-    setComposerHighlightedItemId(null);
-    setComposerCursor(0);
-    setComposerTrigger(null);
 
     const draftThreadForSend = isLocalDraftThread ? draftThread : null;
-    let createdServerThreadForLocalDraft = false;
-    let turnStartSucceeded = false;
-    let nextThreadBranch = activeThread.branch;
-    let nextThreadWorktreePath = activeThread.worktreePath;
-    let workedLocallyInstead = false;
     if (isLocalDraftThread) {
       useComposerDraftStore.getState().setDraftThreadPromoting(threadIdForSend, true);
     }
-    await (async () => {
-      // On first message: lock in branch + create worktree if needed.
-      if (baseBranchForWorktree) {
-        beginLocalDispatch({ preparingWorktree: true });
-        const newBranch = buildTemporaryWorktreeBranchName();
-        const creation: WorktreeCreationHandle = {
-          controller: new AbortController(),
-          abortIntent: null,
-        };
-        worktreeCreationsRef.current.set(threadIdForSend, creation);
-        setWorktreeCreations((current) => ({
-          ...current,
-          [threadIdForSend]: { progress: null, canWorkLocally: isLocalDraftThread },
-        }));
-        const outcome = await settleWorktreeCreation(
-          createWorktreeMutation.mutateAsync({
-            cwd: activeProject.cwd,
-            branch: baseBranchForWorktree,
-            newBranch,
-            signal: creation.controller.signal,
-            onProgress: (event) => {
-              const { percent } = event;
-              setWorktreeCreations((current) => {
-                const entry = current[threadIdForSend];
-                return !entry || entry.progress?.percent === percent
-                  ? current
-                  : { ...current, [threadIdForSend]: { ...entry, progress: { percent } } };
-              });
-            },
+    const sendResult = await runComposerSingleSend(
+      {
+        thread: {
+          id: threadIdForSend,
+          createdAt: activeThread.createdAt,
+          branch: activeThread.branch,
+          worktreePath: activeThread.worktreePath,
+          isServer: isServerThread,
+          isLocalDraft: isLocalDraftThread,
+          isFirstMessage,
+        },
+        project: activeProject,
+        message: {
+          id: messageIdForSend,
+          text: outgoingMessageText,
+          title: deriveSendThreadTitle({
+            trimmedPrompt: trimmed,
+            images: composerImagesSnapshot,
+            terminalContexts: composerTerminalContextsSnapshot,
+            reviewComments: composerReviewCommentsSnapshot,
           }),
-          () => creation.abortIntent,
-        ).finally(() => {
-          worktreeCreationsRef.current.delete(threadIdForSend);
-          setWorktreeCreations((current) => {
-            const remaining = { ...current };
-            delete remaining[threadIdForSend];
-            return remaining;
-          });
-        });
-        if (outcome.status === "work-locally") {
-          // The same send carries on in the project checkout, so the prompt is not re-queued.
-          workedLocallyInstead = true;
-          nextThreadBranch = currentGitBranch ?? activeThread.branch;
-          nextThreadWorktreePath = null;
-          setDraftThreadContext(threadIdForSend, {
-            branch: nextThreadBranch,
-            worktreePath: null,
-            envMode: "local",
-          });
-          // The send outlives a switch away, and the dispatch state describes the thread on screen.
+          createdAt: messageCreatedAt,
+          attachments: turnAttachmentsPromise,
+        },
+        settings: { modelSelection: selectedModelSelection, runtimeMode, interactionMode },
+        threadCreateModelSelection: buildThreadCreateModelSelection({
+          provider: selectedProvider,
+          model: selectedModel,
+          projectDefaultModel: activeProject.defaultModelSelection?.model,
+          options: selectedModelSelection.options,
+        }),
+        persistModelSelection: Boolean(selectedModel),
+        worktree: { baseBranch: baseBranchForWorktree, localBranch: currentGitBranch },
+      },
+      {
+        dispatchCommand: (command) => api.orchestration.dispatchCommand(command),
+        prepareWorktree: (baseBranch) =>
+          prepareWorktree({
+            threadId: threadIdForSend,
+            cwd: activeProject.cwd,
+            branch: baseBranch,
+            canWorkLocally: isLocalDraftThread,
+          }),
+        updateThreadContext: (context, workedLocally) => {
+          if (workedLocally) {
+            setDraftThreadContext(threadIdForSend, { ...context, envMode: "local" });
+            if (currentThreadIdRef.current === threadIdForSend) {
+              beginLocalDispatch({ preparingWorktree: false });
+            }
+          } else if (isServerThread) {
+            // The terminal drawer must immediately use the worktree cwd and environment.
+            setStoreThreadBranch(threadIdForSend, context.branch, context.worktreePath);
+          }
+        },
+        runProjectScript,
+        persistSettings: persistThreadSettingsForNextTurn,
+        onReadyToSend: () => {
           if (currentThreadIdRef.current === threadIdForSend) {
             beginLocalDispatch({ preparingWorktree: false });
           }
-        } else {
-          const { result } = outcome;
-          nextThreadBranch = result.worktree.branch;
-          nextThreadWorktreePath = result.worktree.path;
-          if (isServerThread) {
-            await api.orchestration.dispatchCommand({
-              type: "thread.meta.update",
-              commandId: newCommandId(),
-              threadId: threadIdForSend,
-              branch: result.worktree.branch,
-              worktreePath: result.worktree.path,
-            });
-            // Keep local thread state in sync immediately so terminal drawer opens
-            // with the worktree cwd/env instead of briefly using the project root.
-            setStoreThreadBranch(threadIdForSend, result.worktree.branch, result.worktree.path);
-          }
-        }
-      }
-
-      const title = deriveSendThreadTitle({
-        trimmedPrompt: trimmed,
-        images: composerImagesSnapshot,
-        terminalContexts: composerTerminalContextsSnapshot,
-        reviewComments: composerReviewCommentsSnapshot,
-      });
-      const threadCreateModelSelection = buildThreadCreateModelSelection({
-        provider: selectedProvider,
-        model: selectedModel,
-        projectDefaultModel: activeProject.defaultModelSelection?.model,
-        options: selectedModelSelection.options,
-      });
-
-      if (isLocalDraftThread) {
-        await api.orchestration.dispatchCommand({
-          type: "thread.create",
-          commandId: newCommandId(),
-          threadId: threadIdForSend,
-          projectId: activeProject.id,
-          title,
-          modelSelection: threadCreateModelSelection,
-          runtimeMode,
-          interactionMode,
-          branch: nextThreadBranch,
-          worktreePath: nextThreadWorktreePath,
-          createdAt: activeThread.createdAt,
-        });
-        createdServerThreadForLocalDraft = true;
-      }
-
-      const setupScript: ProjectScript | null =
-        baseBranchForWorktree && !workedLocallyInstead
-          ? setupProjectScript(activeProject.scripts)
-          : null;
-      if (setupScript) {
-        if (isServerThread || createdServerThreadForLocalDraft) {
-          const setupScriptOptions: Parameters<typeof runProjectScript>[1] = {
-            worktreePath: nextThreadWorktreePath,
-            rememberAsLastInvoked: false,
-          };
-          if (nextThreadWorktreePath) {
-            setupScriptOptions.cwd = nextThreadWorktreePath;
-          }
-          await runProjectScript(setupScript, setupScriptOptions);
-        }
-      }
-
-      if (isFirstMessage && isServerThread) {
-        await api.orchestration.dispatchCommand({
-          type: "thread.meta.update",
-          commandId: newCommandId(),
-          threadId: threadIdForSend,
-          title,
-        });
-      }
-
-      if (isServerThread) {
-        await persistThreadSettingsForNextTurn({
-          threadId: threadIdForSend,
-          createdAt: messageCreatedAt,
-          ...(selectedModel ? { modelSelection: selectedModelSelection } : {}),
-          runtimeMode,
-          interactionMode,
-        });
-      }
-
-      if (currentThreadIdRef.current === threadIdForSend) {
-        beginLocalDispatch({ preparingWorktree: false });
-      }
-      const turnAttachments = await turnAttachmentsPromise;
-      await api.orchestration.dispatchCommand({
-        type: "thread.turn.start",
-        commandId: newCommandId(),
-        threadId: threadIdForSend,
-        message: {
-          messageId: messageIdForSend,
-          role: "user",
-          text: outgoingMessageText,
-          attachments: turnAttachments,
         },
-        modelSelection: selectedModelSelection,
-        titleSeed: title,
-        runtimeMode,
-        interactionMode,
-        createdAt: messageCreatedAt,
-      });
-      turnStartSucceeded = true;
-    })().catch(async (err: unknown) => {
+      },
+    );
+    const turnStartSucceeded = sendResult.status === "sent";
+    if (sendResult.status === "failed") {
+      const { error: err, createdServerThread: createdServerThreadForLocalDraft } = sendResult;
       const sendErrorMessage = resolveFailedSendErrorMessage(err);
       // The user left the draft (e.g. Cmd+N while the worktree was created): the failed draft
       // has no sidebar row, so offer a way back to it.
@@ -4031,8 +3895,7 @@ export default function ChatView({ threadId }: ChatViewProps) {
       if (draftThreadForSend && !createdServerThreadForLocalDraft) {
         useComposerDraftStore.getState().setDraftThreadPromoting(threadIdForSend, false);
       }
-      const movesToRetryDraft =
-        createdServerThreadForLocalDraft && !turnStartSucceeded && Boolean(draftThreadForSend);
+      const movesToRetryDraft = createdServerThreadForLocalDraft && Boolean(draftThreadForSend);
       // The on-screen refs only describe the failed thread while it is still the visible one.
       const shouldRestoreComposer = shouldRestoreComposerAfterFailedSend({
         turnStartSucceeded,
@@ -4057,7 +3920,7 @@ export default function ChatView({ threadId }: ChatViewProps) {
           return next.length === existing.length ? existing : next;
         });
       }
-      if (createdServerThreadForLocalDraft && !turnStartSucceeded) {
+      if (createdServerThreadForLocalDraft) {
         if (draftThreadForSend) {
           // thread.deleted wipes every draft keyed by this id, so restore into a fresh draft thread.
           const retryThreadId = newThreadId();
@@ -4094,34 +3957,35 @@ export default function ChatView({ threadId }: ChatViewProps) {
             threadId: threadIdForSend,
           })
           .catch(() => undefined);
-        if (draftThreadForSend) return;
       }
-      if (shouldRestoreComposer) {
-        const isFailedThreadVisible = currentThreadIdRef.current === threadIdForSend;
-        if (isFailedThreadVisible) promptRef.current = promptForSend;
-        setPrompt(promptForSend);
-        addComposerImagesToDraft(composerImagesSnapshot.map(cloneComposerImageForRetry));
-        addComposerTerminalContextsToDraft(composerTerminalContextsSnapshot);
-        restoreReviewComments(threadIdForSend, composerReviewCommentsSnapshot);
-        if (isFailedThreadVisible) {
-          setComposerCursor(collapseExpandedComposerCursor(promptForSend, promptForSend.length));
-          setComposerTrigger(detectComposerTrigger(promptForSend, promptForSend.length));
+      if (!createdServerThreadForLocalDraft || !draftThreadForSend) {
+        if (shouldRestoreComposer) {
+          const isFailedThreadVisible = currentThreadIdRef.current === threadIdForSend;
+          if (isFailedThreadVisible) promptRef.current = promptForSend;
+          setPrompt(promptForSend);
+          addComposerImagesToDraft(composerImagesSnapshot.map(cloneComposerImageForRetry));
+          addComposerTerminalContextsToDraft(composerTerminalContextsSnapshot);
+          restoreReviewComments(threadIdForSend, composerReviewCommentsSnapshot);
+          if (isFailedThreadVisible) {
+            setComposerCursor(collapseExpandedComposerCursor(promptForSend, promptForSend.length));
+            setComposerTrigger(detectComposerTrigger(promptForSend, promptForSend.length));
+          }
+        } else if (isCancelled && currentThreadIdRef.current === threadIdForSend) {
+          // setPrompt overwrites, while the images and contexts helpers append.
+          const mergedPrompt = promptRef.current
+            ? `${promptForSend}\n\n${promptRef.current}`
+            : promptForSend;
+          promptRef.current = mergedPrompt;
+          setPrompt(mergedPrompt);
+          addComposerImagesToDraft(composerImagesSnapshot.map(cloneComposerImageForRetry));
+          addComposerTerminalContextsToDraft(composerTerminalContextsSnapshot);
+          restoreReviewComments(threadIdForSend, composerReviewCommentsSnapshot);
+          setComposerCursor(collapseExpandedComposerCursor(mergedPrompt, mergedPrompt.length));
         }
-      } else if (isCancelled && currentThreadIdRef.current === threadIdForSend) {
-        // setPrompt overwrites, while the images and contexts helpers append.
-        const mergedPrompt = promptRef.current
-          ? `${promptForSend}\n\n${promptRef.current}`
-          : promptForSend;
-        promptRef.current = mergedPrompt;
-        setPrompt(mergedPrompt);
-        addComposerImagesToDraft(composerImagesSnapshot.map(cloneComposerImageForRetry));
-        addComposerTerminalContextsToDraft(composerTerminalContextsSnapshot);
-        restoreReviewComments(threadIdForSend, composerReviewCommentsSnapshot);
-        setComposerCursor(collapseExpandedComposerCursor(mergedPrompt, mergedPrompt.length));
+        setThreadError(threadIdForSend, sendErrorMessage);
+        if (!createdServerThreadForLocalDraft) notifyLeftFailedDraft(threadIdForSend);
       }
-      setThreadError(threadIdForSend, sendErrorMessage);
-      if (!createdServerThreadForLocalDraft) notifyLeftFailedDraft(threadIdForSend);
-    });
+    }
     sendInFlightThreadIdsRef.current.delete(threadIdForSend);
     if (!turnStartSucceeded && currentThreadIdRef.current === threadIdForSend) {
       resetLocalDispatch();

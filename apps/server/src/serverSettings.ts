@@ -196,7 +196,7 @@ const PROVIDER_ORDER: readonly ProviderKind[] = ["codex", "claudeAgent"];
  * provider with its default model.  This is applied at read-time so the
  * persisted preference is preserved for when a provider is re-enabled.
  */
-export function resolveTextGenerationProvider(settings: ServerSettings): ServerSettings {
+function resolveTextGenerationProvider(settings: ServerSettings): ServerSettings {
   const selection = settings.textGenerationModelSelection;
   if (settings.providers[selection.provider].enabled) {
     return settings;

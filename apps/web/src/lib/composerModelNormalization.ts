@@ -197,7 +197,7 @@ export function legacyMergeModelSelectionIntoProviderModelOptions(
   );
 }
 
-export function legacyReplaceProviderModelOptions(
+function legacyReplaceProviderModelOptions(
   currentModelOptions: ProviderModelOptions | null | undefined,
   provider: ProviderKind,
   nextProviderOptions: ProviderModelOptions[ProviderKind] | null | undefined,

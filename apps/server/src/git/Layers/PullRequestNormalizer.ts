@@ -166,24 +166,22 @@ export function parseRepositoryOwnerLogin(nameWithOwner: string | null): string 
   return normalizedOwnerLogin.length > 0 ? normalizedOwnerLogin : null;
 }
 
-export function normalizeOptionalString(value: string | null | undefined): string | null {
+function normalizeOptionalString(value: string | null | undefined): string | null {
   const trimmed = value?.trim() ?? "";
   return trimmed.length > 0 ? trimmed : null;
 }
 
-export function normalizeOptionalRepositoryNameWithOwner(
-  value: string | null | undefined,
-): string | null {
+function normalizeOptionalRepositoryNameWithOwner(value: string | null | undefined): string | null {
   const normalized = normalizeOptionalString(value);
   return normalized ? normalized.toLowerCase() : null;
 }
 
-export function normalizeOptionalOwnerLogin(value: string | null | undefined): string | null {
+function normalizeOptionalOwnerLogin(value: string | null | undefined): string | null {
   const normalized = normalizeOptionalString(value);
   return normalized ? normalized.toLowerCase() : null;
 }
 
-export function resolvePullRequestHeadRepositoryNameWithOwner(
+function resolvePullRequestHeadRepositoryNameWithOwner(
   pr: PullRequestHeadRemoteInfo & { url: string },
 ) {
   const explicitRepository = normalizeOptionalString(pr.headRepositoryNameWithOwner);
@@ -372,7 +370,7 @@ export function limitContext(value: string, maxChars: number): string {
   return `${sliceSurrogateSafe(value, maxChars)}\n\n[truncated]`;
 }
 
-export function shortenSha(sha: string | undefined): string | null {
+function shortenSha(sha: string | undefined): string | null {
   if (!sha) return null;
   return sha.slice(0, SHORT_SHA_LENGTH);
 }

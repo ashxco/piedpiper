@@ -1,8 +1,8 @@
+import { isModelSelectionSwitch } from "@piedpiper/shared/model";
 import {
   type ChatAttachment,
   CommandId,
   EventId,
-  isModelSelectionSwitch,
   MessageId,
   ModelSelection,
   type OrchestrationEvent,

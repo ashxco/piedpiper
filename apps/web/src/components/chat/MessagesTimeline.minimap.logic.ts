@@ -6,10 +6,10 @@ import {
   type MessagesTimelineRow,
 } from "./MessagesTimeline.logic";
 
-export const TIMELINE_MINIMAP_ITEM_SPACING = 8;
+const TIMELINE_MINIMAP_ITEM_SPACING = 8;
 export const TIMELINE_MINIMAP_MIN_ITEMS = 2;
-export const TIMELINE_MINIMAP_MAX_HEIGHT_CSS = "calc(100% - 6rem)";
-export const TIMELINE_MINIMAP_PERSISTENT_GUTTER = 48;
+const TIMELINE_MINIMAP_MAX_HEIGHT_CSS = "calc(100% - 6rem)";
+const TIMELINE_MINIMAP_PERSISTENT_GUTTER = 48;
 /** Space kept above a user message the minimap jumps to. */
 export const TIMELINE_MINIMAP_JUMP_TOP_OFFSET_PX = 16;
 /** The tooltip shows a few lines; bound the work done on long or streaming replies. */

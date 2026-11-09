@@ -14,9 +14,9 @@ export const IMAGE_ATTACHMENT_MAX_EDGE = 2000;
 /** Sources over this are refused: decoding hundreds of megapixels can run the tab out of memory. */
 export const MAX_COMPRESSIBLE_SOURCE_BYTES = 50 * 1024 * 1024;
 /** Small encoded files can still decode huge (a flat 20000px PNG is ~1.6GB of RGBA), so cap pixels too. */
-export const MAX_DECODABLE_SOURCE_PIXELS = 100_000_000;
+const MAX_DECODABLE_SOURCE_PIXELS = 100_000_000;
 /** Enough header for a JPEG whose frame sits behind a few 64 KiB metadata segments. */
-export const IMAGE_DIMENSIONS_HEADER_BYTES = 256 * 1024;
+const IMAGE_DIMENSIONS_HEADER_BYTES = 256 * 1024;
 /** Tried in order until the encoding fits; below the floor resolution drops instead. */
 const QUALITY_STEPS = [0.92, 0.85, 0.78, 0.68] as const;
 const FALLBACK_SCALE_STEPS = [0.75, 0.55] as const;
@@ -34,7 +34,7 @@ export type FitImageResult =
 
 type DownscalableImageMimeType = "image/png" | "image/jpeg";
 
-export function downscalableImageMimeType(mimeType: string): DownscalableImageMimeType | null {
+function downscalableImageMimeType(mimeType: string): DownscalableImageMimeType | null {
   const normalized = mimeType.toLowerCase();
   if (normalized === "image/png") return "image/png";
   if (normalized === "image/jpeg" || normalized === "image/jpg") return "image/jpeg";
@@ -66,7 +66,7 @@ export function readDecodeDimensions(bytes: Uint8Array): ImageSize | null {
 }
 
 /** True when decoding an image of this size would allocate more than the pixel cap. */
-export function exceedsDecodablePixels(size: ImageSize | null): boolean {
+function exceedsDecodablePixels(size: ImageSize | null): boolean {
   return size !== null && size.width * size.height > MAX_DECODABLE_SOURCE_PIXELS;
 }
 

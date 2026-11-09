@@ -30,7 +30,7 @@ export interface RenderedProjectInputs<TProject, TThread> {
   draftThreadId: ThreadId | null;
 }
 
-export function renderedProjectInputsEqual<TProject, TThread>(
+function renderedProjectInputsEqual<TProject, TThread>(
   left: RenderedProjectInputs<TProject, TThread>,
   right: RenderedProjectInputs<TProject, TThread>,
 ): boolean {
@@ -67,7 +67,7 @@ function shallowRecordEqual(
  * (same-element arrays, shallow-equal records) and return the previous result
  * itself when nothing differs, so memoized consumers keep skipping renders.
  */
-export function reuseEqualResultFields<TResult>(previous: TResult, next: TResult): TResult {
+function reuseEqualResultFields<TResult>(previous: TResult, next: TResult): TResult {
   if (previous === next || !isPlainRecord(previous) || !isPlainRecord(next)) return next;
   const previousKeys = Object.keys(previous);
   const nextKeys = Object.keys(next);

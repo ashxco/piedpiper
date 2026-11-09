@@ -21,11 +21,10 @@ function errorDescription(error: unknown): string {
 }
 
 /** Where the native menu opens; keyboard-opened menus report 0,0, so anchor them under the chip. */
-export function contextMenuPosition(event: {
-  clientX: number;
-  clientY: number;
-  currentTarget: Element;
-}): { x: number; y: number } {
+function contextMenuPosition(event: { clientX: number; clientY: number; currentTarget: Element }): {
+  x: number;
+  y: number;
+} {
   if (event.clientX !== 0 || event.clientY !== 0) return { x: event.clientX, y: event.clientY };
   const rect = event.currentTarget.getBoundingClientRect();
   return { x: rect.left, y: rect.bottom };

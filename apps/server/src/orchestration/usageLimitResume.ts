@@ -54,7 +54,7 @@ export function readLatestUsageLimit(
 }
 
 /** Stable across restarts, so a resend replaces its message and the engine dedupes its command. */
-export function usageLimitResumeMessageId(threadId: string, limit: LatestUsageLimit): MessageId {
+function usageLimitResumeMessageId(threadId: string, limit: LatestUsageLimit): MessageId {
   return MessageId.makeUnsafe(
     `${USAGE_LIMIT_RESUME_MESSAGE_ID_PREFIX}${threadId}:${limit.turnId}:${Date.parse(limit.resetAt ?? "")}`,
   );

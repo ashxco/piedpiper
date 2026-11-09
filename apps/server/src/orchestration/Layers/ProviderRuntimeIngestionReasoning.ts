@@ -18,7 +18,7 @@ const MIN_REASONING_EMIT_INTERVAL_MS = 400;
 // Each emission waits for the text to grow by this fraction of what is already out.
 const REASONING_EMIT_GROWTH_DIVISOR = 4;
 /** A longer block continues in a new activity, which also bounds the rewritten text. */
-export const MAX_REASONING_BLOCK_CHARS = 16_000;
+const MAX_REASONING_BLOCK_CHARS = 16_000;
 
 export type ReasoningStream = ThreadReasoningActivityPayload["stream"];
 export type ReasoningStreamKind = "reasoning_text" | "reasoning_summary_text";

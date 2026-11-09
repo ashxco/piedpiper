@@ -26,7 +26,7 @@ export interface GitDiffPreviewDeps {
   readonly path: Path.Path;
 }
 
-export const GIT_DIFF_PREVIEW_MAX_OUTPUT_BYTES = 10_000_000;
+const GIT_DIFF_PREVIEW_MAX_OUTPUT_BYTES = 10_000_000;
 // Adding to a temporary index scales poorly, so past this the patch covers tracked files only.
 export const GIT_DIFF_PREVIEW_UNTRACKED_MAX_FILES = 5_000;
 const GIT_DIFF_PREVIEW_METADATA_MAX_OUTPUT_BYTES = 16 * 1024 * 1024;

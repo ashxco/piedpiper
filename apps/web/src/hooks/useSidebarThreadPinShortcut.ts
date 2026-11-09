@@ -10,7 +10,7 @@ import { useStore } from "../store";
 import { useUiStateStore } from "../uiStateStore";
 
 /** Flips the pin of the thread on screen; drafts have no server thread and archiving already unpinned. */
-export function toggleRouteThreadPin(threadId: ThreadId | null): void {
+function toggleRouteThreadPin(threadId: ThreadId | null): void {
   if (threadId === null) return;
   const thread = useStore.getState().sidebarThreadsById[threadId];
   if (!thread || thread.archivedAt !== null) return;

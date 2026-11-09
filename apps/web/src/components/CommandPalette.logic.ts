@@ -49,7 +49,7 @@ export interface CommandPaletteGroup {
   readonly items: ReadonlyArray<CommandPaletteItem>;
 }
 
-export function normalizeSearchText(value: string): string {
+function normalizeSearchText(value: string): string {
   return value.trim().toLowerCase().replace(/\s+/g, " ");
 }
 

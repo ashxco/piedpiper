@@ -18,7 +18,6 @@ import { attachmentRelativePath } from "../../attachmentStore.ts";
 import { type ClaudeAttachmentBudget, makeClaudeAttachmentBudget } from "../pdfDocumentBudget.ts";
 
 import {
-  applyClaudeTaskToolResult,
   buildUserMessageWithPdfBudgetEffect,
   claudeCompactPreservedMessageIds,
   claudeRateLimitCompletionFields,
@@ -40,7 +39,6 @@ import {
   classifyRequestType,
   classifyToolItemType,
   claudeApprovalDetail,
-  claudeApprovalPresentation,
   claudeCompactBoundaryContextUsage,
   claudeContextWindowForApiModel,
   claudeOpenToolStatusForTurn,
@@ -53,14 +51,9 @@ import {
   readClaudeLaunchAppendFile,
   readClaudeLaunchSettings,
   parseClaudeLaunchSettings,
-  claudeMcpElicitationAcceptance,
-  claudeMcpElicitationDetail,
   claudeRequestContextUsage,
-  type ClaudeTaskEntry,
   mergeClaudeStreamUsage,
-  planStepsFromClaudeTasks,
   describeClaudeUsageLimit,
-  effectiveClaudeApprovalDecision,
   extractPlanStepsFromTodoInput,
   isClaudeUsageLimitBlocking,
   isSubagentMessage,
@@ -72,11 +65,8 @@ import {
   resultOutcome,
   sanitizeToolResultForPersistence,
   summarizeToolRequest,
-  ToolInputStreamExtractor,
   titleForTool,
   toolInputStreamField,
-  claudeTaskStoreDirectory,
-  readClaudeTaskStore,
 } from "./ClaudeAdapterHelpers.ts";
 
 describe("claudeCompactPreservedMessageIds", () => {
@@ -416,165 +406,6 @@ describe("parentToolUseIdFromMessage", () => {
   });
 });
 
-describe("ToolInputStreamExtractor", () => {
-  it("returns the full delta when called once with a complete buffer", () => {
-    const extractor = new ToolInputStreamExtractor("content");
-    const result = extractor.update('{"content":"hello world"}');
-    expect(result).toBe("hello world");
-    expect(extractor.done).toBe(true);
-    expect(extractor.filePath).toBeUndefined();
-  });
-
-  it("accumulates incremental deltas across multiple update calls", () => {
-    const extractor = new ToolInputStreamExtractor("content");
-    let collected = "";
-    const buffers = [
-      '{"con',
-      '{"content',
-      '{"content":"hel',
-      '{"content":"hello',
-      '{"content":"hello wor',
-      '{"content":"hello world',
-      '{"content":"hello world"',
-      '{"content":"hello world"}',
-    ];
-    for (const buf of buffers) {
-      const delta = extractor.update(buf);
-      if (delta !== null) {
-        collected += delta;
-      }
-    }
-    expect(collected).toBe("hello world");
-    expect(extractor.done).toBe(true);
-  });
-
-  it("decodes single-character escapes", () => {
-    const extractor = new ToolInputStreamExtractor("content");
-    const result = extractor.update('{"content":"line1\\nline2\\ttab\\\\back\\"quote"}');
-    expect(result).toBe('line1\nline2\ttab\\back"quote');
-    expect(extractor.done).toBe(true);
-  });
-
-  it("decodes \\uXXXX escapes", () => {
-    const extractor = new ToolInputStreamExtractor("content");
-    const result = extractor.update('{"content":"caf\\u00e9"}');
-    expect(result).toBe("café");
-    expect(extractor.done).toBe(true);
-  });
-
-  it("pauses on chunk boundary inside a \\uXXXX escape", () => {
-    const extractor = new ToolInputStreamExtractor("content");
-
-    const first = extractor.update('{"content":"\\u00');
-    // We may get nothing yet, or only literal characters before the escape.
-    expect(first === null || first === "").toBe(true);
-    expect(extractor.done).toBe(false);
-
-    const second = extractor.update('{"content":"\\u00e9"}');
-    // The second call must complete the escape and emit the decoded char
-    // (plus consume the closing quote).
-    expect(second).toBe("é");
-    expect(extractor.done).toBe(true);
-  });
-
-  it("does not consume a trailing backslash at the buffer boundary", () => {
-    const extractor = new ToolInputStreamExtractor("content");
-
-    const first = extractor.update('{"content":"hello\\');
-    expect(first).toBe("hello");
-    expect(extractor.done).toBe(false);
-
-    const second = extractor.update('{"content":"hello\\nworld"}');
-    expect(second).toBe("\nworld");
-    expect(extractor.done).toBe(true);
-  });
-
-  it("emits malformed \\uXXXX escapes verbatim", () => {
-    const extractor = new ToolInputStreamExtractor("content");
-    const result = extractor.update('{"content":"\\uZZZZ"}');
-    expect(result).toBe("\\uZZZZ");
-    expect(extractor.done).toBe(true);
-  });
-
-  it("captures filePath when 'path' precedes the target field", () => {
-    const extractor = new ToolInputStreamExtractor("content");
-    const result = extractor.update('{"path":"file.ts","content":"x"}');
-    expect(result).toBe("x");
-    expect(extractor.filePath).toBe("file.ts");
-    expect(extractor.done).toBe(true);
-  });
-
-  it("waits for path value to be complete before populating filePath", () => {
-    const extractor = new ToolInputStreamExtractor("content");
-
-    // Path is incomplete (no closing quote) and target field is not present.
-    const first = extractor.update('{"path":"file.ts');
-    expect(first).toBeNull();
-    expect(extractor.filePath).toBeUndefined();
-    expect(extractor.done).toBe(false);
-
-    const second = extractor.update('{"path":"file.ts","content":"x"}');
-    expect(second).toBe("x");
-    expect(extractor.filePath).toBe("file.ts");
-    expect(extractor.done).toBe(true);
-  });
-
-  it("flips done after consuming the closing quote", () => {
-    const extractor = new ToolInputStreamExtractor("command");
-    expect(extractor.done).toBe(false);
-    const result = extractor.update('{"command":"ls -la"}');
-    expect(result).toBe("ls -la");
-    expect(extractor.done).toBe(true);
-    // Subsequent updates should be no-ops.
-    expect(extractor.update('{"command":"ls -la"}')).toBeNull();
-  });
-
-  it("returns null and does not crash when target field is absent", () => {
-    const extractor = new ToolInputStreamExtractor("content");
-    expect(extractor.update('{"other":"value"}')).toBeNull();
-    expect(extractor.done).toBe(false);
-    expect(extractor.filePath).toBeUndefined();
-  });
-
-  it("leaves filePath undefined when no 'path' key is present", () => {
-    const extractor = new ToolInputStreamExtractor("content");
-    const result = extractor.update('{"content":"x"}');
-    expect(result).toBe("x");
-    expect(extractor.filePath).toBeUndefined();
-    expect(extractor.done).toBe(true);
-  });
-
-  it("decodes escapes inside the path value", () => {
-    const extractor = new ToolInputStreamExtractor("content");
-    const result = extractor.update('{"path":"a\\nb","content":"y"}');
-    expect(result).toBe("y");
-    expect(extractor.filePath).toBe("a\nb");
-    expect(extractor.done).toBe(true);
-  });
-
-  it("handles streaming append after the value start has been located", () => {
-    const extractor = new ToolInputStreamExtractor("new_string");
-
-    const a = extractor.update('{"old_string":"foo","new_string":"bar');
-    expect(a).toBe("bar");
-
-    const b = extractor.update('{"old_string":"foo","new_string":"bar baz');
-    expect(b).toBe(" baz");
-
-    const c = extractor.update('{"old_string":"foo","new_string":"bar baz"}');
-    expect(c).toBeNull();
-    expect(extractor.done).toBe(true);
-  });
-
-  it("handles a path value that contains an escaped quote", () => {
-    const extractor = new ToolInputStreamExtractor("content");
-    const result = extractor.update('{"path":"a\\"b","content":"x"}');
-    expect(result).toBe("x");
-    expect(extractor.filePath).toBe('a"b');
-    expect(extractor.done).toBe(true);
-  });
-});
-
 describe("resultOutcome", () => {
   const success = (fields: Record<string, unknown>) =>
     ({
@@ -872,158 +703,6 @@ describe("sanitizeToolResultForPersistence", () => {
   });
 });
 
-describe("Claude task store", () => {
-  it("resolves the store under CLAUDE_CONFIG_DIR or ~/.claude with a sanitized list id", () => {
-    expect(
-      claudeTaskStoreDirectory({ env: {}, homeDir: "/home/u", cwd: undefined, sessionId: "a.b" }),
-    ).toBe(path.join("/home/u", ".claude", "tasks", "a-b"));
-    expect(
-      claudeTaskStoreDirectory({
-        env: { CLAUDE_CONFIG_DIR: "cfg", CLAUDE_CODE_TASK_LIST_ID: "shared" },
-        homeDir: "/home/u",
-        cwd: "/repo",
-        sessionId: "s",
-      }),
-    ).toBe(path.resolve("/repo", "cfg", "tasks", "shared"));
-  });
-
-  it("reads tasks in id order, skipping internal and malformed files", async () => {
-    const dir = mkdtempSync(path.join(os.tmpdir(), "claude-task-store-"));
-    try {
-      writeFileSync(
-        path.join(dir, "10.json"),
-        JSON.stringify({ id: "10", subject: "Last", status: "in_progress" }),
-      );
-      writeFileSync(
-        path.join(dir, "2.json"),
-        JSON.stringify({ id: "2", subject: "First", status: "pending" }),
-      );
-      writeFileSync(
-        path.join(dir, "3.json"),
-        JSON.stringify({
-          id: "3",
-          subject: "Hidden",
-          status: "pending",
-          metadata: { _internal: true },
-        }),
-      );
-      writeFileSync(path.join(dir, "4.json"), "{not json");
-      writeFileSync(path.join(dir, ".lock"), "");
-      const read = (directory: string) =>
-        Effect.runPromise(
-          Effect.flatMap(FileSystem.FileSystem.asEffect(), (fileSystem) =>
-            readClaudeTaskStore(fileSystem, directory),
-          ).pipe(Effect.provide(NodeServices.layer)),
-        );
-      expect(Array.from((await read(dir)) ?? [])).toEqual([
-        ["2", { subject: "First", status: "pending" }],
-        ["10", { subject: "Last", status: "inProgress" }],
-      ]);
-      expect(await read(path.join(dir, "missing"))).toBeUndefined();
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-});
-
-describe("applyClaudeTaskToolResult", () => {
-  it("creates, updates, deletes and lists tasks from structured results", () => {
-    const tasks = new Map<string, ClaudeTaskEntry>();
-    expect(
-      applyClaudeTaskToolResult(
-        tasks,
-        "TaskCreate",
-        { subject: "Write tests" },
-        { task: { id: "1", subject: "Write tests" } },
-      ),
-    ).toBe(true);
-    applyClaudeTaskToolResult(tasks, "TaskCreate", { subject: "Ship" }, { task: { id: "2" } });
-    expect(
-      applyClaudeTaskToolResult(
-        tasks,
-        "TaskUpdate",
-        { taskId: "1", status: "in_progress" },
-        { success: true, taskId: "1" },
-      ),
-    ).toBe(true);
-    expect(planStepsFromClaudeTasks(tasks)).toEqual([
-      { step: "Write tests", status: "inProgress" },
-      { step: "Ship", status: "pending" },
-    ]);
-
-    // Unchanged, failed and unknown-task updates leave the map alone.
-    expect(
-      applyClaudeTaskToolResult(tasks, "TaskUpdate", { taskId: "1", status: "in_progress" }, {}),
-    ).toBe(false);
-    expect(
-      applyClaudeTaskToolResult(
-        tasks,
-        "TaskUpdate",
-        { taskId: "1", status: "completed" },
-        { success: false },
-      ),
-    ).toBe(false);
-    expect(
-      applyClaudeTaskToolResult(tasks, "TaskUpdate", { taskId: "9", status: "completed" }, {}),
-    ).toBe(false);
-
-    expect(
-      applyClaudeTaskToolResult(tasks, "TaskUpdate", { taskId: "2", status: "deleted" }, {}),
-    ).toBe(true);
-    expect([...tasks.keys()]).toEqual(["1"]);
-
-    expect(
-      applyClaudeTaskToolResult(
-        tasks,
-        "TaskList",
-        {},
-        {
-          tasks: [
-            { id: "1", subject: "Write tests", status: "completed" },
-            { id: "3", subject: "Docs", status: "pending" },
-          ],
-        },
-      ),
-    ).toBe(true);
-    expect(planStepsFromClaudeTasks(tasks)).toEqual([
-      { step: "Write tests", status: "completed" },
-      { step: "Docs", status: "pending" },
-    ]);
-    expect(applyClaudeTaskToolResult(tasks, "Read", {}, {})).toBe(false);
-  });
-
-  it("applies the text results subagents receive", () => {
-    const tasks = new Map<string, ClaudeTaskEntry>();
-    expect(
-      applyClaudeTaskToolResult(
-        tasks,
-        "TaskCreate",
-        { subject: "ignored" },
-        "Task #3 created successfully: Audit migrations",
-      ),
-    ).toBe(true);
-    expect(
-      applyClaudeTaskToolResult(
-        tasks,
-        "TaskUpdate",
-        { taskId: "3", status: "completed" },
-        "Updated task #3 status",
-      ),
-    ).toBe(true);
-    expect(
-      applyClaudeTaskToolResult(
-        tasks,
-        "TaskUpdate",
-        { taskId: "3", status: "pending" },
-        "Task not found",
-      ),
-    ).toBe(false);
-    expect(planStepsFromClaudeTasks(tasks)).toEqual([
-      { step: "Audit migrations", status: "completed" },
-    ]);
-  });
-});
-
 describe("Claude context usage helpers", () => {
   it("measures the latest request, preferring the last usage iteration", () => {
     expect(
@@ -1074,112 +753,6 @@ describe("Claude context usage helpers", () => {
     expect(
       claudeCompactBoundaryContextUsage({ compact_metadata: { trigger: "manual", pre_tokens: 1 } }),
     ).toBeUndefined();
-  });
-});
-
-const request = (requestedSchema?: Record<string, unknown>, mode?: "form" | "url") => ({
-  serverName: "deploy",
-  message: "Deploy to production?",
-  ...(mode ? { mode } : {}),
-  ...(requestedSchema ? { requestedSchema } : {}),
-});
-
-describe("claudeMcpElicitationAcceptance", () => {
-  it("fills a consent form without trusting schema defaults", () => {
-    expect(
-      claudeMcpElicitationAcceptance(
-        request({
-          type: "object",
-          properties: {
-            decision: { type: "string", enum: ["approve", "deny"] },
-            persist: { type: "boolean", title: "Always allow", default: true },
-            scope: { type: "string", default: "all-repos" },
-          },
-          required: ["decision"],
-        }),
-      ),
-    ).toEqual({ action: "accept", content: { decision: "approve", persist: false } });
-  });
-
-  it("picks the one-time choice however the server spells it, never a broader grant", () => {
-    const choose = (options: ReadonlyArray<string>) =>
-      claudeMcpElicitationAcceptance(
-        request({
-          type: "object",
-          properties: { decision: { type: "string", enum: options } },
-          required: ["decision"],
-        }),
-      )?.content?.decision;
-    expect(choose(["allow_all", "allow_once"])).toBe("allow_once");
-    expect(choose(["allow_and_remember", "allow_this_time"])).toBe("allow_this_time");
-    expect(choose(["Allow once only", "deny"])).toBe("Allow once only");
-    expect(choose(["approve_all_tools", "deny"])).toBeUndefined();
-    expect(
-      claudeMcpElicitationAcceptance(
-        request({
-          type: "object",
-          properties: {
-            decision: { oneOf: [{ const: "allow_all_repos" }, { const: "approve" }] },
-          },
-          required: ["decision"],
-        }),
-      ),
-    ).toEqual({ action: "accept", content: { decision: "approve" } });
-  });
-
-  it("declines what the approval card cannot answer", () => {
-    expect(claudeMcpElicitationAcceptance(request(undefined, "url"))).toBeUndefined();
-    expect(claudeMcpElicitationAcceptance(request())).toBeUndefined();
-    expect(
-      claudeMcpElicitationAcceptance(
-        request({
-          type: "object",
-          properties: { reason: { type: "string" } },
-          required: ["reason"],
-        }),
-      ),
-    ).toBeUndefined();
-  });
-
-  it("labels the card with the server's display name", () => {
-    expect(claudeMcpElicitationDetail({ ...request(), displayName: "Deployer" })).toBe(
-      "Deployer: Deploy to production?",
-    );
-    expect(claudeMcpElicitationDetail(request())).toBe("deploy: Deploy to production?");
-  });
-});
-
-describe("claudeApprovalPresentation", () => {
-  it("strips terminal escapes from the reason and flags a forbidden standing grant", () => {
-    expect(
-      claudeApprovalPresentation({
-        detail: "Bash: rm -rf build",
-        callbackOptions: {
-          decisionReason: "  \u001b[33mMatched ask rule Bash(rm:*)\u001b[39m ",
-          suppressAlwaysAllowRule: true,
-        },
-      }),
-    ).toEqual({ reason: "Matched ask rule Bash(rm:*)", noStandingGrant: true });
-  });
-
-  it("omits an empty reason or one that repeats the detail", () => {
-    expect(
-      claudeApprovalPresentation({ detail: "Bash: ls", callbackOptions: { decisionReason: "  " } }),
-    ).toEqual({});
-    expect(
-      claudeApprovalPresentation({
-        detail: "Bash: ls",
-        callbackOptions: { decisionReason: "Bash: ls", suppressAlwaysAllowRule: false },
-      }),
-    ).toEqual({});
-  });
-});
-
-describe("effectiveClaudeApprovalDecision", () => {
-  it("downgrades a session grant only when Claude forbids a standing grant", () => {
-    expect(effectiveClaudeApprovalDecision("acceptForSession", true)).toBe("accept");
-    expect(effectiveClaudeApprovalDecision("acceptForSession", undefined)).toBe("acceptForSession");
-    expect(effectiveClaudeApprovalDecision("decline", true)).toBe("decline");
   });
 });
 

@@ -80,7 +80,7 @@ const CODEX_PLAN_LABELS: Readonly<Record<string, string>> = {
 };
 
 /** Display label for a ChatGPT plan slug, or undefined for slugs Pied Piper does not know. */
-export function codexPlanLabel(planType: string | null | undefined): string | undefined {
+function codexPlanLabel(planType: string | null | undefined): string | undefined {
   return planType && Object.hasOwn(CODEX_PLAN_LABELS, planType)
     ? CODEX_PLAN_LABELS[planType]
     : undefined;

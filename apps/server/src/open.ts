@@ -320,7 +320,7 @@ export async function isCommandAvailable(
 }
 
 /** Like isCommandAvailable, but returns the executable's path (PATH entry joined with the name). */
-export async function findCommandPath(
+async function findCommandPath(
   command: string,
   options: CommandAvailabilityOptions = {},
 ): Promise<string | null> {
@@ -961,41 +961,39 @@ function stripTargetPosition(target: string): string {
 }
 
 /** Launch that shows `target` selected in the platform file manager; Linux opens its folder. */
-export const resolveFileManagerRevealLaunch = Effect.fn("resolveFileManagerRevealLaunch")(
-  function* (
-    command: string,
-    target: string,
-    platform: NodeJS.Platform,
-    env: NodeJS.ProcessEnv = process.env,
-  ): Effect.fn.Return<EditorLaunch, OpenError> {
-    const path = stripTargetPosition(target);
-    switch (platform) {
-      case "darwin":
-        return { command, args: ["-R", path] };
-      case "win32":
-        // Passed verbatim, so a quote could break out of the quoted path; Windows paths never hold one.
-        if (hasWindowsShimUnsafeChars(path)) {
-          return yield* new OpenError({
-            message: "Cannot reveal a path containing line breaks or double quotes",
-          });
-        }
-        return {
-          command: resolvePowerShellPath(env),
-          args: [
-            ...POWERSHELL_ARGUMENTS_PREFIX,
-            Buffer.from(buildWindowsRevealScript(path), "utf16le").toString("base64"),
-          ],
-          // Windows PowerShell started detached exits 0 without running its command.
-          detached: false,
-          fallback: { command, args: [`/select,"${path}"`], windowsVerbatimArguments: true },
-          // A PowerShell 7 parent's module path stops 5.1 loading the cmdlets this script calls.
-          unsetEnv: ["PSModulePath"],
-        };
-      default:
-        return { command, args: [pathPosix.dirname(path)] };
-    }
-  },
-);
+const resolveFileManagerRevealLaunch = Effect.fn("resolveFileManagerRevealLaunch")(function* (
+  command: string,
+  target: string,
+  platform: NodeJS.Platform,
+  env: NodeJS.ProcessEnv = process.env,
+): Effect.fn.Return<EditorLaunch, OpenError> {
+  const path = stripTargetPosition(target);
+  switch (platform) {
+    case "darwin":
+      return { command, args: ["-R", path] };
+    case "win32":
+      // Passed verbatim, so a quote could break out of the quoted path; Windows paths never hold one.
+      if (hasWindowsShimUnsafeChars(path)) {
+        return yield* new OpenError({
+          message: "Cannot reveal a path containing line breaks or double quotes",
+        });
+      }
+      return {
+        command: resolvePowerShellPath(env),
+        args: [
+          ...POWERSHELL_ARGUMENTS_PREFIX,
+          Buffer.from(buildWindowsRevealScript(path), "utf16le").toString("base64"),
+        ],
+        // Windows PowerShell started detached exits 0 without running its command.
+        detached: false,
+        fallback: { command, args: [`/select,"${path}"`], windowsVerbatimArguments: true },
+        // A PowerShell 7 parent's module path stops 5.1 loading the cmdlets this script calls.
+        unsetEnv: ["PSModulePath"],
+      };
+    default:
+      return { command, args: [pathPosix.dirname(path)] };
+  }
+});
 
 /**
  * Build the environment for a launched editor or file manager. The desktop app

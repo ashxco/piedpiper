@@ -1,7 +1,7 @@
 import { Schema } from "effect";
 import { TrimmedNonEmptyString } from "./baseSchemas";
 
-export const EditorLaunchStyle = Schema.Literals(["direct-path", "goto", "line-column"]);
+const EditorLaunchStyle = Schema.Literals(["direct-path", "goto", "line-column"]);
 export type EditorLaunchStyle = typeof EditorLaunchStyle.Type;
 
 type EditorDefinition = {

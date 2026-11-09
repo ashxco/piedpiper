@@ -35,7 +35,7 @@ const TOOL_CALL_VISIBILITY_OPTIONS: ReadonlyArray<SettingsSelectOption<ToolCallV
   { value: "zen", label: "Zen" },
 ];
 
-export function getSendShortcutOptions(
+function getSendShortcutOptions(
   platform: string = typeof navigator === "undefined" ? "" : navigator.platform,
 ): ReadonlyArray<SettingsSelectOption<SendShortcut>> {
   const modifierLabel = isMacPlatform(platform) ? "⌘" : "Ctrl";

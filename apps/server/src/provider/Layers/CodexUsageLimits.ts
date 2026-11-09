@@ -59,7 +59,7 @@ function readNullableString(value: unknown): string | null | undefined {
 }
 
 /** Reads the snapshot from an `account/rateLimits/updated` payload (`{ rateLimits }`). */
-export function readCodexRateLimitSnapshot(payload: unknown): CodexRateLimitSnapshot | undefined {
+function readCodexRateLimitSnapshot(payload: unknown): CodexRateLimitSnapshot | undefined {
   const outer = asObject(payload);
   const snapshot = asObject(outer?.rateLimits) ?? outer;
   if (!snapshot) return undefined;

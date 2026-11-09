@@ -863,13 +863,39 @@ describe("DiffPanel", () => {
       pressFindChord();
       const input = page.getByRole("textbox", { name: "Find in diff" });
       await input.fill("needle");
-      await vi.waitFor(() => expect(hasViewer(lazyFilePath(80))).toBe(true));
-      await settle();
-      diffScroller().scrollTop = 0;
-      await new Promise((resolve) => setTimeout(resolve, 500));
-      expect(hasViewer(lazyFilePath(80))).toBe(true);
+      await vi.waitFor(
+        async () => {
+          // A mounted viewer can still be waiting for find's delayed reveal. Wait for the row
+          // itself, including the two in-view frames that finish the reveal animation.
+          expect(hasViewer(lazyFilePath(81))).toBe(true);
+          for (let frame = 0; frame < 3; frame += 1) {
+            if (frame > 0) await nextFrame();
+            const row = mountedRow(lazyFilePath(80), "change-addition", 31);
+            expect(row).not.toBeNull();
+            expectInScroller(row!);
+          }
+          expect(CSS.highlights.get("diff-find-active")?.size).toBe(1);
+        },
+        { timeout: 4000 },
+      );
+      const scroller = diffScroller();
+      scroller.scrollTop = 0;
+      await vi.waitFor(
+        () => {
+          // The neighboring viewer being evicted proves the eviction pass has run while the
+          // active match remains pinned, without depending on a wall-clock delay.
+          expect(scroller.scrollTop).toBe(0);
+          expect(hasViewer(lazyFilePath(81))).toBe(false);
+          expect(hasViewer(lazyFilePath(80))).toBe(true);
+        },
+        { timeout: 4000 },
+      );
       await userEvent.keyboard("{Escape}");
-      await vi.waitFor(() => expect(hasViewer(lazyFilePath(80))).toBe(false));
+      await expect.element(input).not.toBeInTheDocument();
+      await vi.waitFor(() => {
+        expect(scroller.scrollTop).toBe(0);
+        expect(hasViewer(lazyFilePath(80))).toBe(false);
+      });
     });
 
     it("mounts on scroll under StrictMode, which attaches each ref twice", async () => {

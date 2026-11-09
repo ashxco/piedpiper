@@ -65,7 +65,7 @@ export const ServerProviderUpdateRequiredModel = Schema.Struct({
 });
 export type ServerProviderUpdateRequiredModel = typeof ServerProviderUpdateRequiredModel.Type;
 
-export const ServerProviderUsageWindow = Schema.Struct({
+const ServerProviderUsageWindow = Schema.Struct({
   id: TrimmedNonEmptyString,
   kind: Schema.Literals(["session", "weekly", "monthly", "other"]),
   label: TrimmedNonEmptyString,
@@ -75,7 +75,7 @@ export const ServerProviderUsageWindow = Schema.Struct({
 });
 export type ServerProviderUsageWindow = typeof ServerProviderUsageWindow.Type;
 
-export const ServerProviderUsageLimits = Schema.Struct({
+const ServerProviderUsageLimits = Schema.Struct({
   checkedAt: IsoDateTime,
   windows: Schema.Array(ServerProviderUsageWindow),
   unavailable: Schema.optional(
@@ -115,7 +115,7 @@ export type ServerProvider = typeof ServerProvider.Type;
 export const ServerProviders = Schema.Array(ServerProvider);
 export type ServerProviders = typeof ServerProviders.Type;
 
-export const ServerProviderSlashCommand = Schema.Struct({
+const ServerProviderSlashCommand = Schema.Struct({
   name: TrimmedNonEmptyString,
   description: Schema.optional(TrimmedNonEmptyString),
   argumentHint: Schema.optional(TrimmedNonEmptyString),
@@ -190,31 +190,31 @@ export const ServerConfigUpdatedPayload = Schema.Struct({
 });
 export type ServerConfigUpdatedPayload = typeof ServerConfigUpdatedPayload.Type;
 
-export const ServerConfigKeybindingsUpdatedPayload = Schema.Struct({
+const ServerConfigKeybindingsUpdatedPayload = Schema.Struct({
   keybindings: ResolvedKeybindingsConfig,
   issues: ServerConfigIssues,
 });
 export type ServerConfigKeybindingsUpdatedPayload =
   typeof ServerConfigKeybindingsUpdatedPayload.Type;
 
-export const ServerConfigProviderStatusesPayload = Schema.Struct({
+const ServerConfigProviderStatusesPayload = Schema.Struct({
   providers: ServerProviders,
 });
 export type ServerConfigProviderStatusesPayload = typeof ServerConfigProviderStatusesPayload.Type;
 
-export const ServerConfigSettingsUpdatedPayload = Schema.Struct({
+const ServerConfigSettingsUpdatedPayload = Schema.Struct({
   settings: ServerSettings,
 });
 export type ServerConfigSettingsUpdatedPayload = typeof ServerConfigSettingsUpdatedPayload.Type;
 
-export const ServerConfigStreamSnapshotEvent = Schema.Struct({
+const ServerConfigStreamSnapshotEvent = Schema.Struct({
   version: Schema.Literal(1),
   type: Schema.Literal("snapshot"),
   config: ServerConfig,
 });
 export type ServerConfigStreamSnapshotEvent = typeof ServerConfigStreamSnapshotEvent.Type;
 
-export const ServerConfigStreamKeybindingsUpdatedEvent = Schema.Struct({
+const ServerConfigStreamKeybindingsUpdatedEvent = Schema.Struct({
   version: Schema.Literal(1),
   type: Schema.Literal("keybindingsUpdated"),
   payload: ServerConfigKeybindingsUpdatedPayload,
@@ -222,7 +222,7 @@ export const ServerConfigStreamKeybindingsUpdatedEvent = Schema.Struct({
 export type ServerConfigStreamKeybindingsUpdatedEvent =
   typeof ServerConfigStreamKeybindingsUpdatedEvent.Type;
 
-export const ServerConfigStreamProviderStatusesEvent = Schema.Struct({
+const ServerConfigStreamProviderStatusesEvent = Schema.Struct({
   version: Schema.Literal(1),
   type: Schema.Literal("providerStatuses"),
   payload: ServerConfigProviderStatusesPayload,
@@ -230,7 +230,7 @@ export const ServerConfigStreamProviderStatusesEvent = Schema.Struct({
 export type ServerConfigStreamProviderStatusesEvent =
   typeof ServerConfigStreamProviderStatusesEvent.Type;
 
-export const ServerConfigStreamSettingsUpdatedEvent = Schema.Struct({
+const ServerConfigStreamSettingsUpdatedEvent = Schema.Struct({
   version: Schema.Literal(1),
   type: Schema.Literal("settingsUpdated"),
   payload: ServerConfigSettingsUpdatedPayload,
@@ -246,7 +246,7 @@ export const ServerConfigStreamEvent = Schema.Union([
 ]);
 export type ServerConfigStreamEvent = typeof ServerConfigStreamEvent.Type;
 
-export const ServerLifecycleReadyPayload = Schema.Struct({
+const ServerLifecycleReadyPayload = Schema.Struct({
   at: IsoDateTime,
 });
 export type ServerLifecycleReadyPayload = typeof ServerLifecycleReadyPayload.Type;
@@ -259,7 +259,7 @@ export const ServerLifecycleWelcomePayload = Schema.Struct({
 });
 export type ServerLifecycleWelcomePayload = typeof ServerLifecycleWelcomePayload.Type;
 
-export const ServerLifecycleStreamWelcomeEvent = Schema.Struct({
+const ServerLifecycleStreamWelcomeEvent = Schema.Struct({
   version: Schema.Literal(1),
   sequence: NonNegativeInt,
   type: Schema.Literal("welcome"),
@@ -267,7 +267,7 @@ export const ServerLifecycleStreamWelcomeEvent = Schema.Struct({
 });
 export type ServerLifecycleStreamWelcomeEvent = typeof ServerLifecycleStreamWelcomeEvent.Type;
 
-export const ServerLifecycleStreamReadyEvent = Schema.Struct({
+const ServerLifecycleStreamReadyEvent = Schema.Struct({
   version: Schema.Literal(1),
   sequence: NonNegativeInt,
   type: Schema.Literal("ready"),

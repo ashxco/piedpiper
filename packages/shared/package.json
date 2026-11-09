@@ -91,6 +91,18 @@
     "./serverExitCodes": {
       "types": "./src/serverExitCodes.ts",
       "import": "./src/serverExitCodes.ts"
+    },
+    "./attachments": {
+      "types": "./src/attachments.ts",
+      "import": "./src/attachments.ts"
+    },
+    "./providerRuntime": {
+      "types": "./src/providerRuntime.ts",
+      "import": "./src/providerRuntime.ts"
+    },
+    "./threadRevert": {
+      "types": "./src/threadRevert.ts",
+      "import": "./src/threadRevert.ts"
     }
   },
   "scripts": {

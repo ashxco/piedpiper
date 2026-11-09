@@ -5,7 +5,7 @@ import { isElectron } from "../env";
 import { isMacPlatform } from "../lib/utils";
 
 /** Width reserved for the macOS traffic lights in the hidden-inset titlebar. */
-export const MACOS_TRAFFIC_LIGHTS_INSET_PX = 90;
+const MACOS_TRAFFIC_LIGHTS_INSET_PX = 90;
 
 /** The same width as a CSS length; the desktop preload keeps it at 90 native points at any zoom. */
 export const MACOS_TRAFFIC_LIGHTS_INSET = `var(--desktop-window-controls-inset, ${MACOS_TRAFFIC_LIGHTS_INSET_PX}px)`;

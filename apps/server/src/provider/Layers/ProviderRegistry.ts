@@ -58,14 +58,14 @@ const providerOrderRank = (provider: ProviderKind): number => {
   return rank === -1 ? Number.MAX_SAFE_INTEGER : rank;
 };
 
-export const orderProviderSnapshots = (
+const orderProviderSnapshots = (
   providers: ReadonlyArray<ServerProvider>,
 ): ReadonlyArray<ServerProvider> =>
   [...providers].toSorted(
     (left, right) => providerOrderRank(left.provider) - providerOrderRank(right.provider),
   );
 
-export const resolveProviderStatusCachePath = (baseDir: string, provider: ProviderKind): string =>
+const resolveProviderStatusCachePath = (baseDir: string, provider: ProviderKind): string =>
   NodePath.join(baseDir, "caches", `${provider}.json`);
 
 /**
@@ -102,9 +102,7 @@ export const hydrateCachedProvider = (input: {
   };
 };
 
-export const readProviderStatusCache = Effect.fn("readProviderStatusCache")(function* (
-  filePath: string,
-) {
+const readProviderStatusCache = Effect.fn("readProviderStatusCache")(function* (filePath: string) {
   const fs = yield* FileSystem.FileSystem;
   const raw = yield* fs.readFileString(filePath).pipe(Effect.orElseSucceed(() => ""));
   const trimmed = raw.trim();
@@ -123,7 +121,7 @@ export const readProviderStatusCache = Effect.fn("readProviderStatusCache")(func
   );
 });
 
-export const writeProviderStatusCache = Effect.fn("writeProviderStatusCache")(function* (input: {
+const writeProviderStatusCache = Effect.fn("writeProviderStatusCache")(function* (input: {
   readonly filePath: string;
   readonly provider: ServerProvider;
 }) {

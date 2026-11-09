@@ -24,13 +24,13 @@ export type OtlpEndpointCheckResult = typeof OtlpEndpointCheckResult.Type;
 
 // Trace summary
 
-export const ServerTraceDiagnosticsErrorKind = Schema.Literals([
+const ServerTraceDiagnosticsErrorKind = Schema.Literals([
   "trace-file-not-found",
   "trace-file-read-failed",
 ]);
 export type ServerTraceDiagnosticsErrorKind = typeof ServerTraceDiagnosticsErrorKind.Type;
 
-export const ServerTraceDiagnosticsSpanSummary = Schema.Struct({
+const ServerTraceDiagnosticsSpanSummary = Schema.Struct({
   name: Schema.String,
   count: NonNegativeInt,
   failureCount: NonNegativeInt,

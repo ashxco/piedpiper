@@ -11,7 +11,7 @@
 
 export type OtlpProtocol = "http/json" | "http/protobuf";
 export type OtlpSignalName = "traces" | "metrics" | "logs";
-export const OTLP_SIGNAL_NAMES: ReadonlyArray<OtlpSignalName> = ["traces", "metrics", "logs"];
+const OTLP_SIGNAL_NAMES: ReadonlyArray<OtlpSignalName> = ["traces", "metrics", "logs"];
 
 /** How one signal is sent once its endpoint is known. */
 export interface OtlpExportOptions {

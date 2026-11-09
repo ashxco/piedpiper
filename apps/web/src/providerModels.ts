@@ -22,7 +22,7 @@ export function getProviderModels(
   return providers.find((candidate) => candidate.provider === provider)?.models ?? [];
 }
 
-export function getProviderSnapshot(
+function getProviderSnapshot(
   providers: ReadonlyArray<ServerProvider>,
   provider: ProviderKind,
 ): ServerProvider | undefined {

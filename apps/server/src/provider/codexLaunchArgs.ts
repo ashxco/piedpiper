@@ -8,8 +8,7 @@ export const resolveCodexLaunchArgs = (
   environment: NodeJS.ProcessEnv = process.env,
 ): string => environment[PIEDPIPER_CODEX_LAUNCH_ARGS_ENV]?.trim() || launchArgs?.trim() || "";
 
-export const codexLaunchArgv = (launchArgs?: string): ReadonlyArray<string> =>
-  tokenizeCliArgs(launchArgs);
+const codexLaunchArgv = (launchArgs?: string): ReadonlyArray<string> => tokenizeCliArgs(launchArgs);
 
 /** Arguments for `codex app-server`, with the launch arguments appended. */
 export const codexAppServerArgs = (launchArgs?: string): ReadonlyArray<string> => [

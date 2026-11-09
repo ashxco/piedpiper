@@ -99,7 +99,7 @@ import { terminalOutputStream } from "./wsTerminalOutputStream";
  * buffers its elements, so items published before the returned stream is first
  * pulled are not lost. The consumer fiber lives in the caller's scope.
  */
-export const subscribeEagerly = <A, E>(stream: Stream.Stream<A, E>) =>
+const subscribeEagerly = <A, E>(stream: Stream.Stream<A, E>) =>
   Effect.gen(function* () {
     const queue = yield* Queue.unbounded<A, E | Cause.Done>();
     // startImmediately runs the fiber up to its first suspension, i.e. past PubSub.subscribe.
@@ -897,7 +897,7 @@ const WsRpcLayer = WsRpcGroup.toLayer(
 
 // A handler defect must fail only its own request: RpcServer's default sends a socket-level
 // Defect frame, and the client then fails every pending request and subscription on the socket.
-export const WS_RPC_SERVER_OPTIONS = {
+const WS_RPC_SERVER_OPTIONS = {
   spanPrefix: "ws.rpc",
   spanAttributes: {
     "rpc.transport": "websocket",

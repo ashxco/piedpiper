@@ -1,7 +1,7 @@
 {
   "$schema": "https://unpkg.com/knip@6/schema.json",
   // OS tools the dev scripts, desktop app and tests shell out to.
-  "ignoreBinaries": ["hyprctl", "mkfifo", "pgrep", "pkill", "plutil", "ssh-keygen"],
+  "ignoreBinaries": ["gdbus", "hyprctl", "mkfifo", "pgrep", "pkill", "plutil", "ssh-keygen"],
   // `!` marks production code: `knip:production` audits only these files, so dev scripts,
   // test helpers and integration harnesses are not reported as unused there.
   "workspaces": {

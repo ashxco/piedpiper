@@ -3,7 +3,7 @@ import { getSmoothScrollBehavior } from "../../chat-scroll";
 export type ComposerPageScrollDirection = "up" | "down";
 
 /** Fraction of the timeline viewport one PageUp/PageDown press scrolls. */
-export const COMPOSER_PAGE_SCROLL_VIEWPORT_FRACTION = 0.9;
+const COMPOSER_PAGE_SCROLL_VIEWPORT_FRACTION = 0.9;
 
 export interface ComposerPageScrollKeyEvent {
   key: string;

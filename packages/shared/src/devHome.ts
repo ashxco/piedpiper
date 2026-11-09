@@ -7,7 +7,7 @@
 
 import { Effect, FileSystem, Option, Path } from "effect";
 
-export const WORKTREE_DEV_HOME_DIRNAME = ".piedpiper";
+const WORKTREE_DEV_HOME_DIRNAME = ".piedpiper";
 
 /**
  * A `.git` file points at the real git directory: `<common-dir>/worktrees/<name>`

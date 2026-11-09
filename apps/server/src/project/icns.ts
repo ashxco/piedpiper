@@ -6,7 +6,7 @@ const PNG_MAGIC = 0x89504e47; // "\x89PNG"
 const PNG_IHDR = 0x49484452; // "IHDR"
 const PNG_IHDR_WIDTH_END = 20;
 // Clients draw project icons from a 96px thumbnail at most.
-export const PROJECT_FAVICON_ICNS_MIN_SIZE = 96;
+const PROJECT_FAVICON_ICNS_MIN_SIZE = 96;
 
 export function isIcnsPath(filePath: string): boolean {
   return filePath.toLowerCase().endsWith(".icns");

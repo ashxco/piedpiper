@@ -21,18 +21,15 @@ import {
   type ProviderSession,
   type ThreadId,
 } from "@piedpiper/contracts";
-import { Cause, Duration, Effect, Layer, Option, PubSub } from "effect";
+import { Cause, Duration, Effect, Option, PubSub } from "effect";
 
 import { OrchestrationEngineService } from "../../orchestration/Services/OrchestrationEngine.ts";
 import { ProviderSessionRuntimeRepository } from "../../persistence/Services/ProviderSessionRuntime.ts";
 import { ProviderService } from "../Services/ProviderService.ts";
-import {
-  ProviderSessionReaper,
-  type ProviderSessionReaperShape,
-} from "../Services/ProviderSessionReaper.ts";
+import { type ProviderSessionReaperShape } from "../Services/ProviderSessionReaper.ts";
 
-export const DEFAULT_PROVIDER_SESSION_IDLE_THRESHOLD_MS = 30 * 60 * 1000;
-export const DEFAULT_PROVIDER_SESSION_SWEEP_INTERVAL_MS = 60 * 1000;
+const DEFAULT_PROVIDER_SESSION_IDLE_THRESHOLD_MS = 30 * 60 * 1000;
+const DEFAULT_PROVIDER_SESSION_SWEEP_INTERVAL_MS = 60 * 1000;
 /** A background task silent this long is treated as lost, so a missed completion cannot pin a process. */
 export const BACKGROUND_TASK_MAX_SILENCE_MS = 6 * 60 * 60 * 1000;
 
@@ -415,8 +412,3 @@ export const makeProviderSessionReaper = Effect.fn("makeProviderSessionReaper")(
     sweep,
   } satisfies ProviderSessionReaperShape;
 });
-
-export const makeProviderSessionReaperLive = (options?: ProviderSessionReaperOptions) =>
-  Layer.effect(ProviderSessionReaper, makeProviderSessionReaper(options));
-
-export const ProviderSessionReaperLive = makeProviderSessionReaperLive();

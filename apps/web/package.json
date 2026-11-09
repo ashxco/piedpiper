@@ -56,7 +56,6 @@
     "@effect/language-service": "catalog:",
     "@tailwindcss/vite": "^4.0.0",
     "@tanstack/router-plugin": "^1.161.0",
-    "@types/dompurify": "^3.2.0",
     "@types/hast": "^3.0.4",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",

@@ -27,7 +27,7 @@ const RuntimeEventRawSource = Schema.Literals([
 ]);
 export type RuntimeEventRawSource = typeof RuntimeEventRawSource.Type;
 
-export const RuntimeEventRaw = Schema.Struct({
+const RuntimeEventRaw = Schema.Struct({
   source: RuntimeEventRawSource,
   method: Schema.optional(TrimmedNonEmptyStringSchema),
   messageType: Schema.optional(TrimmedNonEmptyStringSchema),
@@ -120,10 +120,6 @@ export const TOOL_LIFECYCLE_ITEM_TYPES = [
 
 export const ToolLifecycleItemType = Schema.Literals(TOOL_LIFECYCLE_ITEM_TYPES);
 export type ToolLifecycleItemType = typeof ToolLifecycleItemType.Type;
-
-export function isToolLifecycleItemType(value: string): value is ToolLifecycleItemType {
-  return TOOL_LIFECYCLE_ITEM_TYPES.includes(value as ToolLifecycleItemType);
-}
 
 export const CanonicalItemType = Schema.Literals([
   "user_message",
@@ -410,7 +406,7 @@ const TurnDiffUpdatedPayload = Schema.Struct({
 });
 export type TurnDiffUpdatedPayload = typeof TurnDiffUpdatedPayload.Type;
 
-export const ItemLifecyclePayload = Schema.Struct({
+const ItemLifecyclePayload = Schema.Struct({
   itemType: CanonicalItemType,
   status: Schema.optional(RuntimeItemStatus),
   title: Schema.optional(TrimmedNonEmptyStringSchema),

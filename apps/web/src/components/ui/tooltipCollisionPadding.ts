@@ -2,9 +2,9 @@ import { isElectron } from "~/env";
 import { isMacPlatform } from "~/lib/utils";
 
 /** Base UI's default collision padding on every side. */
-export const DEFAULT_COLLISION_PADDING = 5;
+const DEFAULT_COLLISION_PADDING = 5;
 /** Height of the macOS desktop title-bar strip that holds the traffic lights. */
-export const MAC_DESKTOP_TITLEBAR_HEIGHT = 52;
+const MAC_DESKTOP_TITLEBAR_HEIGHT = 52;
 
 export type CollisionPadding =
   | number

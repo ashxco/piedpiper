@@ -38,7 +38,7 @@ const BRANCH_NAMING_MODE_OPTIONS: ReadonlyArray<SettingsSelectOption<BranchNamin
   { value: "custom", label: "Custom instructions" },
 ];
 
-export const AUTOMATIC_GIT_FETCH_INTERVAL_PRESETS_MS = [
+const AUTOMATIC_GIT_FETCH_INTERVAL_PRESETS_MS = [
   0, 15_000, 30_000, 60_000, 300_000, 900_000,
 ] as const;
 

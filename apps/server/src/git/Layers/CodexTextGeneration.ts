@@ -61,13 +61,13 @@ const decodeCodexMcpServers = Schema.decodeEffect(
 );
 
 /** The `--config` value turning off each named MCP server; quoting keeps a dotted name one key. */
-export const codexMcpServersOffConfig = (names: ReadonlyArray<string>): string | null =>
+const codexMcpServersOffConfig = (names: ReadonlyArray<string>): string | null =>
   names.length === 0
     ? null
     : `mcp_servers={${names.map((name) => `${JSON.stringify(name)}={enabled=false}`).join(",")}}`;
 
 /** A Codex slug without a provider namespace prefix such as `openai.`. */
-export const codexModelFamily = (slug: string): string =>
+const codexModelFamily = (slug: string): string =>
   slug.startsWith("openai.gpt-") ? slug.slice("openai.".length) : slug;
 
 /**

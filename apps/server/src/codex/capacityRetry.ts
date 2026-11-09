@@ -24,7 +24,7 @@ export function isCodexCompactCommand(input: string | undefined, attachmentCount
   return attachmentCount === 0 && input?.trim().toLowerCase() === "/compact";
 }
 
-export function formatCodexCapacityRetryMessage(attempt: number, delayMs: number): string {
+function formatCodexCapacityRetryMessage(attempt: number, delayMs: number): string {
   return `The model is at capacity. Retrying in ${Math.round(delayMs / 1000)}s (attempt ${attempt} of ${CODEX_CAPACITY_MAX_RETRIES}).`;
 }
 

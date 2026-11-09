@@ -51,9 +51,7 @@ export const PROVIDER = "codex" as const;
  * `serviceTier: null` reports "default" while an omitted field reports "priority". null is
  * used rather than "default" because older CLIs typed the tier as an enum without "default".
  */
-export function codexServiceTierForFastMode(
-  fastMode: boolean | undefined,
-): "fast" | null | undefined {
+function codexServiceTierForFastMode(fastMode: boolean | undefined): "fast" | null | undefined {
   if (fastMode === true) return "fast";
   if (fastMode === false) return null;
   return undefined;
@@ -177,22 +175,22 @@ export function asString(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
 
-export function asArray(value: unknown): unknown[] | undefined {
+function asArray(value: unknown): unknown[] | undefined {
   return Array.isArray(value) ? value : undefined;
 }
 
-export function asNumber(value: unknown): number | undefined {
+function asNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
-export const FATAL_CODEX_STDERR_SNIPPETS = ["failed to connect to websocket"];
+const FATAL_CODEX_STDERR_SNIPPETS = ["failed to connect to websocket"];
 
-export function isFatalCodexProcessStderrMessage(message: string): boolean {
+function isFatalCodexProcessStderrMessage(message: string): boolean {
   const normalized = message.toLowerCase();
   return FATAL_CODEX_STDERR_SNIPPETS.some((snippet) => normalized.includes(snippet));
 }
 
-export function normalizeCodexTokenUsage(value: unknown): ThreadTokenUsageSnapshot | undefined {
+function normalizeCodexTokenUsage(value: unknown): ThreadTokenUsageSnapshot | undefined {
   const usage = asObject(value);
   const totalUsage = asObject(usage?.total_token_usage ?? usage?.total);
   const lastUsage = asObject(usage?.last_token_usage ?? usage?.last);
@@ -242,7 +240,7 @@ export function toProviderItemId(value: string | undefined): ProviderItemId | un
   return value?.trim() ? ProviderItemId.makeUnsafe(value) : undefined;
 }
 
-export function toTurnStatus(value: unknown): "completed" | "failed" | "cancelled" | "interrupted" {
+function toTurnStatus(value: unknown): "completed" | "failed" | "cancelled" | "interrupted" {
   switch (value) {
     case "completed":
     case "failed":
@@ -254,7 +252,7 @@ export function toTurnStatus(value: unknown): "completed" | "failed" | "cancelle
   }
 }
 
-export function normalizeItemType(raw: unknown): string {
+function normalizeItemType(raw: unknown): string {
   const type = asString(raw);
   if (!type) return "item";
   return type
@@ -265,7 +263,7 @@ export function normalizeItemType(raw: unknown): string {
     .toLowerCase();
 }
 
-export function toCanonicalItemType(raw: unknown): CanonicalItemType {
+function toCanonicalItemType(raw: unknown): CanonicalItemType {
   const type = normalizeItemType(raw);
   if (type.includes("user")) return "user_message";
   if (type.includes("agent message") || type.includes("assistant")) return "assistant_message";
@@ -286,7 +284,7 @@ export function toCanonicalItemType(raw: unknown): CanonicalItemType {
   return "unknown";
 }
 
-export function itemTitle(itemType: CanonicalItemType): string | undefined {
+function itemTitle(itemType: CanonicalItemType): string | undefined {
   switch (itemType) {
     case "assistant_message":
       return "Assistant message";
@@ -325,7 +323,7 @@ function reasoningSummaryText(summary: unknown): string | undefined {
   return parts.length > 0 ? parts.join("\n\n") : undefined;
 }
 
-export function itemDetail(
+function itemDetail(
   item: Record<string, unknown>,
   payload: Record<string, unknown>,
   itemType?: CanonicalItemType,
@@ -359,7 +357,7 @@ export function itemDetail(
   return undefined;
 }
 
-export function toRequestTypeFromMethod(method: string): CanonicalRequestType {
+function toRequestTypeFromMethod(method: string): CanonicalRequestType {
   switch (method) {
     case "item/commandExecution/requestApproval":
       return "command_execution_approval";
@@ -398,7 +396,7 @@ function commandDetail(value: unknown): string | undefined {
 const MAX_DESCRIBED_FILE_CHANGES = 20;
 
 // Apply-patch approvals carry the edited paths only as the keys of `fileChanges`.
-export function describeFileChanges(fileChanges: unknown): string | undefined {
+function describeFileChanges(fileChanges: unknown): string | undefined {
   const changes = asObject(fileChanges);
   if (!changes) return undefined;
   const entries = Object.entries(changes).toSorted(([left], [right]) => left.localeCompare(right));
@@ -635,7 +633,7 @@ export function makeCodexRetryStreakTracker() {
   return { apply };
 }
 
-export function toRequestOpenedDetail(
+function toRequestOpenedDetail(
   method: string,
   payload: Record<string, unknown> | undefined,
   fileChanges?: CodexFileChangeKinds,
@@ -672,7 +670,7 @@ export function toRequestOpenedDetail(
   );
 }
 
-export function toRequestTypeFromKind(kind: unknown): CanonicalRequestType {
+function toRequestTypeFromKind(kind: unknown): CanonicalRequestType {
   switch (kind) {
     case "command":
       return "command_execution_approval";
@@ -685,7 +683,7 @@ export function toRequestTypeFromKind(kind: unknown): CanonicalRequestType {
   }
 }
 
-export function toRequestTypeFromResolvedPayload(
+function toRequestTypeFromResolvedPayload(
   payload: Record<string, unknown> | undefined,
 ): CanonicalRequestType {
   const request = asObject(payload?.request);
@@ -700,7 +698,7 @@ export function toRequestTypeFromResolvedPayload(
   return "unknown";
 }
 
-export function toCanonicalUserInputAnswers(
+function toCanonicalUserInputAnswers(
   answers: ProviderUserInputAnswers | undefined,
 ): ProviderUserInputAnswers {
   if (!answers) {
@@ -776,7 +774,7 @@ export function toUserInputQuestions(payload: Record<string, unknown> | undefine
  * A `request_user_input_async` item as panel questions; undefined for any other item. Codex does
  * not wait for these, so options carry no description and free text is always allowed.
  */
-export function toCodexAsyncQuestions(item: Record<string, unknown> | undefined) {
+function toCodexAsyncQuestions(item: Record<string, unknown> | undefined) {
   if (item?.type !== "agentMessage" || item.delivery !== "async") return undefined;
   const parsedQuestions = (asArray(item.questions) ?? []).flatMap((entry, index) => {
     const question = asObject(entry);
@@ -798,7 +796,7 @@ export function toCodexAsyncQuestions(item: Record<string, unknown> | undefined)
   return parsedQuestions.length > 0 ? parsedQuestions : undefined;
 }
 
-export function toThreadState(
+function toThreadState(
   value: unknown,
 ): "active" | "idle" | "archived" | "closed" | "compacted" | "error" {
   switch (value) {
@@ -818,7 +816,7 @@ export function toThreadState(
   }
 }
 
-export function contentStreamKindFromMethod(
+function contentStreamKindFromMethod(
   method: string,
 ):
   | "assistant_text"
@@ -843,9 +841,9 @@ export function contentStreamKindFromMethod(
   }
 }
 
-export const PROPOSED_PLAN_BLOCK_REGEX = /<proposed_plan>\s*([\s\S]*?)\s*<\/proposed_plan>/i;
+const PROPOSED_PLAN_BLOCK_REGEX = /<proposed_plan>\s*([\s\S]*?)\s*<\/proposed_plan>/i;
 
-export function extractProposedPlanMarkdown(text: string | undefined): string | undefined {
+function extractProposedPlanMarkdown(text: string | undefined): string | undefined {
   const match = text ? PROPOSED_PLAN_BLOCK_REGEX.exec(text) : null;
   const planMarkdown = match?.[1]?.trim();
   return planMarkdown && planMarkdown.length > 0 ? planMarkdown : undefined;
@@ -859,17 +857,17 @@ export function asRuntimeRequestId(requestId: string): RuntimeRequestId {
   return RuntimeRequestId.makeUnsafe(requestId);
 }
 
-export function asRuntimeTaskId(taskId: string): RuntimeTaskId {
+function asRuntimeTaskId(taskId: string): RuntimeTaskId {
   return RuntimeTaskId.makeUnsafe(taskId);
 }
 
-export function codexEventMessage(
+function codexEventMessage(
   payload: Record<string, unknown> | undefined,
 ): Record<string, unknown> | undefined {
   return asObject(payload?.msg);
 }
 
-export function codexEventBase(
+function codexEventBase(
   event: ProviderEvent,
   canonicalThreadId: ThreadId,
 ): Omit<ProviderRuntimeEvent, "type" | "payload"> {
@@ -901,13 +899,11 @@ export function codexEventBase(
   };
 }
 
-export function eventRawSource(
-  event: ProviderEvent,
-): NonNullable<ProviderRuntimeEvent["raw"]>["source"] {
+function eventRawSource(event: ProviderEvent): NonNullable<ProviderRuntimeEvent["raw"]>["source"] {
   return event.kind === "request" ? "codex.app-server.request" : "codex.app-server.notification";
 }
 
-export function providerRefsFromEvent(
+function providerRefsFromEvent(
   event: ProviderEvent,
 ): ProviderRuntimeEvent["providerRefs"] | undefined {
   const refs: Record<string, string> = {};
@@ -941,9 +937,7 @@ export function runtimeEventBase(
 }
 
 /** "Stop hook (user): reason" for a `hook/completed` run that stopped the turn, else undefined. */
-export function codexHookStopMessage(
-  payload: Record<string, unknown> | undefined,
-): string | undefined {
+function codexHookStopMessage(payload: Record<string, unknown> | undefined): string | undefined {
   const run = asObject(payload?.run);
   if (run?.status !== "stopped" || !Array.isArray(run.entries)) return undefined;
   const reason = run.entries
@@ -979,7 +973,7 @@ function imageGenerationTitle(status: string | undefined): string {
   }
 }
 
-export function mapItemLifecycle(
+function mapItemLifecycle(
   event: ProviderEvent,
   canonicalThreadId: ThreadId,
   lifecycle: "item.started" | "item.updated" | "item.completed",

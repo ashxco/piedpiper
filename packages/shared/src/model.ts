@@ -291,3 +291,21 @@ export function applyClaudePromptEffortPrefix(
   }
   return `Ultrathink:\n${trimmed}`;
 }
+
+/** The reasoning effort a selection states, if any (Codex `reasoningEffort`, Claude `effort`). */
+export function getModelSelectionEffort(selection: ModelSelection): string | undefined {
+  return selection.provider === "codex"
+    ? selection.options?.reasoningEffort
+    : selection.options?.effort;
+}
+
+/**
+ * Whether a turn's selection differs from the previous turn's by provider, model or effort.
+ * An unstated effort reads as unchanged, since the composer omits an untouched effort.
+ */
+export function isModelSelectionSwitch(from: ModelSelection, to: ModelSelection): boolean {
+  if (from.provider !== to.provider || from.model !== to.model) return true;
+  const fromEffort = getModelSelectionEffort(from);
+  const toEffort = getModelSelectionEffort(to);
+  return fromEffort !== undefined && toEffort !== undefined && fromEffort !== toEffort;
+}

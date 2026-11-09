@@ -23,14 +23,14 @@ const PROBE_STDOUT_CLOSE_EXIT_GRACE_MS = 250;
 
 const MAX_MODEL_LIST_PAGES = 10;
 // Shorter than the provider's 15 s probe timeout, so a stalled model/list keeps the account it already read.
-export const CODEX_MODEL_LIST_TIMEOUT_MS = 10_000;
+const CODEX_MODEL_LIST_TIMEOUT_MS = 10_000;
 /** The provider's outer timeout for the whole probe, counted from spawn. */
 export const CODEX_ACCOUNT_PROBE_TIMEOUT_MS = 15_000;
 const PROBE_DEADLINE_MARGIN_MS = 250;
 /** How long a finished model/list waits for a config/read answer that has not arrived yet. */
-export const CODEX_CONFIG_READ_GRACE_MS = 1_000;
+const CODEX_CONFIG_READ_GRACE_MS = 1_000;
 /** Usage is optional, so a slow `account/rateLimits/read` costs at most this much of the probe. */
-export const CODEX_RATE_LIMITS_READ_TIMEOUT_MS = 3_000;
+const CODEX_RATE_LIMITS_READ_TIMEOUT_MS = 3_000;
 
 /** app-server exited before the probe completed, such as when launch arguments are rejected. */
 export class CodexAppServerEarlyExitError extends Error {

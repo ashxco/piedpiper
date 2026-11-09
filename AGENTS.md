@@ -27,7 +27,7 @@ Run the dev environment with `bun scripts/dev-runner.ts <mode>`:
 - A server takes an exclusive lock on its state directory (`server-owner.sqlite`), so two dev instances in one checkout conflict, and the second exits with code 78. Give the second one its own data home with `--home-dir`, or use a linked worktree. Do not delete `server-owner.sqlite` while a server is running.
 - `bun scripts/dev-runner.ts` sets `PIEDPIPER_TELEMETRY_ENABLED=false` in every mode unless it is already set. To send analytics from a dev run, export `PIEDPIPER_TELEMETRY_ENABLED=true` and `PIEDPIPER_POSTHOG_KEY`.
 
-The dev-runner script must be run with `bun` (not `node`) because it uses `import.meta.main`.
+Use Bun for the dev runner, as the root `dev*` scripts do, so development uses the same runtime consistently.
 
 ## Task Completion Requirements
 

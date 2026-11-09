@@ -97,7 +97,7 @@ const isQueryProcess = (row: ProcessRow, serverPid: number): boolean =>
     /\bGet-CimInstance\s+Win32_Process\b/i.test(row.command));
 
 /** Depth-first descendants of `serverPid`, children ordered by pid. Tolerates pid cycles. */
-export function buildDescendantEntries(
+function buildDescendantEntries(
   rows: ReadonlyArray<ProcessRow>,
   serverPid: number,
 ): ReadonlyArray<ServerProcessDiagnosticsEntry> {

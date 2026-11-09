@@ -226,7 +226,7 @@ function isManualUserMessage(message: Thread["messages"][number]): boolean {
   );
 }
 
-export function getLatestUserMessageAt(
+function getLatestUserMessageAt(
   messages: ReadonlyArray<Thread["messages"][number]>,
   counts?: (message: Thread["messages"][number]) => boolean,
 ): string | null {

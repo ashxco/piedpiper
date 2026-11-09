@@ -7,7 +7,7 @@ import { ProjectionSnapshotQuery } from "./orchestration/Services/ProjectionSnap
 import { getServerSettingsOrDefault } from "./serverSettings";
 
 /** A failed automatic pull is not retried for this long, so status polls do not hammer the remote. */
-export const AUTO_PULL_FAILURE_BACKOFF_MS = 5 * 60_000;
+const AUTO_PULL_FAILURE_BACKOFF_MS = 5 * 60_000;
 const AUTO_PULL_STARTUP_CONCURRENCY = 4;
 
 export type AutoPullSkipReason =
@@ -134,7 +134,7 @@ export const fastForwardCleanDefaultBranch = Effect.fn("fastForwardCleanDefaultB
 });
 
 /** Fast-forwards a clean, behind default-branch checkout. Returns true when HEAD moved. Never fails. */
-export const pullCleanDefaultBranch = Effect.fn("pullCleanDefaultBranch")(function* (
+const pullCleanDefaultBranch = Effect.fn("pullCleanDefaultBranch")(function* (
   cwd: string,
   knownStatus?: AutoPullStatus,
 ) {

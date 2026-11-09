@@ -109,7 +109,7 @@ const QUIT_CONFIRMATION_MODE_OPTIONS: ReadonlyArray<SettingsSelectOption<QuitCon
   { value: "double-click", label: "Press twice" },
 ];
 
-export function validateClaudeAutoCompactWindow(value: string): string | null {
+function validateClaudeAutoCompactWindow(value: string): string | null {
   return CLAUDE_AUTO_COMPACT_WINDOW_PATTERN.test(value)
     ? null
     : "Enter a whole number from 100000 to 1000000, or leave empty.";

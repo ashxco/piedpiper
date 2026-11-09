@@ -91,13 +91,6 @@ export const PROVIDER_SEND_TURN_SUPPORTED_IMAGE_MIME_TYPES = [
   "image/png",
   "image/webp",
 ] as const;
-const PROVIDER_SEND_TURN_SUPPORTED_IMAGE_MIME_TYPE_SET = new Set<string>(
-  PROVIDER_SEND_TURN_SUPPORTED_IMAGE_MIME_TYPES,
-);
-// The attachment schema stays permissive so already-persisted attachments still decode.
-export function isProviderSendTurnSupportedImageMimeType(mimeType: string): boolean {
-  return PROVIDER_SEND_TURN_SUPPORTED_IMAGE_MIME_TYPE_SET.has(mimeType.trim().toLowerCase());
-}
 const PROVIDER_SEND_TURN_MAX_IMAGE_DATA_URL_CHARS = 14_000_000;
 const CHAT_ATTACHMENT_ID_MAX_CHARS = 128;
 // Correlation id is command id by design in this model.
@@ -399,24 +392,6 @@ export const ThreadGoalActivityPayload = Schema.Struct({
   goal: Schema.NullOr(ProviderGoal),
 });
 export type ThreadGoalActivityPayload = typeof ThreadGoalActivityPayload.Type;
-
-/** The reasoning effort a selection states, if any (Codex `reasoningEffort`, Claude `effort`). */
-export function getModelSelectionEffort(selection: ModelSelection): string | undefined {
-  return selection.provider === "codex"
-    ? selection.options?.reasoningEffort
-    : selection.options?.effort;
-}
-
-/**
- * Whether a turn's selection differs from the previous turn's by provider, model or effort.
- * An unstated effort reads as unchanged, since the composer omits an untouched effort.
- */
-export function isModelSelectionSwitch(from: ModelSelection, to: ModelSelection): boolean {
-  if (from.provider !== to.provider || from.model !== to.model) return true;
-  const fromEffort = getModelSelectionEffort(from);
-  const toEffort = getModelSelectionEffort(to);
-  return fromEffort !== undefined && toEffort !== undefined && fromEffort !== toEffort;
-}
 
 const OrchestrationLatestTurnState = Schema.Literals([
   "running",
@@ -1000,12 +975,12 @@ export const ThreadSessionStopRequestedPayload = Schema.Struct({
   createdAt: IsoDateTime,
 });
 
-export const ThreadTitleRegenerationRequestedPayload = Schema.Struct({
+const ThreadTitleRegenerationRequestedPayload = Schema.Struct({
   threadId: ThreadId,
   createdAt: IsoDateTime,
 });
 
-export const ThreadTitleRegenerationSettledPayload = Schema.Struct({
+const ThreadTitleRegenerationSettledPayload = Schema.Struct({
   threadId: ThreadId,
   outcome: ThreadTitleRegenerationOutcome,
   detail: Schema.optional(TrimmedNonEmptyString),
@@ -1192,7 +1167,7 @@ export type OrchestrationEvent = typeof OrchestrationEvent.Type;
 export const OrchestrationCommandReceiptStatus = Schema.Literals(["accepted", "rejected"]);
 export type OrchestrationCommandReceiptStatus = typeof OrchestrationCommandReceiptStatus.Type;
 
-export const TurnCountRange = Schema.Struct({
+const TurnCountRange = Schema.Struct({
   fromTurnCount: NonNegativeInt,
   toTurnCount: NonNegativeInt,
 }).check(
@@ -1248,7 +1223,7 @@ export type ProjectionPendingApprovalStatus = typeof ProjectionPendingApprovalSt
 export const ProjectionPendingApprovalDecision = Schema.NullOr(ProviderApprovalDecision);
 export type ProjectionPendingApprovalDecision = typeof ProjectionPendingApprovalDecision.Type;
 
-export const DispatchResult = Schema.Struct({
+const DispatchResult = Schema.Struct({
   sequence: NonNegativeInt,
 });
 export type DispatchResult = typeof DispatchResult.Type;

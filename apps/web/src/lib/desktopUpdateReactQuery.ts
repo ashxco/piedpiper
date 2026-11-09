@@ -30,14 +30,16 @@ export function desktopUpdateStateQueryOptions() {
 let installRequestsInFlight = 0;
 
 /** Runs the install request; a failure it reports itself must not toast twice. */
-export function trackDesktopInstallRequest<T>(request: () => Promise<T>): Promise<T> {
+export async function trackDesktopInstallRequest<T>(request: () => Promise<T>): Promise<T> {
   installRequestsInFlight += 1;
-  return request().finally(() => {
+  try {
+    return await request();
+  } finally {
     installRequestsInFlight -= 1;
-  });
+  }
 }
 
-export function isNewDesktopInstallFailure(
+function isNewDesktopInstallFailure(
   previous: DesktopUpdateState | null | undefined,
   next: DesktopUpdateState,
 ): boolean {
@@ -56,6 +58,8 @@ export function useDesktopUpdateState() {
       const previous = queryClient.getQueryData<DesktopUpdateState | null>(
         desktopUpdateQueryKeys.state(),
       );
+      // A pushed state is newer than an in-flight getUpdateState snapshot.
+      void queryClient.cancelQueries({ queryKey: desktopUpdateQueryKeys.state() });
       setDesktopUpdateStateQueryData(queryClient, nextState);
       // A late updater error arrives after the install request resolved, so nothing else reports it.
       // While the request is out, its own result reports the failure.

@@ -16,7 +16,7 @@ import { Sheet, SheetPopup } from "../ui/sheet";
 const PlanSidebar = lazy(() => import("../PlanSidebar"));
 
 /** Below this width the inline 340px plan sidebar squeezes the composer, so it becomes a sheet. */
-export const PLAN_SIDEBAR_SHEET_MEDIA_QUERY = "(max-width: 1180px)";
+const PLAN_SIDEBAR_SHEET_MEDIA_QUERY = "(max-width: 1180px)";
 
 export interface ChatPlanPanelOpenOptions {
   /** Open even as a sheet; only for explicit user actions, since the sheet covers the chat. */

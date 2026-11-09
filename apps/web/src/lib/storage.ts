@@ -30,7 +30,7 @@ export function createMemoryStorage(): StateStorage {
   };
 }
 
-export function isStateStorage(
+function isStateStorage(
   storage: Partial<StateStorage> | null | undefined,
 ): storage is StateStorage {
   return (

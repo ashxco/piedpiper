@@ -16,7 +16,7 @@ export const WORKSPACE_BASENAME_LOOKUP_LIMIT = 25;
 let latestLookupSequence = 0;
 
 /** Call the returned predicate when the lookup settles; false means a later click superseded it. */
-export function claimWorkspaceBasenameLookup(): () => boolean {
+function claimWorkspaceBasenameLookup(): () => boolean {
   latestLookupSequence += 1;
   const claimed = latestLookupSequence;
   return () => claimed === latestLookupSequence;

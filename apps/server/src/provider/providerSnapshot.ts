@@ -28,7 +28,7 @@ export interface ProviderProbeResult {
   readonly message?: string;
 }
 
-export function nonEmptyTrimmed(value: string | undefined): string | undefined {
+function nonEmptyTrimmed(value: string | undefined): string | undefined {
   if (!value) return undefined;
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : undefined;

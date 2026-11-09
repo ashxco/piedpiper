@@ -1,7 +1,7 @@
 import * as React from "react";
 
 /** Copy fallback for pages served over plain HTTP, where `navigator.clipboard` is absent. */
-export function writeTextWithExecCommand(value: string): boolean {
+function writeTextWithExecCommand(value: string): boolean {
   if (
     typeof document === "undefined" ||
     typeof document.execCommand !== "function" ||

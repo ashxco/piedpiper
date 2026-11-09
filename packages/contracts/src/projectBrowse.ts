@@ -14,7 +14,7 @@ export type ProjectBrowseDirectoriesInput = typeof ProjectBrowseDirectoriesInput
 // trim check would fail the encode of the whole listing.
 const RawFilesystemName = Schema.String.check(Schema.isNonEmpty());
 
-export const ProjectBrowseDirectoryEntry = Schema.Struct({
+const ProjectBrowseDirectoryEntry = Schema.Struct({
   name: RawFilesystemName,
   fullPath: RawFilesystemName,
 });

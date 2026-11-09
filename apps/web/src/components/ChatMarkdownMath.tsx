@@ -18,7 +18,7 @@ class MathErrorBoundary extends React.Component<
 }
 
 /** The TeX source a rendered formula copies as. */
-export function markdownMathSource(tex: string, display: boolean): string {
+function markdownMathSource(tex: string, display: boolean): string {
   const trimmed = tex.trim();
   return display ? `$$\n${trimmed}\n$$` : `$${trimmed}$`;
 }

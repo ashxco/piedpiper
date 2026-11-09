@@ -1,10 +1,10 @@
 import { type TurnDiffFileChange } from "../../types";
 import { summarizeTurnDiffStats } from "../../lib/turnDiffTree";
 
-export const CHANGED_FILES_AUTO_EXPAND_FILE_LIMIT = 5;
-export const CHANGED_FILES_AUTO_EXPAND_LINE_LIMIT = 200;
-export const CHANGED_FILES_PREVIEW_FILE_LIMIT = 3;
-export const CHANGED_FILES_PREVIEW_SCOPE_LIMIT = 4;
+const CHANGED_FILES_AUTO_EXPAND_FILE_LIMIT = 5;
+const CHANGED_FILES_AUTO_EXPAND_LINE_LIMIT = 200;
+const CHANGED_FILES_PREVIEW_FILE_LIMIT = 3;
+const CHANGED_FILES_PREVIEW_SCOPE_LIMIT = 4;
 
 export interface ChangedFilesScopeSummary {
   readonly label: string;

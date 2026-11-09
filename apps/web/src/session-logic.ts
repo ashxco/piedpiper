@@ -1,6 +1,6 @@
+import { isToolLifecycleItemType } from "@piedpiper/shared/providerRuntime";
 import {
   ApprovalRequestId,
-  isToolLifecycleItemType,
   THREAD_GOAL_ACTIVITY_KIND,
   THREAD_MODEL_SWITCH_ACTIVITY_KIND,
   THREAD_REASONING_ACTIVITY_KIND,
@@ -1376,7 +1376,7 @@ function unquoteWrappedScript(value: string, kind: ShellWrapperKind): string {
 }
 
 /** `/bin/zsh -lc "rg foo"` -> `rg foo`; anything that is not a known wrapper is returned as is. */
-export function unwrapShellCommandWrapper(value: string): string {
+function unwrapShellCommandWrapper(value: string): string {
   const split = splitExecutableAndRest(value);
   if (!split || split.rest.length === 0) return value;
   const kind = shellWrapperKind(split.executable);

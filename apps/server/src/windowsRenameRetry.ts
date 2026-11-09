@@ -6,7 +6,7 @@ import type * as PlatformError from "effect/PlatformError";
  * sharing, such as a virus scanner or the search indexer. The same codes also mean a
  * denial that never clears, so retries need a bound.
  */
-export const isWindowsRenameLock = (error: PlatformError.PlatformError): boolean => {
+const isWindowsRenameLock = (error: PlatformError.PlatformError): boolean => {
   if (error.reason._tag === "Busy") return true;
   const code = (error.reason.cause as NodeJS.ErrnoException | undefined)?.code;
   return code === "EBUSY" || code === "EPERM" || code === "EACCES";

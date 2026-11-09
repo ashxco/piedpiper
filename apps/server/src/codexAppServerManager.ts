@@ -183,7 +183,7 @@ const CODEX_GOAL_CONTINUATION_GRACE_MS = 5_000;
  * Codex 0.152 made the update_plan checklist opt-in, and its 1 s MCP startup grace
  * drops cold npx/uvx servers from the first turn; a hung server delays only that turn.
  */
-export const CODEX_THREAD_CONFIG = {
+const CODEX_THREAD_CONFIG = {
   "tools.update_plan.enabled": true,
   mcp_optional_startup_grace_ms: 10_000,
   // Tool calls stop waiting on the detailed summary requested on turn/start. Checked on CLI 0.166 only.

@@ -1,3 +1,4 @@
+import { isToolLifecycleItemType } from "@piedpiper/shared/providerRuntime";
 /**
  * Pure runtime-event normalization helpers extracted from
  * ProviderRuntimeIngestion.ts.
@@ -11,7 +12,6 @@
 import {
   ApprovalRequestId,
   EventId,
-  isToolLifecycleItemType,
   THREAD_GOAL_ACTIVITY_KIND,
   THREAD_USAGE_LIMIT_ACTIVITY_KIND,
   type ThreadGoalActivityPayload,
@@ -30,7 +30,7 @@ export function toTurnId(value: TurnId | string | undefined): TurnId | undefined
   return value === undefined ? undefined : TurnId.makeUnsafe(String(value));
 }
 
-export function toApprovalRequestId(value: string | undefined): ApprovalRequestId | undefined {
+function toApprovalRequestId(value: string | undefined): ApprovalRequestId | undefined {
   return value === undefined ? undefined : ApprovalRequestId.makeUnsafe(value);
 }
 
@@ -48,7 +48,7 @@ export function truncateDetail(value: string, limit = 180): string {
 const ACTIVITY_TITLE_MAX_CHARS = 120;
 
 /** One-line work-log title from free text; undefined when nothing readable remains. */
-export function toActivityTitle(value: string | undefined): string | undefined {
+function toActivityTitle(value: string | undefined): string | undefined {
   const singleLine = value?.replace(/\s+/g, " ").trim();
   return singleLine ? truncateDetail(singleLine, ACTIVITY_TITLE_MAX_CHARS) : undefined;
 }
@@ -78,7 +78,7 @@ export function proposedPlanIdFromEvent(event: ProviderRuntimeEvent, threadId: T
   return `plan:${threadId}:event:${event.eventId}`;
 }
 
-export function buildContextWindowActivityPayload(
+function buildContextWindowActivityPayload(
   event: ProviderRuntimeEvent,
 ): ThreadTokenUsageSnapshot | undefined {
   if (event.type !== "thread.token-usage.updated" || event.payload.usage.usedTokens <= 0) {
@@ -121,7 +121,7 @@ export function orchestrationSessionStatusFromRuntimeState(
   }
 }
 
-export function requestKindFromCanonicalRequestType(
+function requestKindFromCanonicalRequestType(
   requestType: string | undefined,
 ): "command" | "file-read" | "file-change" | undefined {
   switch (requestType) {

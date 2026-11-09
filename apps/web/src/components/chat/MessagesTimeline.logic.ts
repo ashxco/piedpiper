@@ -1,5 +1,5 @@
+import { getModelSelectionEffort } from "@piedpiper/shared/model";
 import {
-  getModelSelectionEffort,
   type MessageId,
   type ModelSelection,
   type OrchestrationThreadActivity,
@@ -404,7 +404,7 @@ export function workGroupConsumesUpwardScroll(
   return false;
 }
 
-export function workLogEntryIndicatesToolFailure(entry: WorkLogEntry): boolean {
+function workLogEntryIndicatesToolFailure(entry: WorkLogEntry): boolean {
   return isFailedWorkLogToolStatus(entry.toolStatus);
 }
 

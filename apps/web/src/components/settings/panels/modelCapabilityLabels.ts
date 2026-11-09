@@ -2,7 +2,7 @@ import type { ServerProviderModel } from "@piedpiper/contracts";
 
 type ModelForLabels = Pick<ServerProviderModel, "isCustom" | "capabilities">;
 
-export function modelHasReasoning(model: ModelForLabels): boolean {
+function modelHasReasoning(model: ModelForLabels): boolean {
   return (model.capabilities?.reasoningEffortLevels.length ?? 0) > 0;
 }
 

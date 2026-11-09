@@ -45,7 +45,7 @@ const WINDOWS_SHIM_UNSAFE_ARG_PATTERN = /[\u0000-\u001f\u007f"]/;
 const DEFAULT_WINDOWS_PATH_EXTENSIONS = [".COM", ".EXE", ".BAT", ".CMD"] as const;
 const WINDOWS_SHELL_EXTENSIONS = new Set([".cmd", ".bat"]);
 
-export function hasWindowsCommandLineUnsafeChars(value: string): boolean {
+function hasWindowsCommandLineUnsafeChars(value: string): boolean {
   return WINDOWS_COMMAND_LINE_UNSAFE_PATTERN.test(value);
 }
 

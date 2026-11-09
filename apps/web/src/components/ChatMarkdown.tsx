@@ -279,7 +279,7 @@ function chatMarkdownUrlTransform(url: string, key: string): string {
 }
 
 /** True when the fence around a code block was closed in the source, not just cut off. */
-export function isClosedCodeFence(node: ExtraProps["node"], text: string, code: string): boolean {
+function isClosedCodeFence(node: ExtraProps["node"], text: string, code: string): boolean {
   const start = node?.position?.start.offset;
   const end = node?.position?.end.offset;
   if (start === undefined || end === undefined) return false;
@@ -298,7 +298,7 @@ export function isClosedCodeFence(node: ExtraProps["node"], text: string, code: 
 }
 
 /** The trimmed command a shell block may run, or null when what runs could differ from what shows. */
-export function runnableShellCommand(code: string, language: string): string | null {
+function runnableShellCommand(code: string, language: string): string | null {
   const command = code.trim();
   if (
     !SHELL_LANGUAGE_REGEX.test(language) ||

@@ -35,7 +35,7 @@ import { CheckpointRef } from "@piedpiper/contracts";
 
 // core.splitIndex governs every index Git writes, so the scratch index could expire the
 // sharedindex.* file the real .git/index still references.
-export const CHECKPOINT_SCRATCH_INDEX_CONFIG_ARGS = [
+const CHECKPOINT_SCRATCH_INDEX_CONFIG_ARGS = [
   "-c",
   "core.splitIndex=false",
   "-c",
@@ -59,7 +59,7 @@ export function checkpointDurableWriteArgs(platform: NodeJS.Platform): ReadonlyA
     ...(platform === "darwin" || platform === "win32" ? ["-c", BATCH_FSYNC_ARG] : []),
   ];
 }
-export const CHECKPOINT_DURABLE_WRITE_ARGS = checkpointDurableWriteArgs(process.platform);
+const CHECKPOINT_DURABLE_WRITE_ARGS = checkpointDurableWriteArgs(process.platform);
 
 /** Both methods must go: a surviving batch would win over writeout-only or fail again. */
 export function checkpointWriteArgsWithoutFullFsync(
@@ -86,7 +86,7 @@ export function shouldRetryCheckpointWriteWithoutFullFsync(
 }
 
 // Keep checkpoint diffs parseable regardless of the user's diff.* config.
-export const CHECKPOINT_DIFF_CONFIG_ARGS = [
+const CHECKPOINT_DIFF_CONFIG_ARGS = [
   "-c",
   "diff.relative=false",
   "-c",
@@ -95,7 +95,7 @@ export const CHECKPOINT_DIFF_CONFIG_ARGS = [
   "-c",
   "core.quotePath=false",
 ] as const;
-export const CHECKPOINT_DIFF_RENDER_ARGS = [
+const CHECKPOINT_DIFF_RENDER_ARGS = [
   "--src-prefix=a/",
   "--dst-prefix=b/",
   "--submodule=short",
