@@ -33,15 +33,19 @@ export const GIT_PLAIN_DIFF_ARGS = ["--no-ext-diff", "--no-textconv", "--no-colo
 
 const WORKTREE_DIRECTORY_NAME_MAX_LENGTH = 40;
 
-/** Folder name for a generated worktree, capped so long branch names stay within path limits. */
-export function worktreeDirectoryName(branch: string): string {
+/** Stable identity plus a readable, byte-bounded prefix for newly generated worktrees. */
+export function worktreeDirectoryName(branch: string, gitCommonDir: string = ""): string {
   const directoryName = branch.replace(/\//g, "-");
-  if (directoryName.length <= WORKTREE_DIRECTORY_NAME_MAX_LENGTH) {
-    return directoryName;
+  const digest = createHash("sha256")
+    .update(`${gitCommonDir}\0${branch}`, "utf8")
+    .digest("hex")
+    .slice(0, 16);
+  let prefix = "";
+  for (const character of directoryName) {
+    if (Buffer.byteLength(prefix + character, "utf8") > WORKTREE_DIRECTORY_NAME_MAX_LENGTH - 17)
+      break;
+    prefix += character;
   }
-  const digest = createHash("sha256").update(branch, "utf8").digest("hex").slice(0, 16);
-  // Avoid splitting a surrogate pair, which Git would list back as a different path.
-  const prefix = directoryName.slice(0, 23).replace(/[\uD800-\uDBFF]$/, "");
   return `${prefix}-${digest}`;
 }
 

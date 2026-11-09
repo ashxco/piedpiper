@@ -47,6 +47,7 @@ export const RESTORABLE_SETTING_LABELS: ReadonlyArray<
   ["automaticGitFetchIntervalMs", "Background fetch"],
   ["autoPullDefaultBranch", "Pull default branch"],
   ["newWorktreesStartFromOrigin", "Start worktrees from remote"],
+  ["fastWorktreeCheckout", "Faster worktree checkout"],
   ["worktreeSubmodules", "Worktree submodules"],
   ["worktreesDirectory", "Worktree location"],
   ["branchNamingMode", "Branch naming"],

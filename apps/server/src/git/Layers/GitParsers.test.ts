@@ -136,9 +136,17 @@ describe("gitCommandMutatesRepositoryLayout", () => {
 });
 
 describe("worktreeDirectoryName", () => {
-  it("keeps short branch names, replacing slashes", () => {
-    expect(worktreeDirectoryName("feature/short")).toBe("feature-short");
-    expect(worktreeDirectoryName("a".repeat(40))).toBe("a".repeat(40));
+  it("distinguishes branch spelling and repository identity", () => {
+    expect(worktreeDirectoryName("feature/short", "/one/.git")).toMatch(
+      /^feature-short-[a-f0-9]{16}$/,
+    );
+    expect(worktreeDirectoryName("feature/short", "/one/.git")).not.toBe(
+      worktreeDirectoryName("feature-short", "/one/.git"),
+    );
+    expect(worktreeDirectoryName("feature/short", "/one/.git")).not.toBe(
+      worktreeDirectoryName("feature/short", "/two/.git"),
+    );
+    expect(Buffer.byteLength(worktreeDirectoryName("語".repeat(60)))).toBeLessThanOrEqual(40);
   });
 
   it("caps long branch names with a stable hash suffix", () => {

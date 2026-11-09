@@ -154,6 +154,27 @@ export function GitSettingsSection() {
       />
 
       <SettingsRow
+        id="setting-fast-worktree-checkout"
+        title="Cached worktree checkout (beta)"
+        description="Reuse clean checkouts with macOS copy-on-write. Uses extra disk space; performance varies by repository."
+        resetAction={
+          <SettingDefaultResetButton
+            setting="fastWorktreeCheckout"
+            label="cached worktree checkout"
+          />
+        }
+        control={
+          <Switch
+            checked={settings.fastWorktreeCheckout}
+            onCheckedChange={(checked) =>
+              updateSettings({ fastWorktreeCheckout: Boolean(checked) })
+            }
+            aria-label="Cached worktree checkout"
+          />
+        }
+      />
+
+      <SettingsRow
         id="setting-worktree-submodules"
         title="Worktree submodules"
         description="Check out git submodules when a new worktree is created."

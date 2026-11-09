@@ -49,6 +49,7 @@ import {
   parseRemoteNamesInGitOrder,
   parseRemoteRefWithRemoteNames,
 } from "../remoteRefs.ts";
+import { makeWorktreeCheckoutCache } from "./WorktreeCheckoutCache.ts";
 import { ServerConfig } from "../../config.ts";
 import { getServerSettingsOrDefault, ServerSettingsService } from "../../serverSettings.ts";
 import {
@@ -558,7 +559,7 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
   resolveGitExecutableCached({ env: process.env });
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const { worktreesDir } = yield* ServerConfig;
+  const { worktreesDir, stateDir } = yield* ServerConfig;
   const layerScope = yield* Effect.scope;
   // Optional: GitCore may be built before the settings layer, then the caller's fiber is asked.
   const capturedServerSettings = yield* Effect.serviceOption(ServerSettingsService);
@@ -748,6 +749,20 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
       ? run.pipe(Effect.ensuring(Cache.invalidateAll(statusStaticInfoCache)))
       : run;
   };
+
+  const checkoutCache = yield* makeWorktreeCheckoutCache({
+    cacheDir: path.join(stateDir, "worktree-checkout-cache"),
+    execute,
+    platform,
+  });
+  if (checkoutCache && Option.isSome(capturedServerSettings)) {
+    yield* capturedServerSettings.value.streamChanges.pipe(
+      Stream.map((settings) => settings.fastWorktreeCheckout),
+      Stream.changes,
+      Stream.runForEach((enabled) => (enabled ? Effect.void : checkoutCache.clear)),
+      Effect.forkIn(layerScope),
+    );
+  }
 
   const executeGit = (
     operation: string,
@@ -2335,7 +2350,15 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
           runGitStdoutWithOptions(
             "GitCore.readRangeContext.log",
             cwd,
-            ["log", "--oneline", "--no-color", "--end-of-options", range],
+            [
+              "log",
+              "--oneline",
+              "--no-color",
+              "--no-show-signature",
+              "--no-decorate",
+              "--end-of-options",
+              range,
+            ],
             {
               maxOutputBytes: RANGE_COMMIT_SUMMARY_MAX_OUTPUT_BYTES,
               truncateOutputAtMaxBytes: true,
@@ -2914,7 +2937,7 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
         worktreePath = path.join(
           worktreesRoot.directory,
           path.basename(input.cwd),
-          worktreeDirectoryName(targetBranch),
+          worktreeDirectoryName(targetBranch, yield* resolveGitCommonDir(input.cwd)),
         );
         // A location that holds the repo itself (e.g. ~/code for ~/code/app) would nest the
         // worktree inside the main checkout, where `git clean` or the main thread can touch it.
@@ -2950,7 +2973,7 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
         : ["worktree", "add", "--", worktreePath, input.branch];
       const args = ["-c", `checkout.workers=${checkoutWorkers}`, ...addArgs];
       const onCheckoutProgress = options?.onCheckoutProgress;
-      const addWorktree = executeGit("GitCore.createWorktree", input.cwd, args, {
+      const stockWorktree = executeGit("GitCore.createWorktree", input.cwd, args, {
         timeoutMs: WORKTREE_ADD_TIMEOUT_MS,
         fallbackErrorMessage: "git worktree add failed",
         ...(onCheckoutProgress
@@ -2973,6 +2996,19 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
         ),
       );
 
+      const fastCheckout = settings.fastWorktreeCheckout && checkoutCache !== undefined;
+      const cacheGeneration = fastCheckout ? yield* checkoutCache.currentGeneration : 0;
+      const addWorktree = fastCheckout
+        ? checkoutCache
+            .create({
+              cwd: input.cwd,
+              worktreePath,
+              refName: startPoint,
+              ...(newBranch ? { newBranch } : {}),
+              checkoutWorkers,
+            })
+            .pipe(Effect.flatMap((cloned) => (cloned ? Effect.void : stockWorktree)))
+        : stockWorktree;
       const createdPath = worktreePath;
       const requestedBranch = newBranch;
       const finishWorktree = Effect.gen(function* () {
@@ -3013,6 +3049,9 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
                   ),
             ),
             Effect.andThen(finishWorktree),
+            Effect.andThen(() =>
+              fastCheckout ? checkoutCache.schedule(createdPath, cacheGeneration) : Effect.void,
+            ),
             Effect.onInterrupt(() =>
               cleanUpInterruptedWorktree({
                 cwd: input.cwd,

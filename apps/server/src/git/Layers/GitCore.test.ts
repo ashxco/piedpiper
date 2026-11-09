@@ -5542,7 +5542,8 @@ describe("GitCore worktree settings", () => {
         newBranch: "located",
         path: null,
       });
-      expect(result.worktree.path).toBe(path.join(location, path.basename(repo), "located"));
+      expect(path.dirname(result.worktree.path)).toBe(path.join(location, path.basename(repo)));
+      expect(path.basename(result.worktree.path)).toMatch(/^located-[a-f0-9]{16}$/);
       expect(existsSync(path.join(result.worktree.path, "README.md"))).toBe(true);
       yield* core.removeWorktree({ cwd: repo, path: result.worktree.path, force: true });
 

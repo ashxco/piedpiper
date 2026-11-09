@@ -357,6 +357,7 @@ export const ServerSettings = Schema.Struct({
   }),
   autoPullDefaultBranch: Schema.Boolean.pipe(Schema.withDecodingDefault(() => false)),
   newWorktreesStartFromOrigin: Schema.Boolean.pipe(Schema.withDecodingDefault(() => false)),
+  fastWorktreeCheckout: Schema.Boolean.pipe(Schema.withDecodingDefault(() => false)),
   worktreeSubmodules: WorktreeSubmodules.pipe(
     Schema.withDecodingDefault(() => DEFAULT_WORKTREE_SUBMODULES),
   ),
@@ -470,6 +471,7 @@ export const ServerSettingsPatch = Schema.Struct({
   automaticGitFetchIntervalMs: Schema.optionalKey(NonNegativeInt),
   autoPullDefaultBranch: Schema.optionalKey(Schema.Boolean),
   newWorktreesStartFromOrigin: Schema.optionalKey(Schema.Boolean),
+  fastWorktreeCheckout: Schema.optionalKey(Schema.Boolean),
   worktreeSubmodules: Schema.optionalKey(WorktreeSubmodules),
   worktreesDirectory: Schema.optionalKey(Schema.String),
   branchNamingMode: Schema.optionalKey(BranchNamingMode),

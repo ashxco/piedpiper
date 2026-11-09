@@ -141,6 +141,7 @@ describe("server settings defaults", () => {
       automaticGitFetchIntervalMs: 15_000,
       autoPullDefaultBranch: false,
       newWorktreesStartFromOrigin: false,
+      fastWorktreeCheckout: false,
       worktreeSubmodules: "recursive",
       worktreesDirectory: "",
       observability: { otlpTracesUrl: "", otlpMetricsUrl: "", otlpLogsUrl: "" },
