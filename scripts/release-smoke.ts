@@ -18,8 +18,14 @@ const workspaceFiles = [
   "scripts/package.json",
 ] as const;
 
+const rootPackageJson = JSON.parse(readFileSync(resolve(repoRoot, "package.json"), "utf8")) as {
+  patchedDependencies?: Record<string, string>;
+};
+
 function copyWorkspaceManifestFixture(targetRoot: string): void {
-  for (const relativePath of workspaceFiles) {
+  // bun install refuses to resolve when a patchedDependencies entry has no patch file.
+  const patchFiles = Object.values(rootPackageJson.patchedDependencies ?? {});
+  for (const relativePath of [...workspaceFiles, ...patchFiles]) {
     const sourcePath = resolve(repoRoot, relativePath);
     const destinationPath = resolve(targetRoot, relativePath);
     mkdirSync(dirname(destinationPath), { recursive: true });
@@ -94,6 +100,8 @@ try {
     },
   );
 
+  // A copied lockfile pins the old workspace versions; regenerate it from scratch.
+  rmSync(resolve(tempRoot, "bun.lock"), { force: true });
   execFileSync("bun", ["install", "--lockfile-only", "--ignore-scripts"], {
     cwd: tempRoot,
     stdio: "inherit",

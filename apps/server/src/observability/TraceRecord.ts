@@ -1,6 +1,6 @@
 import { Cause, Exit, Option, Tracer } from "effect";
 
-import { compactTraceAttributes } from "./Attributes.ts";
+import { compactTraceAttributes, truncateTraceAttributes } from "./Attributes.ts";
 
 export interface TraceRecord {
   readonly type: "effect-span";
@@ -53,6 +53,9 @@ interface SerializableSpan {
   >;
 }
 
+const toFileAttributes = (attributes: Readonly<Record<string, unknown>>) =>
+  truncateTraceAttributes(compactTraceAttributes(attributes));
+
 function formatTraceExit(exit: Exit.Exit<unknown, unknown>): TraceRecord["exit"] {
   if (Exit.isSuccess(exit)) {
     return { _tag: "Success" };
@@ -84,16 +87,16 @@ export function spanToTraceRecord(span: SerializableSpan): TraceRecord {
     startTimeUnixNano: String(status.startTime),
     endTimeUnixNano: String(status.endTime),
     durationMs: Number(status.endTime - status.startTime) / 1_000_000,
-    attributes: compactTraceAttributes(Object.fromEntries(span.attributes)),
+    attributes: toFileAttributes(Object.fromEntries(span.attributes)),
     events: span.events.map(([name, startTime, attributes]) => ({
       name,
       timeUnixNano: String(startTime),
-      attributes: compactTraceAttributes(attributes),
+      attributes: toFileAttributes(attributes),
     })),
     links: span.links.map((link) => ({
       traceId: link.span.traceId,
       spanId: link.span.spanId,
-      attributes: compactTraceAttributes(link.attributes),
+      attributes: toFileAttributes(link.attributes),
     })),
     exit: formatTraceExit(status.exit),
   };

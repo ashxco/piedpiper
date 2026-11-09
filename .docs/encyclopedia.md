@@ -55,7 +55,7 @@ Examples include `thread.create`, `thread.turn.start`, and `thread.checkpoint.re
 
 #### Domain Event
 
-A persisted fact that something already happened. In [the contracts][1], events are the source of truth, and [projector.ts][4] shows how they are applied.
+A persisted fact that something already happened. In [the contracts][1], events drive changes as they happen, and [projector.ts][4] shows how they are applied. Only about a day of history is retained, plus each stream's newest event and the command receipts; see [OrchestrationEventMaintenance.ts](../apps/server/src/orchestration/Layers/OrchestrationEventMaintenance.ts).
 Examples include `thread.created`, `thread.message-sent`, and `thread.turn-diff-completed`.
 
 #### Decider
@@ -64,7 +64,7 @@ The pure orchestration logic that turns commands plus current state into events.
 
 #### Projection
 
-A read-optimized view derived from events. See [projector.ts][4], [ProjectionPipeline.ts][11], and [ProjectionSnapshotQuery.ts][10].
+A read-optimized view built from events. Projections are authoritative once older events are pruned, so they cannot be rebuilt from events after a prune. A replay from below the prune boundary is refused, and the client recovers from a snapshot. See [projector.ts][4], [ProjectionPipeline.ts][11], and [ProjectionSnapshotQuery.ts][10].
 
 #### Projector
 

@@ -96,6 +96,21 @@ it.layer(TestLayer)("WorkspaceEntriesLive", (it) => {
       }),
     );
 
+    it.effect.skipIf(process.platform === "win32")(
+      "keeps literal backslashes in POSIX entry names",
+      () =>
+        Effect.gen(function* () {
+          const cwd = yield* makeTempDir();
+          yield* writeTextFile(cwd, "dir\\name/file.txt");
+
+          const result = yield* searchWorkspaceEntries({ cwd, query: "", limit: 100 });
+          const paths = result.entries.map((entry) => entry.path);
+
+          expect(paths).toContain("dir\\name");
+          expect(paths).toContain("dir\\name/file.txt");
+        }),
+    );
+
     it.effect("filters and ranks entries by query", () =>
       Effect.gen(function* () {
         const cwd = yield* makeTempDir({ prefix: "piedpiper-workspace-query-" });

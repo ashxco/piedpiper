@@ -24,6 +24,7 @@
   },
   "type": "module",
   "scripts": {
+    "prepare": "effect-language-service patch",
     "dev": "node scripts/dev-runner.ts dev",
     "dev:server": "node scripts/dev-runner.ts dev:server",
     "dev:web": "node scripts/dev-runner.ts dev:web",
@@ -51,13 +52,18 @@
     "dist:desktop:win": "node scripts/build-desktop-artifact.ts --platform win --target nsis --arch x64",
     "release:smoke": "node scripts/release-smoke.ts",
     "clean": "rm -rf node_modules apps/*/node_modules packages/*/node_modules apps/*/dist apps/*/dist-electron packages/*/dist .turbo apps/*/.turbo packages/*/.turbo",
-    "sync:vscode-icons": "node scripts/sync-vscode-icons.mjs"
+    "sync:vscode-icons": "node scripts/sync-vscode-icons.mjs",
+    "knip": "knip",
+    "knip:production": "knip --production"
   },
   "devDependencies": {
+    "@effect/language-service": "catalog:",
     "@types/node": "catalog:",
+    "knip": "6.34.0",
     "oxfmt": "^0.40.0",
     "oxlint": "^1.55.0",
     "turbo": "^2.3.3",
+    "typescript": "catalog:",
     "vitest": "catalog:"
   },
   "overrides": {
@@ -73,7 +79,11 @@
       "apps/web/public"
     ]
   },
+  "patchedDependencies": {
+    "@effect/platform-node-shared@4.0.0-beta.43": "patches/@effect%2Fplatform-node-shared@4.0.0-beta.43.patch"
+  },
   "trustedDependencies": [
-    "node-pty"
+    "node-pty",
+    "electron"
   ]
 }

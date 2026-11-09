@@ -1,18 +1,21 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { FolderIcon, FolderPlusIcon, SearchIcon } from "lucide-react";
+import { FolderIcon, FolderPlusIcon, FolderSearchIcon, SearchIcon } from "lucide-react";
 import { useState } from "react";
 
+import { AgentSessionProjectPicker } from "../components/AgentSessionProjectPicker";
 import { isElectron } from "../env";
 import { useAddProjectFromPath } from "../hooks/useAddProjectFromPath";
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
-import { useSettings } from "../hooks/useSettings";
+import { selectableProjects } from "../lib/projectArchive";
+import { cn } from "../lib/utils";
+import { workspaceAreaProps } from "../lib/workspaceFocus";
 import { useUserProjects } from "../storeSelectors";
 
 function ChatIndexRouteView() {
-  const projects = useUserProjects();
+  const projects = selectableProjects(useUserProjects());
   const [search, setSearch] = useState("");
+  const [pickerOpen, setPickerOpen] = useState(false);
   const { handleNewThread } = useHandleNewThread();
-  const appSettings = useSettings();
   const { pickAndAddProject } = useAddProjectFromPath({
     onSuccess: () => {},
   });
@@ -20,20 +23,26 @@ function ChatIndexRouteView() {
   const hasProjects = projects.length > 0;
 
   return (
-    <div className="flex h-full min-w-0 flex-1 flex-col bg-background">
+    <div
+      {...workspaceAreaProps("content", 1, "New thread")}
+      className="flex h-full min-w-0 flex-1 flex-col bg-background surface-grain"
+    >
       {isElectron && <div className="drag-region h-[52px] shrink-0" />}
 
       <div
-        className="flex flex-1 flex-col items-center justify-center"
-        style={{
-          marginTop: -52,
-          ...(!hasProjects
-            ? {
+        // Dark window-button symbols are unreadable on the first-run gradient, so it starts below them.
+        className={cn(
+          "-mt-[52px] flex flex-1 flex-col items-center justify-center",
+          !hasProjects && "wco:not-dark:mt-0",
+        )}
+        style={
+          hasProjects
+            ? undefined
+            : {
                 background:
                   "radial-gradient(50% 50% at 50% 35%, #000 0%, transparent 100%), radial-gradient(60% 60% at 50% 35%, rgba(88, 28, 135, 0.25) 0%, transparent 100%), radial-gradient(50% 50% at 15% 80%, rgba(126, 34, 206, 0.18) 0%, transparent 100%), radial-gradient(50% 50% at 85% 75%, rgba(59, 130, 246, 0.12) 0%, transparent 100%), #0a0a0f",
               }
-            : {}),
-        }}
+        }
       >
         {hasProjects ? (
           <>
@@ -56,6 +65,16 @@ function ChatIndexRouteView() {
                 <FolderPlusIcon className="size-4 shrink-0 text-muted-foreground/40" />
                 <p className="min-w-0 flex-1 text-[13px] font-medium text-foreground/85">
                   Add New Project
+                </p>
+              </button>
+              <button
+                type="button"
+                onClick={() => setPickerOpen(true)}
+                className="mt-2 flex w-full cursor-pointer items-center gap-3 rounded-xl bg-secondary/50 px-4 py-3 text-left transition-colors hover:bg-accent/50"
+              >
+                <FolderSearchIcon className="size-4 shrink-0 text-muted-foreground/40" />
+                <p className="min-w-0 flex-1 text-[13px] font-medium text-foreground/85">
+                  Find Projects from Claude Code and Codex
                 </p>
               </button>
 
@@ -94,9 +113,9 @@ function ChatIndexRouteView() {
                             key={project.id}
                             type="button"
                             onClick={() => {
-                              void handleNewThread(project.id, {
-                                envMode: appSettings.defaultThreadEnvMode,
-                              });
+                              // No options: a reused draft resets to no branch/worktree and
+                              // the default env mode.
+                              void handleNewThread(project.id);
                             }}
                             className="group flex w-full cursor-pointer items-center gap-3 px-4 py-3 text-left transition-colors first:rounded-t-xl last:rounded-b-xl hover:bg-accent/50"
                           >
@@ -131,7 +150,6 @@ function ChatIndexRouteView() {
             >
               Pied Piper
             </h1>
-            <p className="mt-2 text-base text-white/40">A fork of T3 Code</p>
             <p className="mt-6 max-w-lg text-center text-base leading-relaxed text-white/60">
               A minimal GUI for coding agents. Manage projects, orchestrate AI workflows, and watch
               your team work from the office.
@@ -144,9 +162,17 @@ function ChatIndexRouteView() {
               <FolderPlusIcon className="size-4" />
               Add Project
             </button>
+            <button
+              type="button"
+              onClick={() => setPickerOpen(true)}
+              className="mt-4 cursor-pointer text-sm text-muted-foreground transition-colors hover:text-foreground"
+            >
+              Find projects from Claude Code and Codex
+            </button>
           </div>
         )}
       </div>
+      <AgentSessionProjectPicker open={pickerOpen} onOpenChange={setPickerOpen} />
     </div>
   );
 }

@@ -140,23 +140,6 @@ const buildCmd = Command.make(
         })`bun tsdown`,
       );
 
-      // Copy advisor skill files alongside the bundle so the server can find
-      // them via import.meta.dirname at runtime.
-      const skillsSrc = path.join(serverDir, "src/advisor-skills");
-      const skillsTarget = path.join(serverDir, "dist/advisor-skills");
-      if (yield* fs.exists(skillsSrc)) {
-        yield* fs.copy(skillsSrc, skillsTarget);
-        yield* Effect.log("[cli] Copied advisor skill files into dist/advisor-skills");
-      }
-
-      // Copy advisor tool scripts alongside the bundle.
-      const toolsSrc = path.join(serverDir, "src/advisor-tools");
-      const toolsTarget = path.join(serverDir, "dist/advisor-tools");
-      if (yield* fs.exists(toolsSrc)) {
-        yield* fs.copy(toolsSrc, toolsTarget);
-        yield* Effect.log("[cli] Copied advisor tool scripts into dist/advisor-tools");
-      }
-
       const webDist = path.join(repoRoot, "apps/web/dist");
       const clientTarget = path.join(serverDir, "dist/client");
 

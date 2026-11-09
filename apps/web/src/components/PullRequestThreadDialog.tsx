@@ -1,12 +1,16 @@
-import type { GitResolvePullRequestResult } from "@piedpiper/contracts";
+import type {
+  GitPreparePullRequestThreadResult,
+  GitResolvePullRequestResult,
+} from "@piedpiper/contracts";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useDebouncedValue } from "@tanstack/react-pacer";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import {
   gitPreparePullRequestThreadMutationOptions,
   gitResolvePullRequestQueryOptions,
 } from "~/lib/gitReactQuery";
+import { isImeComposingKeyboardEvent } from "~/lib/imeComposition";
 import { cn } from "~/lib/utils";
 import { parsePullRequestReference } from "~/pullRequestReference";
 import { Button } from "./ui/button";
@@ -21,13 +25,45 @@ import {
 } from "./ui/dialog";
 import { Input } from "./ui/input";
 import { Spinner } from "./ui/spinner";
+import { toastManager } from "./ui/toast";
 
 interface PullRequestThreadDialogProps {
   open: boolean;
   cwd: string | null;
   initialReference: string | null;
   onOpenChange: (open: boolean) => void;
-  onPrepared: (input: { branch: string; worktreePath: string | null }) => Promise<void> | void;
+  onPrepared: (input: {
+    branch: string;
+    worktreePath: string | null;
+    checkoutChanged?: boolean | undefined;
+  }) => Promise<void> | void;
+}
+
+// Module-level because the React Compiler cannot compile try/finally inside a component.
+async function runWhilePreparing(
+  mode: "local" | "worktree",
+  setPreparingMode: (mode: "local" | "worktree" | null) => void,
+  run: () => Promise<void>,
+): Promise<void> {
+  setPreparingMode(mode);
+  try {
+    await run();
+  } finally {
+    setPreparingMode(null);
+  }
+}
+
+function pullRequestStatusTone(state: string | undefined): string {
+  switch (state) {
+    case "merged":
+      return "text-violet-600 dark:text-violet-300/90";
+    case "closed":
+      return "text-zinc-500 dark:text-zinc-400/80";
+    case "open":
+      return "text-emerald-600 dark:text-emerald-300/90";
+    default:
+      return "text-muted-foreground";
+  }
 }
 
 export function PullRequestThreadDialog({
@@ -74,18 +110,15 @@ export function PullRequestThreadDialog({
       reference: open ? parsedDebouncedReference : null,
     }),
   );
-  const cachedPullRequest = useMemo(() => {
-    if (!cwd || !parsedReference) {
-      return null;
-    }
-    const cached = queryClient.getQueryData<GitResolvePullRequestResult>([
-      "git",
-      "pull-request",
-      cwd,
-      parsedReference,
-    ]);
-    return cached?.pullRequest ?? null;
-  }, [cwd, parsedReference, queryClient]);
+  const cachedPullRequest =
+    cwd && parsedReference
+      ? (queryClient.getQueryData<GitResolvePullRequestResult>([
+          "git",
+          "pull-request",
+          cwd,
+          parsedReference,
+        ])?.pullRequest ?? null)
+      : null;
   const preparePullRequestThreadMutation = useMutation(
     gitPreparePullRequestThreadMutationOptions({ cwd, queryClient }),
   );
@@ -103,52 +136,38 @@ export function PullRequestThreadDialog({
       parsedReference !== parsedDebouncedReference ||
       resolvePullRequestQuery.isPending ||
       resolvePullRequestQuery.isFetching);
-  const statusTone = useMemo(() => {
-    switch (resolvedPullRequest?.state) {
-      case "merged":
-        return "text-violet-600 dark:text-violet-300/90";
-      case "closed":
-        return "text-zinc-500 dark:text-zinc-400/80";
-      case "open":
-        return "text-emerald-600 dark:text-emerald-300/90";
-      default:
-        return "text-muted-foreground";
-    }
-  }, [resolvedPullRequest?.state]);
+  const statusTone = pullRequestStatusTone(resolvedPullRequest?.state);
 
-  const handleConfirm = useCallback(
-    async (mode: "local" | "worktree") => {
-      if (!parsedReference) {
-        setReferenceDirty(true);
-        return;
-      }
-      if (!parsedReference || !resolvedPullRequest || !cwd) {
-        return;
-      }
-      setPreparingMode(mode);
-      try {
-        const result = await preparePullRequestThreadMutation.mutateAsync({
+  const handleConfirm = async (mode: "local" | "worktree") => {
+    if (!parsedReference) {
+      setReferenceDirty(true);
+      return;
+    }
+    if (!resolvedPullRequest || !cwd) {
+      return;
+    }
+    await runWhilePreparing(mode, setPreparingMode, async () => {
+      const result: GitPreparePullRequestThreadResult =
+        await preparePullRequestThreadMutation.mutateAsync({
           reference: parsedReference,
           mode,
         });
-        await onPrepared({
-          branch: result.branch,
-          worktreePath: result.worktreePath,
+      await onPrepared({
+        branch: result.branch,
+        worktreePath: result.worktreePath,
+        checkoutChanged: result.checkoutChanged,
+      });
+      if (result.isOnPullRequestHead === false) {
+        toastManager.add({
+          type: "warning",
+          title: "Not on the latest pull request commit",
+          description:
+            "This checkout has local changes or its own commits, or the pull request head could not be read, so it was left as it is.",
         });
-        onOpenChange(false);
-      } finally {
-        setPreparingMode(null);
       }
-    },
-    [
-      cwd,
-      onOpenChange,
-      onPrepared,
-      parsedReference,
-      preparePullRequestThreadMutation,
-      resolvedPullRequest,
-    ],
-  );
+      onOpenChange(false);
+    });
+  };
 
   const validationMessage = !referenceDirty
     ? null
@@ -198,12 +217,12 @@ export function PullRequestThreadDialog({
                 setReference(event.target.value);
               }}
               onKeyDown={(event) => {
-                if (event.key !== "Enter") {
+                if (event.key !== "Enter" || isImeComposingKeyboardEvent(event.nativeEvent)) {
                   return;
                 }
                 event.preventDefault();
                 if (!isResolving && !preparePullRequestThreadMutation.isPending) {
-                  void handleConfirm("local");
+                  void handleConfirm("worktree");
                 }
               }}
             />

@@ -26,6 +26,7 @@ import { Menu, MenuItem, MenuPopup, MenuTrigger } from "./ui/menu";
 import { readNativeApi } from "~/nativeApi";
 import { toastManager } from "./ui/toast";
 import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
+import { workspaceAreaProps } from "../lib/workspaceFocus";
 
 function stepStatusIcon(status: string): React.ReactNode {
   if (status === "completed") {
@@ -55,6 +56,10 @@ interface PlanSidebarProps {
   markdownCwd: string | undefined;
   workspaceRoot: string | undefined;
   timestampFormat: TimestampFormat;
+  /** "sheet" fills the overlay that replaces the inline sidebar on narrow windows. */
+  mode?: "sheet" | "sidebar";
+  /** Lets the plan's local images load, as they do in the timeline's plan card. */
+  threadId?: string | undefined;
   onClose: () => void;
 }
 
@@ -63,7 +68,9 @@ const PlanSidebar = memo(function PlanSidebar({
   activeProposedPlan,
   markdownCwd,
   workspaceRoot,
+  threadId,
   timestampFormat,
+  mode = "sidebar",
   onClose,
 }: PlanSidebarProps) {
   const [proposedPlanExpanded, setProposedPlanExpanded] = useState(false);
@@ -117,9 +124,21 @@ const PlanSidebar = memo(function PlanSidebar({
   }, [planMarkdown, workspaceRoot]);
 
   return (
-    <div className="flex h-full w-[340px] shrink-0 flex-col border-l border-border/70 bg-card/50">
+    <div
+      {...(mode === "sidebar" ? workspaceAreaProps("plan", 3, "Plan") : {})}
+      className={cn(
+        "flex h-full min-h-0 flex-col bg-card/50",
+        mode === "sidebar" ? "w-[340px] shrink-0 border-l border-border/70" : "w-full",
+      )}
+    >
       {/* Header */}
-      <div className="flex h-12 shrink-0 items-center justify-between border-b border-border/60 px-3">
+      <div
+        className={cn(
+          "flex h-12 shrink-0 items-center justify-between border-b border-border/60 px-3",
+          mode === "sheet" &&
+            "wco:pr-[calc(100vw-env(titlebar-area-width)-env(titlebar-area-x)+1em)]",
+        )}
+      >
         <div className="flex items-center gap-2">
           <span className="text-[10px] font-semibold tracking-wide text-foreground uppercase">
             Plan
@@ -237,6 +256,7 @@ const PlanSidebar = memo(function PlanSidebar({
                     text={displayedPlanMarkdown ?? ""}
                     cwd={markdownCwd}
                     isStreaming={false}
+                    threadId={threadId}
                   />
                 </div>
               ) : null}

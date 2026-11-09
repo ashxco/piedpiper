@@ -91,7 +91,7 @@ export class NetService extends ServiceMap.Service<NetService, NetServiceShape>(
   static readonly layer = Layer.sync(NetService, () => {
     /**
      * Returns true when a TCP server can bind to {host, port}.
-     * `EADDRNOTAVAIL` is treated as available so IPv6-absent hosts don't fail
+     * `EADDRNOTAVAIL`/`EAFNOSUPPORT` are treated as available so IPv6-absent hosts don't fail
      * loopback availability checks.
      */
     const canListenOnHost = (port: number, host: string): Effect.Effect<boolean> =>
@@ -108,7 +108,11 @@ export class NetService extends ServiceMap.Service<NetService, NetServiceShape>(
         server.unref();
 
         server.once("error", (cause) => {
-          if (isErrnoExceptionWithCode(cause) && cause.code === "EADDRNOTAVAIL") {
+          // Missing IPv6 addresses or kernel support do not mean the port is occupied.
+          if (
+            isErrnoExceptionWithCode(cause) &&
+            (cause.code === "EADDRNOTAVAIL" || cause.code === "EAFNOSUPPORT")
+          ) {
             settle(true);
             return;
           }

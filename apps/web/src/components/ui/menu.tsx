@@ -5,6 +5,7 @@ import { ChevronRightIcon } from "lucide-react";
 import type * as React from "react";
 
 import { cn } from "~/lib/utils";
+import { renderClosingPositioner } from "./closing-positioner";
 
 const MenuCreateHandle = MenuPrimitive.createHandle;
 
@@ -44,12 +45,15 @@ function MenuPopup({
         anchor={anchor}
         className="z-50"
         data-slot="menu-positioner"
+        render={renderClosingPositioner}
         side={side}
         sideOffset={sideOffset}
       >
         <MenuPrimitive.Popup
           className={cn(
             "relative flex not-[class*='w-']:min-w-44 origin-(--transform-origin) rounded-xl border border-foreground/15 bg-popover shadow-[0_8px_24px_-6px_rgba(0,0,0,0.35),0_2px_6px_-2px_rgba(0,0,0,0.25)] outline-none focus:outline-none",
+            // Electron drag hit-testing ignores z-index, so portaled popups must opt out of drag regions they overlap.
+            "[-webkit-app-region:no-drag]",
             className,
           )}
           data-slot="menu-popup"
@@ -78,7 +82,7 @@ function MenuItem({
   return (
     <MenuPrimitive.Item
       className={cn(
-        "flex min-h-9 cursor-default select-none items-center gap-2.5 rounded-md px-2.5 py-1.5 text-[13px] text-foreground/90 outline-none transition-colors data-disabled:pointer-events-none data-highlighted:bg-foreground/[0.06] data-highlighted:text-foreground data-inset:ps-8 data-[variant=destructive]:text-destructive data-[variant=destructive]:data-highlighted:bg-destructive/10 data-[variant=destructive]:data-highlighted:text-destructive data-disabled:opacity-64 [&>svg:not([class*='opacity-'])]:opacity-70 [&>svg:not([class*='size-'])]:size-4 [&>svg]:pointer-events-none [&>svg]:shrink-0",
+        "flex min-h-9 cursor-pointer select-none items-center gap-2.5 rounded-md px-2.5 py-1.5 text-[13px] text-foreground/90 outline-none transition-colors data-disabled:pointer-events-none data-highlighted:bg-foreground/[0.06] data-highlighted:text-foreground data-inset:ps-8 data-[variant=destructive]:text-destructive data-[variant=destructive]:data-highlighted:bg-destructive/10 data-[variant=destructive]:data-highlighted:text-destructive data-disabled:opacity-64 [&>svg:not([class*='opacity-'])]:opacity-70 [&>svg:not([class*='size-'])]:size-4 [&>svg]:pointer-events-none [&>svg]:shrink-0",
         className,
       )}
       data-inset={inset}
@@ -102,7 +106,7 @@ function MenuCheckboxItem({
     <MenuPrimitive.CheckboxItem
       checked={checked}
       className={cn(
-        "grid min-h-9 in-data-[side=none]:min-w-[calc(var(--anchor-width)+1.25rem)] cursor-default items-center gap-2.5 rounded-md py-1.5 ps-2.5 text-[13px] text-foreground/90 outline-none transition-colors data-disabled:pointer-events-none data-highlighted:bg-foreground/[0.06] data-highlighted:text-foreground data-disabled:opacity-64 [&_svg:not([class*='size-'])]:size-4 [&_svg]:pointer-events-none [&_svg]:shrink-0",
+        "grid min-h-9 in-data-[side=none]:min-w-[calc(var(--anchor-width)+1.25rem)] cursor-pointer items-center gap-2.5 rounded-md py-1.5 ps-2.5 text-[13px] text-foreground/90 outline-none transition-colors data-disabled:pointer-events-none data-highlighted:bg-foreground/[0.06] data-highlighted:text-foreground data-disabled:opacity-64 [&_svg:not([class*='size-'])]:size-4 [&_svg]:pointer-events-none [&_svg]:shrink-0",
         variant === "switch" ? "grid-cols-[1fr_auto] gap-4 pe-1.5" : "grid-cols-[1rem_1fr] pe-4",
         className,
       )}
@@ -151,7 +155,7 @@ function MenuRadioItem({ className, children, ...props }: MenuPrimitive.RadioIte
   return (
     <MenuPrimitive.RadioItem
       className={cn(
-        "grid min-h-9 in-data-[side=none]:min-w-[calc(var(--anchor-width)+1.25rem)] cursor-default grid-cols-[1rem_1fr] items-center gap-2.5 rounded-md py-1.5 ps-2.5 pe-4 text-[13px] text-foreground/90 outline-none transition-colors data-disabled:pointer-events-none data-highlighted:bg-foreground/[0.06] data-highlighted:text-foreground data-disabled:opacity-64 [&_svg:not([class*='size-'])]:size-4 [&_svg]:pointer-events-none [&_svg]:shrink-0",
+        "grid min-h-9 in-data-[side=none]:min-w-[calc(var(--anchor-width)+1.25rem)] cursor-pointer grid-cols-[1rem_1fr] items-center gap-2.5 rounded-md py-1.5 ps-2.5 pe-4 text-[13px] text-foreground/90 outline-none transition-colors data-disabled:pointer-events-none data-highlighted:bg-foreground/[0.06] data-highlighted:text-foreground data-disabled:opacity-64 [&_svg:not([class*='size-'])]:size-4 [&_svg]:pointer-events-none [&_svg]:shrink-0",
         className,
       )}
       data-slot="menu-radio-item"
@@ -235,7 +239,7 @@ function MenuSubTrigger({
   return (
     <MenuPrimitive.SubmenuTrigger
       className={cn(
-        "flex min-h-9 items-center gap-2.5 rounded-md px-2.5 py-1.5 text-[13px] text-foreground/90 outline-none transition-colors data-disabled:pointer-events-none data-highlighted:bg-foreground/[0.06] data-popup-open:bg-foreground/[0.06] data-inset:ps-8 data-highlighted:text-foreground data-popup-open:text-foreground data-disabled:opacity-64 [&_svg:not([class*='size-'])]:size-4 [&_svg]:pointer-events-none",
+        "flex min-h-9 cursor-pointer items-center gap-2.5 rounded-md px-2.5 py-1.5 text-[13px] text-foreground/90 outline-none transition-colors data-disabled:pointer-events-none data-highlighted:bg-foreground/[0.06] data-popup-open:bg-foreground/[0.06] data-inset:ps-8 data-highlighted:text-foreground data-popup-open:text-foreground data-disabled:opacity-64 [&_svg:not([class*='size-'])]:size-4 [&_svg]:pointer-events-none",
         className,
       )}
       data-inset={inset}

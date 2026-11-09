@@ -1,5 +1,5 @@
 /**
- * AnalyticsService - Anonymous telemetry capture contract.
+ * AnalyticsService - Usage telemetry capture contract.
  *
  * Provides a best-effort event API for runtime telemetry and a strict
  * `captureImmediate` method for call sites that need explicit error handling.

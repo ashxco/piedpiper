@@ -1,4 +1,5 @@
 import type {
+  ModelCapabilities,
   ServerProvider,
   ServerProviderAuth,
   ServerProviderModel,
@@ -6,10 +7,12 @@ import type {
 } from "@piedpiper/contracts";
 import { Effect, Stream } from "effect";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
-import { normalizeModelSlug } from "@piedpiper/shared/model";
+import { isLegacyBuiltInModel, normalizeModelSlug } from "@piedpiper/shared/model";
 import { isWindowsCommandNotFound } from "../processRunner";
 
 export const DEFAULT_TIMEOUT_MS = 4_000;
+// Auth status checks hit disk/keychain/network and can be slow on first run, especially on Windows.
+export const AUTH_PROBE_TIMEOUT_MS = 10_000;
 
 export interface CommandResult {
   readonly stdout: string;
@@ -40,7 +43,14 @@ export function isCommandMissingCause(error: unknown): boolean {
 export const spawnAndCollect = (binaryPath: string, command: ChildProcess.Command) =>
   Effect.gen(function* () {
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-    const child = yield* spawner.spawn(command);
+    // Node's spawn throws synchronously for some errors (e.g. ENOTDIR), which surfaces as a defect.
+    const child = yield* spawner
+      .spawn(command)
+      .pipe(
+        Effect.catchDefect((defect) =>
+          Effect.fail(defect instanceof Error ? defect : new Error(String(defect))),
+        ),
+      );
     const [stdout, stderr, exitCode] = yield* Effect.all(
       [
         collectStreamAsString(child.stdout),
@@ -98,12 +108,25 @@ export function parseGenericCliVersion(output: string): string | null {
   return match?.[1] ?? null;
 }
 
+export const EMPTY_MODEL_CAPABILITIES: ModelCapabilities = {
+  reasoningEffortLevels: [],
+  supportsFastMode: false,
+  supportsThinkingToggle: false,
+  contextWindowOptions: [],
+  promptInjectedEffortLevels: [],
+};
+
 export function providerModelsFromSettings(
   builtInModels: ReadonlyArray<ServerProviderModel>,
   provider: ServerProvider["provider"],
   customModels: ReadonlyArray<string>,
+  customModelCapabilities: ModelCapabilities | null = null,
 ): ReadonlyArray<ServerProviderModel> {
-  const resolvedBuiltInModels = [...builtInModels];
+  const resolvedBuiltInModels = builtInModels.map((model) =>
+    !model.isCustom && isLegacyBuiltInModel(provider, model.slug)
+      ? { ...model, isLegacy: true }
+      : model,
+  );
   const seen = new Set(resolvedBuiltInModels.map((model) => model.slug));
   const customEntries: ServerProviderModel[] = [];
 
@@ -117,7 +140,7 @@ export function providerModelsFromSettings(
       slug: normalized,
       name: normalized,
       isCustom: true,
-      capabilities: null,
+      capabilities: customModelCapabilities,
     });
   }
 

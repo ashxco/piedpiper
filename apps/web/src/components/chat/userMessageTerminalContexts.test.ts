@@ -4,6 +4,7 @@ import {
   buildInlineTerminalContextText,
   formatInlineTerminalContextLabel,
   textContainsInlineTerminalContextLabels,
+  splitInlineSegmentWhitespace,
 } from "./userMessageTerminalContexts";
 
 describe("userMessageTerminalContexts", () => {
@@ -32,5 +33,23 @@ describe("userMessageTerminalContexts", () => {
         { header: "Terminal 1 lines 12-13" },
       ]),
     ).toBe(false);
+  });
+});
+
+describe("splitInlineSegmentWhitespace", () => {
+  it("separates the whitespace at a segment's edges", () => {
+    expect(splitInlineSegmentWhitespace("\n before\nafter ")).toEqual({
+      leading: "\n ",
+      content: "before\nafter",
+      trailing: " ",
+    });
+  });
+
+  it("keeps whitespace-only text as whitespace", () => {
+    expect(splitInlineSegmentWhitespace(" \n")).toEqual({
+      leading: " \n",
+      content: "",
+      trailing: "",
+    });
   });
 });

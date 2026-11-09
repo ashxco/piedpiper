@@ -10,6 +10,7 @@ import {
   ProjectionThread,
   ProjectionThreadRepository,
   type ProjectionThreadRepositoryShape,
+  TouchProjectionThreadUpdatedAtInput,
 } from "../Services/ProjectionThreads.ts";
 import { ModelSelection } from "@piedpiper/contracts";
 
@@ -123,6 +124,16 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
       `,
   });
 
+  const touchProjectionThreadUpdatedAtRow = SqlSchema.void({
+    Request: TouchProjectionThreadUpdatedAtInput,
+    execute: ({ threadId, updatedAt }) =>
+      sql`
+        UPDATE projection_threads
+        SET updated_at = ${updatedAt}
+        WHERE thread_id = ${threadId}
+      `,
+  });
+
   const deleteProjectionThreadRow = SqlSchema.void({
     Request: DeleteProjectionThreadInput,
     execute: ({ threadId }) =>
@@ -142,6 +153,11 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
       Effect.mapError(toPersistenceSqlError("ProjectionThreadRepository.getById:query")),
     );
 
+  const touchUpdatedAt: ProjectionThreadRepositoryShape["touchUpdatedAt"] = (input) =>
+    touchProjectionThreadUpdatedAtRow(input).pipe(
+      Effect.mapError(toPersistenceSqlError("ProjectionThreadRepository.touchUpdatedAt:query")),
+    );
+
   const listByProjectId: ProjectionThreadRepositoryShape["listByProjectId"] = (input) =>
     listProjectionThreadRows(input).pipe(
       Effect.mapError(toPersistenceSqlError("ProjectionThreadRepository.listByProjectId:query")),
@@ -155,6 +171,7 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
   return {
     upsert,
     getById,
+    touchUpdatedAt,
     listByProjectId,
     deleteById,
   } satisfies ProjectionThreadRepositoryShape;

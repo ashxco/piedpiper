@@ -30,7 +30,7 @@ interface MutableDirectoryNode {
   files: TurnDiffTreeFileNode[];
 }
 
-const SORT_LOCALE_OPTIONS: Intl.CollatorOptions = { numeric: true, sensitivity: "base" };
+let sortCollator: Intl.Collator | undefined;
 
 function normalizePathSegments(pathValue: string): string[] {
   return pathValue
@@ -40,7 +40,9 @@ function normalizePathSegments(pathValue: string): string[] {
 }
 
 function compareByName(a: { name: string }, b: { name: string }): number {
-  return a.name.localeCompare(b.name, undefined, SORT_LOCALE_OPTIONS);
+  // localeCompare with options builds a fresh ICU collator per call; reuse one.
+  sortCollator ??= new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
+  return sortCollator.compare(a.name, b.name);
 }
 
 function readStat(file: TurnDiffFileChange): TurnDiffStat | null {
@@ -54,14 +56,8 @@ function readStat(file: TurnDiffFileChange): TurnDiffStat | null {
 }
 
 function compactDirectoryNode(node: TurnDiffTreeDirectoryNode): TurnDiffTreeDirectoryNode {
-  const compactedChildren = node.children.map((child) =>
-    child.kind === "directory" ? compactDirectoryNode(child) : child,
-  );
-
-  let compactedNode: TurnDiffTreeDirectoryNode = {
-    ...node,
-    children: compactedChildren,
-  };
+  // Children come from toTreeNodes, which already compacted them bottom-up.
+  let compactedNode = node;
 
   while (compactedNode.children.length === 1 && compactedNode.children[0]?.kind === "directory") {
     const onlyChild = compactedNode.children[0];
@@ -169,4 +165,28 @@ export function buildTurnDiffTree(files: ReadonlyArray<TurnDiffFileChange>): Tur
   }
 
   return toTreeNodes(root);
+}
+
+function collectTreeFilePaths(nodes: ReadonlyArray<TurnDiffTreeNode>, paths: string[]): string[] {
+  for (const node of nodes) {
+    if (node.kind === "file") paths.push(node.path);
+    else collectTreeFilePaths(node.children, paths);
+  }
+  return paths;
+}
+
+/** Orders a flat list as `buildTurnDiffTree` shows it; paths the tree cannot place sort last. */
+export function orderDiffFilesLikeTree<T>(
+  files: ReadonlyArray<T>,
+  getPath: (file: T) => string,
+): T[] {
+  const paths = files.map(getPath);
+  const treePaths = collectTreeFilePaths(buildTurnDiffTree(paths.map((path) => ({ path }))), []);
+  const positions = new Map(treePaths.map((path, index) => [path, index] as const));
+  const positionOf = (path: string) =>
+    positions.get(normalizePathSegments(path).join("/")) ?? treePaths.length;
+  return files
+    .map((file, index) => ({ file, position: positionOf(paths[index]!) }))
+    .toSorted((left, right) => left.position - right.position)
+    .map(({ file }) => file);
 }

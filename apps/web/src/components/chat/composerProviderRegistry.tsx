@@ -7,7 +7,12 @@ import {
 import { isClaudeUltrathinkPrompt, resolveEffort } from "@piedpiper/shared/model";
 import type { ReactNode } from "react";
 import { getProviderModelCapabilities } from "../../providerModels";
-import { TraitsMenuContent, TraitsPicker } from "./TraitsPicker";
+import {
+  type PromptUltrathink,
+  type TraitsPickerOpenControl,
+  TraitsMenuContent,
+  TraitsPicker,
+} from "./TraitsPicker";
 import {
   normalizeClaudeModelOptionsWithCapabilities,
   normalizeCodexModelOptionsWithCapabilities,
@@ -37,17 +42,19 @@ type ProviderRegistryEntry = {
     model: string;
     models: ReadonlyArray<ServerProviderModel>;
     modelOptions: ProviderModelOptions[ProviderKind] | undefined;
-    prompt: string;
-    onPromptChange: (prompt: string) => void;
+    promptUltrathink: PromptUltrathink;
+    onPromptEdit: (edit: (prompt: string) => string) => void;
   }) => ReactNode;
-  renderTraitsPicker: (input: {
-    threadId: ThreadId;
-    model: string;
-    models: ReadonlyArray<ServerProviderModel>;
-    modelOptions: ProviderModelOptions[ProviderKind] | undefined;
-    prompt: string;
-    onPromptChange: (prompt: string) => void;
-  }) => ReactNode;
+  renderTraitsPicker: (
+    input: {
+      threadId: ThreadId;
+      model: string;
+      models: ReadonlyArray<ServerProviderModel>;
+      modelOptions: ProviderModelOptions[ProviderKind] | undefined;
+      promptUltrathink: PromptUltrathink;
+      onPromptEdit: (edit: (prompt: string) => string) => void;
+    } & TraitsPickerOpenControl,
+  ) => ReactNode;
 };
 
 function getProviderStateFromCapabilities(
@@ -96,8 +103,8 @@ const composerProviderRegistry: Record<ProviderKind, ProviderRegistryEntry> = {
       model,
       models,
       modelOptions,
-      prompt,
-      onPromptChange,
+      promptUltrathink,
+      onPromptEdit,
     }) => (
       <TraitsMenuContent
         provider="codex"
@@ -105,19 +112,34 @@ const composerProviderRegistry: Record<ProviderKind, ProviderRegistryEntry> = {
         threadId={threadId}
         model={model}
         modelOptions={modelOptions}
-        prompt={prompt}
-        onPromptChange={onPromptChange}
+        promptUltrathink={promptUltrathink}
+        onPromptEdit={onPromptEdit}
       />
     ),
-    renderTraitsPicker: ({ threadId, model, models, modelOptions, prompt, onPromptChange }) => (
+    renderTraitsPicker: ({
+      threadId,
+      model,
+      models,
+      modelOptions,
+      promptUltrathink,
+      onPromptEdit,
+      open,
+      onOpenChange,
+      triggerTitle,
+      iconOnly,
+    }) => (
       <TraitsPicker
         provider="codex"
         models={models}
         threadId={threadId}
         model={model}
         modelOptions={modelOptions}
-        prompt={prompt}
-        onPromptChange={onPromptChange}
+        promptUltrathink={promptUltrathink}
+        onPromptEdit={onPromptEdit}
+        open={open}
+        onOpenChange={onOpenChange}
+        triggerTitle={triggerTitle}
+        iconOnly={iconOnly}
       />
     ),
   },
@@ -128,8 +150,8 @@ const composerProviderRegistry: Record<ProviderKind, ProviderRegistryEntry> = {
       model,
       models,
       modelOptions,
-      prompt,
-      onPromptChange,
+      promptUltrathink,
+      onPromptEdit,
     }) => (
       <TraitsMenuContent
         provider="claudeAgent"
@@ -137,19 +159,34 @@ const composerProviderRegistry: Record<ProviderKind, ProviderRegistryEntry> = {
         threadId={threadId}
         model={model}
         modelOptions={modelOptions}
-        prompt={prompt}
-        onPromptChange={onPromptChange}
+        promptUltrathink={promptUltrathink}
+        onPromptEdit={onPromptEdit}
       />
     ),
-    renderTraitsPicker: ({ threadId, model, models, modelOptions, prompt, onPromptChange }) => (
+    renderTraitsPicker: ({
+      threadId,
+      model,
+      models,
+      modelOptions,
+      promptUltrathink,
+      onPromptEdit,
+      open,
+      onOpenChange,
+      triggerTitle,
+      iconOnly,
+    }) => (
       <TraitsPicker
         provider="claudeAgent"
         models={models}
         threadId={threadId}
         model={model}
         modelOptions={modelOptions}
-        prompt={prompt}
-        onPromptChange={onPromptChange}
+        promptUltrathink={promptUltrathink}
+        onPromptEdit={onPromptEdit}
+        open={open}
+        onOpenChange={onOpenChange}
+        triggerTitle={triggerTitle}
+        iconOnly={iconOnly}
       />
     ),
   },
@@ -165,34 +202,40 @@ export function renderProviderTraitsMenuContent(input: {
   model: string;
   models: ReadonlyArray<ServerProviderModel>;
   modelOptions: ProviderModelOptions[ProviderKind] | undefined;
-  prompt: string;
-  onPromptChange: (prompt: string) => void;
+  promptUltrathink: PromptUltrathink;
+  onPromptEdit: (edit: (prompt: string) => string) => void;
 }): ReactNode {
   return composerProviderRegistry[input.provider].renderTraitsMenuContent({
     threadId: input.threadId,
     model: input.model,
     models: input.models,
     modelOptions: input.modelOptions,
-    prompt: input.prompt,
-    onPromptChange: input.onPromptChange,
+    promptUltrathink: input.promptUltrathink,
+    onPromptEdit: input.onPromptEdit,
   });
 }
 
-export function renderProviderTraitsPicker(input: {
-  provider: ProviderKind;
-  threadId: ThreadId;
-  model: string;
-  models: ReadonlyArray<ServerProviderModel>;
-  modelOptions: ProviderModelOptions[ProviderKind] | undefined;
-  prompt: string;
-  onPromptChange: (prompt: string) => void;
-}): ReactNode {
+export function renderProviderTraitsPicker(
+  input: {
+    provider: ProviderKind;
+    threadId: ThreadId;
+    model: string;
+    models: ReadonlyArray<ServerProviderModel>;
+    modelOptions: ProviderModelOptions[ProviderKind] | undefined;
+    promptUltrathink: PromptUltrathink;
+    onPromptEdit: (edit: (prompt: string) => string) => void;
+  } & TraitsPickerOpenControl,
+): ReactNode {
   return composerProviderRegistry[input.provider].renderTraitsPicker({
     threadId: input.threadId,
     model: input.model,
     models: input.models,
     modelOptions: input.modelOptions,
-    prompt: input.prompt,
-    onPromptChange: input.onPromptChange,
+    promptUltrathink: input.promptUltrathink,
+    onPromptEdit: input.onPromptEdit,
+    open: input.open,
+    onOpenChange: input.onOpenChange,
+    triggerTitle: input.triggerTitle,
+    iconOnly: input.iconOnly,
   });
 }

@@ -6,7 +6,13 @@ import { Command } from "effect/unstable/cli";
 
 import { NetService } from "@piedpiper/shared/Net";
 import { cli } from "./cli";
+import { ignoreMacosTypeOfServiceEinval } from "./macosTypeOfService";
+import { keepOutboundFetchOnHttp1 } from "./outboundHttp";
 import { version } from "../package.json" with { type: "json" };
+
+// Guard sockets before anything can open an outbound connection.
+ignoreMacosTypeOfServiceEinval();
+keepOutboundFetchOnHttp1();
 
 const CliRuntimeLayer = Layer.mergeAll(NodeServices.layer, NetService.layer);
 

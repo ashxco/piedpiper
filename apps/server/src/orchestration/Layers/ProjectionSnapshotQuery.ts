@@ -5,8 +5,11 @@ import {
   NonNegativeInt,
   OrchestrationCheckpointFile,
   OrchestrationProposedPlanId,
-  OrchestrationReadModel,
+  type OrchestrationReadModel,
   ProjectScript,
+  THREAD_GOAL_ACTIVITY_KIND,
+  THREAD_MODEL_SWITCH_ACTIVITY_KIND,
+  THREAD_REASONING_ACTIVITY_KIND,
   TurnId,
   type OrchestrationCheckpointSummary,
   type OrchestrationLatestTurn,
@@ -20,6 +23,7 @@ import {
   ProjectId,
   ThreadId,
 } from "@piedpiper/contracts";
+import { normalizeWorktreePathForComparison } from "@piedpiper/shared/path";
 import { Effect, Layer, Option, Schema, Struct } from "effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as SqlSchema from "effect/unstable/sql/SqlSchema";
@@ -30,6 +34,7 @@ import {
   toPersistenceSqlError,
   type ProjectionRepositoryError,
 } from "../../persistence/Errors.ts";
+import { projectSnapshotActivities } from "../ActivityPayloadProjection.ts";
 import { ProjectionCheckpoint } from "../../persistence/Services/ProjectionCheckpoints.ts";
 import { ProjectionProject } from "../../persistence/Services/ProjectionProjects.ts";
 import { ProjectionState } from "../../persistence/Services/ProjectionState.ts";
@@ -46,7 +51,6 @@ import {
   type ProjectionSnapshotQueryShape,
 } from "../Services/ProjectionSnapshotQuery.ts";
 
-const decodeReadModel = Schema.decodeUnknownEffect(OrchestrationReadModel);
 const ProjectionProjectDbRowSchema = ProjectionProject.mapFields(
   Struct.assign({
     defaultModelSelection: Schema.NullOr(Schema.fromJsonString(ModelSelection)),
@@ -59,6 +63,15 @@ const ProjectionThreadMessageDbRowSchema = ProjectionThreadMessage.mapFields(
     attachments: Schema.NullOr(Schema.fromJsonString(Schema.Array(ChatAttachment))),
   }),
 );
+// Match the projector's in-memory per-thread retention so the snapshot never decodes rows it would drop.
+const SNAPSHOT_THREAD_ACTIVITY_LIMIT = 500;
+const SNAPSHOT_THREAD_MESSAGE_LIMIT = 2_000;
+// Dividers sit above user messages, which outlive the activity window; matches the projector cap.
+const SNAPSHOT_THREAD_MODEL_SWITCH_LIMIT = SNAPSHOT_THREAD_MESSAGE_LIMIT;
+// Thinking blocks have their own window so they never evict tool rows; matches the projector cap.
+const SNAPSHOT_THREAD_REASONING_LIMIT = 200;
+// Matches MAX_THREAD_GOAL_ACTIVITIES in projector.ts.
+const SNAPSHOT_THREAD_GOAL_LIMIT = 20;
 const ProjectionThreadProposedPlanDbRowSchema = ProjectionThreadProposedPlan;
 const ProjectionThreadDbRowSchema = ProjectionThread.mapFields(
   Struct.assign({
@@ -177,6 +190,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           scripts_json AS "scripts",
           created_at AS "createdAt",
           updated_at AS "updatedAt",
+          archived_at AS "archivedAt",
+          favicon_path AS "faviconPath",
           deleted_at AS "deletedAt"
         FROM projection_projects
         WHERE deleted_at IS NULL
@@ -214,18 +229,37 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     Result: ProjectionThreadMessageDbRowSchema,
     execute: () =>
       sql`
+        WITH kept_messages AS (
+          SELECT message_id
+          FROM (
+            -- Rank key columns only so the window sort does not carry message text.
+            SELECT
+              message.message_id,
+              ROW_NUMBER() OVER (
+                PARTITION BY message.thread_id
+                ORDER BY message.created_at DESC, message.message_id DESC
+              ) AS recency_rank
+            FROM projection_thread_messages AS message
+            INNER JOIN projection_threads AS thread
+              ON thread.thread_id = message.thread_id
+              AND thread.deleted_at IS NULL
+          )
+          WHERE recency_rank <= ${SNAPSHOT_THREAD_MESSAGE_LIMIT}
+        )
         SELECT
-          message_id AS "messageId",
-          thread_id AS "threadId",
-          turn_id AS "turnId",
-          role,
-          text,
-          attachments_json AS "attachments",
-          is_streaming AS "isStreaming",
-          created_at AS "createdAt",
-          updated_at AS "updatedAt"
-        FROM projection_thread_messages
-        ORDER BY thread_id ASC, created_at ASC, message_id ASC
+          message.message_id AS "messageId",
+          message.thread_id AS "threadId",
+          message.turn_id AS "turnId",
+          message.role,
+          message.text,
+          message.attachments_json AS "attachments",
+          message.is_streaming AS "isStreaming",
+          message.created_at AS "createdAt",
+          message.updated_at AS "updatedAt"
+        FROM projection_thread_messages AS message
+        INNER JOIN kept_messages AS kept
+          ON kept.message_id = message.message_id
+        ORDER BY message.thread_id ASC, message.created_at ASC, message.message_id ASC
       `,
   });
 
@@ -253,23 +287,174 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     Result: ProjectionThreadActivityDbRowSchema,
     execute: () =>
       sql`
+        WITH ranked_activities AS (
+          -- Rank key columns only; model-switch dividers and thinking blocks get their own windows.
+          SELECT
+            activity.activity_id,
+            activity.thread_id,
+            activity.kind,
+            activity.kind = ${THREAD_MODEL_SWITCH_ACTIVITY_KIND} AS is_model_switch,
+            activity.kind = ${THREAD_REASONING_ACTIVITY_KIND} AS is_reasoning,
+            activity.kind = ${THREAD_GOAL_ACTIVITY_KIND} AS is_goal,
+            ROW_NUMBER() OVER (
+              PARTITION BY
+                activity.thread_id,
+                activity.kind = ${THREAD_MODEL_SWITCH_ACTIVITY_KIND},
+                activity.kind = ${THREAD_REASONING_ACTIVITY_KIND},
+                activity.kind = ${THREAD_GOAL_ACTIVITY_KIND}
+              ORDER BY
+                CASE WHEN activity.sequence IS NULL THEN 0 ELSE 1 END DESC,
+                activity.sequence DESC,
+                activity.created_at DESC,
+                activity.activity_id DESC
+            ) AS recency_rank
+          FROM projection_thread_activities AS activity
+          INNER JOIN projection_threads AS thread
+            ON thread.thread_id = activity.thread_id
+            AND thread.deleted_at IS NULL
+        ),
+        closed_requests AS (
+          SELECT DISTINCT
+            thread_id,
+            json_extract(payload_json, '$.requestId') AS request_id
+          FROM projection_thread_activities
+          WHERE kind IN ('approval.resolved', 'user-input.resolved')
+            OR (
+              kind IN ('provider.approval.respond.failed', 'provider.user-input.respond.failed')
+              AND (
+                lower(COALESCE(json_extract(payload_json, '$.detail'), ''))
+                  LIKE '%stale pending % request%'
+                OR lower(COALESCE(json_extract(payload_json, '$.detail'), ''))
+                  LIKE '%unknown pending % request%'
+              )
+            )
+        ),
+        request_activities AS (
+          -- Only the newest row per request is a pin candidate, so re-emitted requests are not duplicated.
+          SELECT
+            activity.activity_id,
+            activity.thread_id,
+            activity.kind,
+            json_extract(activity.payload_json, '$.requestId') AS request_id,
+            ROW_NUMBER() OVER (
+              PARTITION BY
+                activity.thread_id,
+                activity.kind,
+                json_extract(activity.payload_json, '$.requestId')
+              ORDER BY activity.created_at DESC, activity.activity_id DESC
+            ) AS request_order
+          FROM projection_thread_activities AS activity
+          WHERE activity.kind IN ('approval.requested', 'user-input.requested')
+        ),
+        pinned_requests AS (
+          SELECT request.activity_id
+          FROM request_activities AS request
+          INNER JOIN ranked_activities AS ranked
+            ON ranked.activity_id = request.activity_id
+          WHERE ranked.recency_rank > ${SNAPSHOT_THREAD_ACTIVITY_LIMIT}
+            AND request.request_order = 1
+            AND request.request_id IS NOT NULL
+            AND (
+              request.kind = 'user-input.requested'
+              OR EXISTS (
+                SELECT 1
+                FROM projection_pending_approvals AS pending
+                WHERE pending.thread_id = request.thread_id
+                  AND pending.status = 'pending'
+                  AND pending.request_id = request.request_id
+              )
+            )
+            AND NOT EXISTS (
+              SELECT 1
+              FROM closed_requests AS closed
+              WHERE closed.thread_id = request.thread_id
+                AND closed.request_id = request.request_id
+            )
+        ),
+        held_answers AS (
+          -- An answer waiting for its turn to settle must survive a reload to be delivered.
+          SELECT activity_id
+          FROM projection_thread_activities
+          WHERE kind = 'user-input.resolved'
+            AND json_extract(payload_json, '$.held') = 1
+        ),
+        open_tasks AS (
+          -- A running task's start cannot be recovered; the created_at check keeps a restarted id open.
+          SELECT started.activity_id
+          FROM projection_thread_activities AS started
+          INNER JOIN projection_threads AS thread
+            ON thread.thread_id = started.thread_id
+            AND thread.deleted_at IS NULL
+          WHERE started.kind = 'task.started'
+            AND NOT EXISTS (
+              SELECT 1
+              FROM projection_thread_activities AS done
+              WHERE done.thread_id = started.thread_id
+                AND done.kind = 'task.completed'
+                AND json_extract(done.payload_json, '$.taskId') =
+                  json_extract(started.payload_json, '$.taskId')
+                AND done.created_at >= started.created_at
+            )
+        ),
+        latest_plans AS (
+          -- The newest plan per thread stays, so an unfinished earlier task list survives a reload.
+          SELECT activity_id
+          FROM (
+            SELECT
+              activity.activity_id,
+              ROW_NUMBER() OVER (
+                PARTITION BY activity.thread_id
+                ORDER BY
+                  CASE WHEN activity.sequence IS NULL THEN 0 ELSE 1 END DESC,
+                  activity.sequence DESC,
+                  activity.created_at DESC,
+                  activity.activity_id DESC
+              ) AS plan_order
+            FROM projection_thread_activities AS activity
+            INNER JOIN projection_threads AS thread
+              ON thread.thread_id = activity.thread_id
+              AND thread.deleted_at IS NULL
+            WHERE activity.kind = 'turn.plan.updated'
+          )
+          WHERE plan_order = 1
+        ),
+        kept_activities AS (
+          SELECT activity_id
+          FROM ranked_activities
+          WHERE recency_rank <= CASE
+            WHEN is_model_switch THEN ${SNAPSHOT_THREAD_MODEL_SWITCH_LIMIT}
+            WHEN is_reasoning THEN ${SNAPSHOT_THREAD_REASONING_LIMIT}
+            WHEN is_goal THEN ${SNAPSHOT_THREAD_GOAL_LIMIT}
+            ELSE ${SNAPSHOT_THREAD_ACTIVITY_LIMIT}
+          END
+          UNION
+          SELECT activity_id FROM pinned_requests
+          UNION
+          SELECT activity_id FROM held_answers
+          UNION
+          SELECT activity_id FROM open_tasks
+          UNION
+          SELECT activity_id FROM latest_plans
+        )
         SELECT
-          activity_id AS "activityId",
-          thread_id AS "threadId",
-          turn_id AS "turnId",
-          tone,
-          kind,
-          summary,
-          payload_json AS "payload",
-          sequence,
-          created_at AS "createdAt"
-        FROM projection_thread_activities
+          activity.activity_id AS "activityId",
+          activity.thread_id AS "threadId",
+          activity.turn_id AS "turnId",
+          activity.tone,
+          activity.kind,
+          activity.summary,
+          activity.payload_json AS "payload",
+          activity.sequence,
+          activity.created_at AS "createdAt"
+        FROM projection_thread_activities AS activity
+        INNER JOIN kept_activities AS kept
+          ON kept.activity_id = activity.activity_id
         ORDER BY
-          thread_id ASC,
-          CASE WHEN sequence IS NULL THEN 0 ELSE 1 END ASC,
-          sequence ASC,
-          created_at ASC,
-          activity_id ASC
+          activity.thread_id ASC,
+          CASE WHEN activity.sequence IS NULL THEN 0 ELSE 1 END ASC,
+          activity.sequence ASC,
+          activity.created_at ASC,
+          activity.activity_id ASC
       `,
   });
 
@@ -371,12 +556,36 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           scripts_json AS "scripts",
           created_at AS "createdAt",
           updated_at AS "updatedAt",
+          archived_at AS "archivedAt",
+          favicon_path AS "faviconPath",
           deleted_at AS "deletedAt"
         FROM projection_projects
         WHERE workspace_root = ${workspaceRoot}
           AND deleted_at IS NULL
         ORDER BY created_at ASC, project_id ASC
         LIMIT 1
+      `,
+  });
+
+  const listActiveProjectRows = SqlSchema.findAll({
+    Request: Schema.Void,
+    Result: ProjectionProjectLookupRowSchema,
+    execute: () =>
+      sql`
+        SELECT
+          project_id AS "projectId",
+          title,
+          workspace_root AS "workspaceRoot",
+          default_model_selection_json AS "defaultModelSelection",
+          scripts_json AS "scripts",
+          created_at AS "createdAt",
+          updated_at AS "updatedAt",
+          archived_at AS "archivedAt",
+          favicon_path AS "faviconPath",
+          deleted_at AS "deletedAt"
+        FROM projection_projects
+        WHERE deleted_at IS NULL
+        ORDER BY created_at ASC, project_id ASC
       `,
   });
 
@@ -662,6 +871,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             scripts: row.scripts,
             createdAt: row.createdAt,
             updatedAt: row.updatedAt,
+            archivedAt: row.archivedAt,
+            faviconPath: row.faviconPath,
             deletedAt: row.deletedAt,
           }));
 
@@ -681,23 +892,18 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             deletedAt: row.deletedAt,
             messages: messagesByThread.get(row.threadId) ?? [],
             proposedPlans: proposedPlansByThread.get(row.threadId) ?? [],
-            activities: activitiesByThread.get(row.threadId) ?? [],
+            activities: projectSnapshotActivities(activitiesByThread.get(row.threadId) ?? []),
             checkpoints: checkpointsByThread.get(row.threadId) ?? [],
             session: sessionsByThread.get(row.threadId) ?? null,
           }));
 
-          const snapshot = {
+          // Rows were already decoded by SqlSchema; re-decoding the whole model scales with history.
+          return {
             snapshotSequence: computeSnapshotSequence(stateRows),
             projects,
             threads,
             updatedAt: updatedAt ?? new Date(0).toISOString(),
-          };
-
-          return yield* decodeReadModel(snapshot).pipe(
-            Effect.mapError(
-              toPersistenceDecodeError("ProjectionSnapshotQuery.getSnapshot:decodeReadModel"),
-            ),
-          );
+          } satisfies OrchestrationReadModel;
         }),
       )
       .pipe(
@@ -728,6 +934,20 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
   const getActiveProjectByWorkspaceRoot: ProjectionSnapshotQueryShape["getActiveProjectByWorkspaceRoot"] =
     (workspaceRoot) =>
       getActiveProjectRowByWorkspaceRoot({ workspaceRoot }).pipe(
+        // Falls back to the decider's compare, or a miss here makes its project.create fail.
+        Effect.flatMap((exactRow) =>
+          Option.isSome(exactRow)
+            ? Effect.succeed(exactRow)
+            : listActiveProjectRows(undefined).pipe(
+                Effect.map((rows) => {
+                  const key = normalizeWorktreePathForComparison(workspaceRoot);
+                  const row = rows.find(
+                    (entry) => normalizeWorktreePathForComparison(entry.workspaceRoot) === key,
+                  );
+                  return row === undefined ? Option.none() : Option.some(row);
+                }),
+              ),
+        ),
         Effect.mapError(
           toPersistenceSqlOrDecodeError(
             "ProjectionSnapshotQuery.getActiveProjectByWorkspaceRoot:query",
@@ -744,6 +964,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
               scripts: row.scripts,
               createdAt: row.createdAt,
               updatedAt: row.updatedAt,
+              archivedAt: row.archivedAt,
+              faviconPath: row.faviconPath,
               deletedAt: row.deletedAt,
             }),
           ),
@@ -806,12 +1028,31 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       });
     });
 
+  const getThreadWorkspaceContext: ProjectionSnapshotQueryShape["getThreadWorkspaceContext"] = (
+    threadId,
+  ) =>
+    getThreadCheckpointContextThreadRow({ threadId }).pipe(
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          "ProjectionSnapshotQuery.getThreadWorkspaceContext:getThread:query",
+          "ProjectionSnapshotQuery.getThreadWorkspaceContext:getThread:decodeRow",
+        ),
+      ),
+      Effect.map(
+        Option.map((row) => ({
+          workspaceRoot: row.workspaceRoot,
+          worktreePath: row.worktreePath,
+        })),
+      ),
+    );
+
   return {
     getSnapshot,
     getCounts,
     getActiveProjectByWorkspaceRoot,
     getFirstActiveThreadIdByProjectId,
     getThreadCheckpointContext,
+    getThreadWorkspaceContext,
   } satisfies ProjectionSnapshotQueryShape;
 });
 

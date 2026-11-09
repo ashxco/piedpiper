@@ -8,6 +8,16 @@ export function shouldHideCollapsedToastContent(
   return visibleToastIndex > 0;
 }
 
+/** The text a toast's copy button copies, or null when the toast has no such button. */
+export function resolveCopyableToastErrorText(toast: {
+  type?: string | undefined;
+  description?: unknown;
+  data?: { hideCopyButton?: boolean | undefined } | undefined;
+}): string | null {
+  if (toast.type !== "error" || toast.data?.hideCopyButton) return null;
+  return typeof toast.description === "string" ? toast.description : null;
+}
+
 type ToastWithHeight = {
   height?: number | null | undefined;
 };

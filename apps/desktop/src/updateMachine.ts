@@ -23,6 +23,22 @@ export function createInitialDesktopUpdateState(
   };
 }
 
+export function createConfiguredDesktopUpdateState(
+  currentVersion: string,
+  runtimeInfo: DesktopRuntimeInfo,
+  disabledReason: string | null,
+  notAppliedVersion: string | null = null,
+): DesktopUpdateState {
+  const enabled = disabledReason === null;
+  return {
+    ...createInitialDesktopUpdateState(currentVersion, runtimeInfo),
+    enabled,
+    status: enabled ? "idle" : "disabled",
+    message: disabledReason,
+    ...(notAppliedVersion === null ? {} : { notAppliedVersion }),
+  };
+}
+
 export function reduceDesktopUpdateStateOnCheckStart(
   state: DesktopUpdateState,
   checkedAt: string,
@@ -32,7 +48,7 @@ export function reduceDesktopUpdateStateOnCheckStart(
     status: "checking",
     checkedAt,
     message: null,
-    downloadPercent: null,
+    downloadPercent: state.downloadedVersion === null ? null : 100,
     errorContext: null,
     canRetry: false,
   };
@@ -43,6 +59,19 @@ export function reduceDesktopUpdateStateOnCheckFailure(
   message: string,
   checkedAt: string,
 ): DesktopUpdateState {
+  // A failed refresh says nothing about the queued installer, which can still be installed.
+  if (state.downloadedVersion !== null) {
+    return {
+      ...state,
+      status: "downloaded",
+      message: null,
+      checkedAt,
+      downloadPercent: 100,
+      errorContext: null,
+      canRetry: true,
+    };
+  }
+
   return {
     ...state,
     status: "error",
@@ -59,16 +88,17 @@ export function reduceDesktopUpdateStateOnUpdateAvailable(
   version: string,
   checkedAt: string,
 ): DesktopUpdateState {
+  const isDownloadedVersion = state.downloadedVersion === version;
   return {
     ...state,
-    status: "available",
+    status: isDownloadedVersion ? "downloaded" : "available",
     availableVersion: version,
-    downloadedVersion: null,
-    downloadPercent: null,
+    downloadedVersion: isDownloadedVersion ? version : null,
+    downloadPercent: isDownloadedVersion ? 100 : null,
     checkedAt,
     message: null,
     errorContext: null,
-    canRetry: false,
+    canRetry: isDownloadedVersion,
   };
 }
 
@@ -76,6 +106,19 @@ export function reduceDesktopUpdateStateOnNoUpdate(
   state: DesktopUpdateState,
   checkedAt: string,
 ): DesktopUpdateState {
+  if (state.downloadedVersion !== null) {
+    return {
+      ...state,
+      status: "downloaded",
+      availableVersion: state.downloadedVersion,
+      downloadPercent: 100,
+      checkedAt,
+      message: null,
+      errorContext: null,
+      canRetry: true,
+    };
+  }
+
   return {
     ...state,
     status: "up-to-date",
@@ -150,11 +193,44 @@ export function reduceDesktopUpdateStateOnInstallFailure(
   state: DesktopUpdateState,
   message: string,
 ): DesktopUpdateState {
+  // The installer stays queued: this status keeps the install action and shows why it failed.
   return {
     ...state,
-    status: "downloaded",
+    status: "error",
     message,
     errorContext: "install",
     canRetry: true,
   };
+}
+
+/**
+ * A queued installer can be installed unless a download owns the updater. A check holds it back
+ * only until `checkStillRunning` says waiting is over: installing touches nothing a check does.
+ */
+export function canInstallDownloadedUpdate(
+  state: DesktopUpdateState,
+  options?: { readonly checkStillRunning?: boolean },
+): boolean {
+  if (state.downloadedVersion === null) return false;
+  return (
+    state.status === "downloaded" ||
+    (state.status === "checking" && options?.checkStillRunning === true) ||
+    (state.status === "error" && (state.errorContext === null || state.errorContext === "install"))
+  );
+}
+
+/** The install this app handed to the OS installer, saved right before it quits. */
+export interface DesktopUpdateInstallRecord {
+  readonly fromVersion: string;
+  readonly targetVersion: string;
+}
+
+/** The version the last install failed to apply, when the app came back on the version it left. */
+export function resolveNotAppliedInstallVersion(
+  record: DesktopUpdateInstallRecord,
+  appVersion: string,
+): string | null {
+  return record.fromVersion === appVersion && record.targetVersion !== appVersion
+    ? record.targetVersion
+    : null;
 }

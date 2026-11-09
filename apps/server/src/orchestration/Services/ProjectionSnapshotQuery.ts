@@ -69,6 +69,14 @@ export interface ProjectionSnapshotQueryShape {
   readonly getThreadCheckpointContext: (
     threadId: ThreadId,
   ) => Effect.Effect<Option.Option<ProjectionThreadCheckpointContext>, ProjectionRepositoryError>;
+
+  /** Only the thread's folders, for a caller that must not load its checkpoint rows. */
+  readonly getThreadWorkspaceContext: (
+    threadId: ThreadId,
+  ) => Effect.Effect<
+    Option.Option<{ readonly workspaceRoot: string; readonly worktreePath: string | null }>,
+    ProjectionRepositoryError
+  >;
 }
 
 /**

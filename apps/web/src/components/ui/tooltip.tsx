@@ -1,15 +1,157 @@
 import { Tooltip as TooltipPrimitive } from "@base-ui/react/tooltip";
+import {
+  createContext,
+  use,
+  useEffect,
+  useMemo,
+  useRef,
+  type ComponentProps,
+  type RefObject,
+} from "react";
 
 import { cn } from "~/lib/utils";
-
-const TooltipCreateHandle = TooltipPrimitive.createHandle;
+import { appCollisionPadding } from "./tooltipCollisionPadding";
 
 const TooltipProvider = TooltipPrimitive.Provider;
 
-const Tooltip = TooltipPrimitive.Root;
+/** Auto-scroll has no user input behind it, so it leaves hover tooltips alone. */
+const USER_SCROLL_INPUT_WINDOW_MS = 400;
+
+type TooltipActionsRef = RefObject<TooltipPrimitive.Root.Actions | null>;
+
+interface HoveredTooltip {
+  readonly trigger: HTMLElement;
+  readonly actionsRef: TooltipActionsRef;
+  // A pending hover-open survives `close()` in Base UI, so `Tooltip` cancels it through this flag.
+  readonly dismissedRef: RefObject<boolean>;
+}
+
+// Module-level because the React Compiler rejects writing to a context value in a component.
+function setHovered(hovered: RefObject<HoveredTooltip | null>, value: HoveredTooltip | null) {
+  hovered.current = value;
+}
+
+function setDismissed(hoverContext: Pick<HoveredTooltip, "dismissedRef">, value: boolean) {
+  hoverContext.dismissedRef.current = value;
+}
+
+// Keyboard focus only: Chromium leaves focus on a clicked button, which must not pin its tooltip.
+function hasKeyboardFocus(trigger: HTMLElement): boolean {
+  return trigger.matches(":focus-visible") || trigger.querySelector(":focus-visible") !== null;
+}
+
+const TooltipScrollContext = createContext<RefObject<HoveredTooltip | null> | null>(null);
+const TooltipHoverContext = createContext<Pick<
+  HoveredTooltip,
+  "actionsRef" | "dismissedRef"
+> | null>(null);
+
+/** Dismisses the hovered descendant tooltip when the user scrolls; takes a plain div's props. */
+function TooltipScrollDismissArea({
+  onKeyDownCapture,
+  onScrollCapture,
+  onTouchMoveCapture,
+  onWheelCapture,
+  ...props
+}: ComponentProps<"div">) {
+  const hovered = useRef<HoveredTooltip | null>(null);
+  const lastUserInputAt = useRef(Number.NEGATIVE_INFINITY);
+  const markUserInput = () => {
+    lastUserInputAt.current = performance.now();
+  };
+  return (
+    <TooltipScrollContext value={hovered}>
+      <div
+        {...props}
+        onKeyDownCapture={(event) => {
+          onKeyDownCapture?.(event);
+          markUserInput();
+        }}
+        onScrollCapture={(event) => {
+          onScrollCapture?.(event);
+          const tooltip = hovered.current;
+          if (
+            !tooltip ||
+            performance.now() - lastUserInputAt.current > USER_SCROLL_INPUT_WINDOW_MS ||
+            hasKeyboardFocus(tooltip.trigger)
+          ) {
+            return;
+          }
+          hovered.current = null;
+          tooltip.dismissedRef.current = true;
+          tooltip.actionsRef.current?.close();
+        }}
+        onTouchMoveCapture={(event) => {
+          onTouchMoveCapture?.(event);
+          markUserInput();
+        }}
+        onWheelCapture={(event) => {
+          onWheelCapture?.(event);
+          markUserInput();
+        }}
+      />
+    </TooltipScrollContext>
+  );
+}
+
+function Tooltip<Payload>(props: TooltipPrimitive.Root.Props<Payload>) {
+  const hovered = use(TooltipScrollContext);
+  const localActionsRef = useRef<TooltipPrimitive.Root.Actions | null>(null);
+  const dismissedRef = useRef(false);
+  const actionsRef = props.actionsRef ?? localActionsRef;
+  const hoverContext = useMemo(() => ({ actionsRef, dismissedRef }), [actionsRef]);
+  useEffect(
+    () => () => {
+      if (hovered?.current?.actionsRef === actionsRef) setHovered(hovered, null);
+    },
+    [actionsRef, hovered],
+  );
+
+  if (!hovered) return <TooltipPrimitive.Root {...props} />;
+  return (
+    <TooltipHoverContext value={hoverContext}>
+      <TooltipPrimitive.Root
+        {...props}
+        actionsRef={actionsRef}
+        onOpenChange={(open, details) => {
+          if (open && dismissedRef.current && details.reason === "trigger-hover") {
+            details.cancel();
+            return;
+          }
+          props.onOpenChange?.(open, details);
+          if (!open && !details.isCanceled && hovered.current?.actionsRef === actionsRef) {
+            setHovered(hovered, null);
+          }
+        }}
+      />
+    </TooltipHoverContext>
+  );
+}
 
 function TooltipTrigger(props: TooltipPrimitive.Trigger.Props) {
-  return <TooltipPrimitive.Trigger data-slot="tooltip-trigger" {...props} />;
+  const hovered = use(TooltipScrollContext);
+  const hoverContext = use(TooltipHoverContext);
+  if (!hovered || !hoverContext) {
+    return <TooltipPrimitive.Trigger data-slot="tooltip-trigger" {...props} />;
+  }
+  return (
+    <TooltipPrimitive.Trigger
+      data-slot="tooltip-trigger"
+      {...props}
+      onMouseEnter={(event) => {
+        props.onMouseEnter?.(event);
+        setDismissed(hoverContext, false);
+        setHovered(hovered, { trigger: event.currentTarget, ...hoverContext });
+      }}
+      onMouseMove={(event) => {
+        props.onMouseMove?.(event);
+        // Browsers send zero-movement moves after a scroll; only a real move rearms the tooltip.
+        if (event.movementX === 0 && event.movementY === 0) return;
+        setDismissed(hoverContext, false);
+        setHovered(hovered, { trigger: event.currentTarget, ...hoverContext });
+      }}
+    />
+  );
 }
 
 function TooltipPopup({
@@ -31,29 +173,27 @@ function TooltipPopup({
       <TooltipPrimitive.Positioner
         align={align}
         anchor={anchor}
-        className="z-50 h-(--positioner-height) w-(--positioner-width) max-w-(--available-width) transition-[top,left,right,bottom,transform] data-instant:transition-none"
+        collisionPadding={appCollisionPadding}
+        className="z-50 max-w-(--available-width) transition-[top,left,right,bottom,transform] data-instant:transition-none"
         data-slot="tooltip-positioner"
         side={side}
         sideOffset={sideOffset}
       >
         <TooltipPrimitive.Popup
           className={cn(
-            "relative flex h-(--popup-height,auto) w-(--popup-width,auto) origin-(--transform-origin) text-balance rounded-md border border-foreground/15 bg-popover text-popover-foreground text-xs shadow-[0_4px_12px_-3px_rgba(0,0,0,0.3),0_1px_3px_rgba(0,0,0,0.2)] transition-[width,height,scale,opacity] data-ending-style:scale-98 data-starting-style:scale-98 data-ending-style:opacity-0 data-starting-style:opacity-0 data-instant:duration-0",
+            "relative flex origin-(--transform-origin) text-balance rounded-md border border-foreground/15 bg-popover text-popover-foreground text-xs shadow-[0_4px_12px_-3px_rgba(0,0,0,0.3),0_1px_3px_rgba(0,0,0,0.2)] transition-[scale,opacity] data-ending-style:scale-98 data-starting-style:scale-98 data-ending-style:opacity-0 data-starting-style:opacity-0 data-instant:duration-0",
             className,
           )}
           data-slot="tooltip-popup"
           {...props}
         >
-          <TooltipPrimitive.Viewport
-            className="relative size-full overflow-clip px-(--viewport-inline-padding) py-1 [--viewport-inline-padding:--spacing(2)] data-instant:transition-none **:data-current:data-ending-style:opacity-0 **:data-current:data-starting-style:opacity-0 **:data-previous:data-ending-style:opacity-0 **:data-previous:data-starting-style:opacity-0 **:data-current:w-[calc(var(--popup-width)-2*var(--viewport-inline-padding)-2px)] **:data-previous:w-[calc(var(--popup-width)-2*var(--viewport-inline-padding)-2px)] **:data-previous:truncate **:data-current:opacity-100 **:data-previous:opacity-100 **:data-current:transition-opacity **:data-previous:transition-opacity"
-            data-slot="tooltip-viewport"
-          >
+          <div className="px-2 py-1" data-slot="tooltip-viewport">
             {children}
-          </TooltipPrimitive.Viewport>
+          </div>
         </TooltipPrimitive.Popup>
       </TooltipPrimitive.Positioner>
     </TooltipPrimitive.Portal>
   );
 }
 
-export { TooltipCreateHandle, TooltipProvider, Tooltip, TooltipTrigger, TooltipPopup };
+export { TooltipProvider, Tooltip, TooltipTrigger, TooltipPopup, TooltipScrollDismissArea };

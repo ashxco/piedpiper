@@ -1,4 +1,4 @@
-import { memo, useEffect, useRef, useState, type ReactNode } from "react";
+import { memo, useEffect, useState, useSyncExternalStore, type ReactNode } from "react";
 
 import { SPINNERS, type SpinnerDef } from "./unicodeSpinnerFrames";
 
@@ -13,6 +13,51 @@ interface UnicodeSpinnerProps {
 
 const MIN_SWITCH_MS = 5000;
 const MAX_SWITCH_MS = 10000;
+
+const REDUCED_MOTION_QUERY = "(prefers-reduced-motion: reduce)";
+
+type MatchMediaFn = (
+  query: string,
+) => Pick<MediaQueryList, "matches" | "addEventListener" | "removeEventListener">;
+
+function defaultMatchMedia(): MatchMediaFn | null {
+  if (typeof window === "undefined" || typeof window.matchMedia !== "function") return null;
+  return (query) => window.matchMedia(query);
+}
+
+/** True when the OS asks for reduced motion; false when matchMedia is unavailable or throws. */
+export function readPrefersReducedMotion(
+  matchMedia: MatchMediaFn | null = defaultMatchMedia(),
+): boolean {
+  try {
+    return matchMedia?.(REDUCED_MOTION_QUERY).matches ?? false;
+  } catch {
+    return false;
+  }
+}
+
+/** Subscribes to reduced-motion preference changes; returns the unsubscribe function. */
+export function subscribePrefersReducedMotion(
+  onChange: () => void,
+  matchMedia: MatchMediaFn | null = defaultMatchMedia(),
+): () => void {
+  try {
+    const query = matchMedia?.(REDUCED_MOTION_QUERY);
+    if (!query) return () => {};
+    query.addEventListener("change", onChange);
+    return () => query.removeEventListener("change", onChange);
+  } catch {
+    return () => {};
+  }
+}
+
+function usePrefersReducedMotion(): boolean {
+  return useSyncExternalStore(
+    (onChange) => subscribePrefersReducedMotion(onChange),
+    () => readPrefersReducedMotion(),
+    () => false,
+  );
+}
 
 function shuffledSpinners(): SpinnerDef[] {
   const arr = SPINNERS.slice();
@@ -46,66 +91,55 @@ export const UnicodeSpinner = memo(function UnicodeSpinner({
   pixel = 2,
   gap = 1,
 }: UnicodeSpinnerProps) {
-  const queueRef = useRef<SpinnerDef[] | null>(null);
-  const currentRef = useRef<SpinnerDef | null>(null);
-  const frameIdxRef = useRef(0);
-  const lastFrameAtRef = useRef(0);
-  const nextSwitchAtRef = useRef(0);
-  const [, forceRender] = useState(0);
-
-  if (queueRef.current === null || currentRef.current === null) {
-    const initial = pickInitial();
-    queueRef.current = initial.queue;
-    currentRef.current = initial.current;
-    frameIdxRef.current = 0;
-  }
+  const [seed] = useState(pickInitial);
+  const [frame, setFrame] = useState(() => ({ current: seed.current, frameIdx: 0 }));
+  const reduceMotion = usePrefersReducedMotion();
 
   useEffect(() => {
+    // Reduce Motion: hold the current frame instead of animating.
+    if (reduceMotion) return;
+    // Animation bookkeeping lives in the effect; render reads only `frame` state.
+    let queue = seed.queue.slice();
+    let current = seed.current;
+    let frameIdx = 0;
     const now0 = performance.now();
-    lastFrameAtRef.current = now0;
-    nextSwitchAtRef.current = now0 + pickSwitchDelay();
+    let lastFrameAt = now0;
+    let nextSwitchAt = now0 + pickSwitchDelay();
 
     let raf = 0;
     const loop = (now: number) => {
-      const current = currentRef.current;
-      if (current) {
-        let changed = false;
+      let changed = false;
 
-        if (now - lastFrameAtRef.current >= current.interval) {
-          lastFrameAtRef.current = now;
-          frameIdxRef.current = (frameIdxRef.current + 1) % current.frames.length;
-          changed = true;
-        }
-
-        if (now >= nextSwitchAtRef.current) {
-          let queue = queueRef.current ?? [];
-          if (queue.length === 0) {
-            queue = shuffledSpinners();
-            // Avoid an immediate back-to-back repeat across a reshuffle.
-            if (queue.length > 1 && queue[queue.length - 1]?.name === current.name) {
-              const last = queue.pop()!;
-              queue.unshift(last);
-            }
-          }
-          const next = queue.pop()!;
-          queueRef.current = queue;
-          currentRef.current = next;
-          frameIdxRef.current = 0;
-          lastFrameAtRef.current = now;
-          nextSwitchAtRef.current = now + pickSwitchDelay();
-          changed = true;
-        }
-
-        if (changed) forceRender((t) => t + 1);
+      if (now - lastFrameAt >= current.interval) {
+        lastFrameAt = now;
+        frameIdx = (frameIdx + 1) % current.frames.length;
+        changed = true;
       }
+
+      if (now >= nextSwitchAt) {
+        if (queue.length === 0) {
+          queue = shuffledSpinners();
+          // Avoid an immediate back-to-back repeat across a reshuffle.
+          if (queue.length > 1 && queue[queue.length - 1]?.name === current.name) {
+            const last = queue.pop()!;
+            queue.unshift(last);
+          }
+        }
+        current = queue.pop()!;
+        frameIdx = 0;
+        lastFrameAt = now;
+        nextSwitchAt = now + pickSwitchDelay();
+        changed = true;
+      }
+
+      if (changed) setFrame({ current, frameIdx });
       raf = requestAnimationFrame(loop);
     };
     raf = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(raf);
-  }, []);
+  }, [seed, reduceMotion]);
 
-  const current = currentRef.current!;
-  const mask = current.frames[frameIdxRef.current] ?? 0;
+  const mask = frame.current.frames[frame.frameIdx] ?? 0;
   const total = pixel * 4 + gap * 3;
 
   const cells: ReactNode[] = [];
@@ -229,49 +263,47 @@ interface UnicodeSpinnerStripProps {
 export const UnicodeSpinnerStrip = memo(function UnicodeSpinnerStrip({
   className,
 }: UnicodeSpinnerStripProps) {
-  const animRef = useRef<BrailleStripAnim>(pickRandomStripAnim());
-  const frameIdxRef = useRef(0);
-  const lastFrameAtRef = useRef(0);
-  const nextSwitchAtRef = useRef(0);
-  const colorIdxRef = useRef(0);
-  const [, forceRender] = useState(0);
+  const [seedAnim] = useState(() => pickRandomStripAnim());
+  const [frame, setFrame] = useState(() => ({ anim: seedAnim, frameIdx: 0, colorIdx: 0 }));
+  const reduceMotion = usePrefersReducedMotion();
 
   useEffect(() => {
+    if (reduceMotion) return;
+    let anim = seedAnim;
+    let frameIdx = 0;
+    let colorIdx = 0;
     const now0 = performance.now();
-    lastFrameAtRef.current = now0;
-    nextSwitchAtRef.current = now0 + STRIP_SWITCH_MS;
+    let lastFrameAt = now0;
+    let nextSwitchAt = now0 + STRIP_SWITCH_MS;
 
     let raf = 0;
     const loop = (now: number) => {
-      const anim = animRef.current;
       let changed = false;
 
-      if (now - lastFrameAtRef.current >= anim.interval) {
-        lastFrameAtRef.current = now;
-        frameIdxRef.current = (frameIdxRef.current + 1) % anim.frames.length;
+      if (now - lastFrameAt >= anim.interval) {
+        lastFrameAt = now;
+        frameIdx = (frameIdx + 1) % anim.frames.length;
         changed = true;
       }
 
-      if (now >= nextSwitchAtRef.current) {
-        const next = pickRandomStripAnim(anim.name);
-        animRef.current = next;
-        frameIdxRef.current = 0;
-        lastFrameAtRef.current = now;
-        nextSwitchAtRef.current = now + STRIP_SWITCH_MS;
-        colorIdxRef.current = (colorIdxRef.current + 1) % STRIP_COLORS.length;
+      if (now >= nextSwitchAt) {
+        anim = pickRandomStripAnim(anim.name);
+        frameIdx = 0;
+        lastFrameAt = now;
+        nextSwitchAt = now + STRIP_SWITCH_MS;
+        colorIdx = (colorIdx + 1) % STRIP_COLORS.length;
         changed = true;
       }
 
-      if (changed) forceRender((t) => t + 1);
+      if (changed) setFrame({ anim, frameIdx, colorIdx });
       raf = requestAnimationFrame(loop);
     };
     raf = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(raf);
-  }, []);
+  }, [seedAnim, reduceMotion]);
 
-  const anim = animRef.current;
-  const strip = anim.frames[frameIdxRef.current] ?? "";
-  const color = STRIP_COLORS[colorIdxRef.current] ?? STRIP_COLORS[0];
+  const strip = frame.anim.frames[frame.frameIdx] ?? "";
+  const color = STRIP_COLORS[frame.colorIdx] ?? STRIP_COLORS[0];
 
   return (
     <span

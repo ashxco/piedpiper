@@ -1,17 +1,17 @@
 import {
-  ADVISORS_PROJECT_ID,
   CommandId,
+  DEFAULT_MODEL_BY_PROVIDER,
   DEFAULT_PROVIDER_INTERACTION_MODE,
   type ModelSelection,
   ProjectId,
   ThreadId,
 } from "@piedpiper/contracts";
 import {
+  Cause,
   Data,
   Deferred,
   Effect,
   Exit,
-  FileSystem,
   Layer,
   Option,
   Path,
@@ -21,14 +21,25 @@ import {
   ServiceMap,
 } from "effect";
 
+import { flushCompileCache } from "./compileCache";
 import { ServerConfig } from "./config";
+import { autoPullProjectsAtStartup } from "./defaultBranchAutoPull";
+import { formatWebAccessUrl } from "./http";
 import { Keybindings } from "./keybindings";
 import { Open } from "./open";
+import { settleOpenTasksCommands } from "./orchestration/Layers/ProviderRuntimeIngestionHelpers";
+import { closeOrphanedApprovals } from "./orchestration/orphanedApprovals";
+import {
+  dispatchRestartContinuations,
+  takeRestartContinuations,
+} from "./orchestration/restartContinuation";
 import { OrchestrationEngineService } from "./orchestration/Services/OrchestrationEngine";
 import { ProjectionSnapshotQuery } from "./orchestration/Services/ProjectionSnapshotQuery";
 import { OrchestrationReactor } from "./orchestration/Services/OrchestrationReactor";
+import { ProviderService } from "./provider/Services/ProviderService";
+import { ProviderSessionDirectory } from "./provider/Services/ProviderSessionDirectory";
 import { ServerLifecycleEvents } from "./serverLifecycleEvents";
-import { ServerSettingsService } from "./serverSettings";
+import { getServerSettingsOrDefault, ServerSettingsService } from "./serverSettings";
 import { AnalyticsService } from "./telemetry/Services/AnalyticsService";
 
 const isWildcardHost = (host: string | undefined): boolean =>
@@ -36,6 +47,13 @@ const isWildcardHost = (host: string | undefined): boolean =>
 
 const formatHostForUrl = (host: string): string =>
   host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
+
+const appendAuthTokenToUrl = (url: URL, authToken: string | undefined): string => {
+  if (!authToken) return url.toString();
+  const target = new URL(url.toString());
+  target.searchParams.set("token", authToken);
+  return target.toString();
+};
 
 export class ServerRuntimeStartupError extends Data.TaggedError("ServerRuntimeStartupError")<{
   readonly message: string;
@@ -143,176 +161,192 @@ export const recordStartupHeartbeat = Effect.gen(function* () {
 });
 
 export const launchStartupHeartbeat = recordStartupHeartbeat.pipe(
-  Effect.annotateSpans({ "startup.phase": "heartbeat.record" }),
-  Effect.withSpan("server.startup.heartbeat.record"),
+  Effect.withSpan("server.startup.heartbeat.record", {
+    attributes: { "startup.phase": "heartbeat.record" },
+  }),
   Effect.ignoreCause({ log: true }),
   Effect.forkScoped,
   Effect.asVoid,
 );
 
-/**
- * Ensures the hidden Advisors workspace project exists. Runs unconditionally on
- * startup so the Advisors page can dispatch `thread.create` against a stable
- * project id without ever asking the user to pick a folder. The workspace dir
- * is created in `ensureServerDirectories`; here we only register the project
- * row in the orchestration read model if it isn't already present.
- */
-const bootstrapAdvisorsProject = Effect.gen(function* () {
-  const serverConfig = yield* ServerConfig;
-  const projectionReadModelQuery = yield* ProjectionSnapshotQuery;
-  const orchestrationEngine = yield* OrchestrationEngineService;
+/** Advisors were removed; older builds created this project and its chat threads. */
+const LEGACY_ADVISORS_PROJECT_ID = ProjectId.makeUnsafe("project-advisors");
 
-  const existingProject = yield* projectionReadModelQuery.getActiveProjectByWorkspaceRoot(
-    serverConfig.advisorsWorkspaceDir,
-  );
-  if (Option.isSome(existingProject)) {
-    return;
-  }
-
-  const advisorsModelSelection: ModelSelection = {
-    provider: "claudeAgent",
-    model: "claude-haiku-4-5",
-  };
-
-  yield* orchestrationEngine.dispatch({
-    type: "project.create",
-    commandId: CommandId.makeUnsafe(crypto.randomUUID()),
-    projectId: ADVISORS_PROJECT_ID,
-    title: "Advisors",
-    workspaceRoot: serverConfig.advisorsWorkspaceDir,
-    defaultModelSelection: advisorsModelSelection,
-    createdAt: new Date().toISOString(),
-  });
-});
-
-/**
- * Copies the bundled advisor SKILL.md files into `<stateDir>/advisor-skills/`
- * so advisor threads can reference them via the Read tool at session start.
- * Runs on every startup (overwrites existing files) to pick up any skill
- * content updates from new server builds.
- */
-const copyAdvisorSkillFiles = Effect.gen(function* () {
-  const serverConfig = yield* ServerConfig;
-  const fs = yield* FileSystem.FileSystem;
-  const path = yield* Path.Path;
-
-  // The bundled skill files sit next to the compiled server entry point
-  // at `dist/advisor-skills/` (tsdown copies them via the asset pipeline).
-  // In dev mode they're at `src/advisor-skills/` relative to the source.
-  const bundledDir = path.resolve(path.join(import.meta.dirname, "advisor-skills"));
-  const targetDir = serverConfig.advisorSkillsDir;
-
-  const exists = yield* fs.exists(bundledDir).pipe(Effect.orElseSucceed(() => false));
-  if (!exists) {
-    yield* Effect.logWarning("advisor skill files not found at bundled path, skipping copy", {
-      bundledDir,
-    });
-    return;
-  }
-
-  const entries = yield* fs.readDirectory(bundledDir);
-  yield* Effect.forEach(
-    entries.filter((entry) => entry.endsWith(".md")),
-    (entry) =>
-      Effect.gen(function* () {
-        const src = path.join(bundledDir, entry);
-        const dest = path.join(targetDir, entry);
-        const content = yield* fs.readFileString(src);
-        yield* fs.writeFileString(dest, content);
-      }),
-    { concurrency: "unbounded" },
-  );
-
-  yield* Effect.logInfo("advisor skill files copied", {
-    targetDir,
-    fileCount: entries.filter((entry) => entry.endsWith(".md")).length,
-  });
-});
-
-const migrateAdvisorDataDir = Effect.gen(function* () {
-  const fs = yield* FileSystem.FileSystem;
-  const path = yield* Path.Path;
-  const home = process.env.HOME ?? process.env.USERPROFILE ?? "";
-  if (!home) return;
-  const oldDir = path.join(home, ".gstack");
-  const newDir = path.join(home, ".piedpiper", "advisors");
-  const oldExists = yield* fs.exists(oldDir).pipe(Effect.orElseSucceed(() => false));
-  const newExists = yield* fs.exists(newDir).pipe(Effect.orElseSucceed(() => false));
-  if (oldExists && !newExists) {
-    yield* fs.makeDirectory(path.dirname(newDir), { recursive: true });
-    yield* fs.copy(oldDir, newDir);
-    yield* Effect.logInfo("migrated advisor data from ~/.gstack to ~/.piedpiper/advisors");
-  }
-});
-
-/**
- * Writes a PROJECTS.md file to the advisors workspace directory listing all
- * user projects and their paths. Called on startup and whenever projects change
- * so advisor agents can discover available workspaces.
- */
-export const writeAdvisorProjectsManifest = Effect.gen(function* () {
-  const serverConfig = yield* ServerConfig;
-  const fs = yield* FileSystem.FileSystem;
-  const path = yield* Path.Path;
+const removeLegacyAdvisorsProject = Effect.gen(function* () {
   const orchestrationEngine = yield* OrchestrationEngineService;
   const readModel = yield* orchestrationEngine.getReadModel();
-
-  const projects = [...readModel.projects.values()].filter(
-    (p) => p.id !== ADVISORS_PROJECT_ID && p.deletedAt === null,
-  );
-
-  const lines = [
-    "# Projects",
-    "",
-    "Available project workspaces:",
-    "",
-    ...projects.map((p) => `- **${p.title}** — \`${p.workspaceRoot}\``),
-    ...(projects.length === 0 ? ["_No projects added yet._"] : []),
-    "",
-  ];
-
-  const filePath = path.join(serverConfig.advisorsWorkspaceDir, "PROJECTS.md");
-  yield* fs.writeFileString(filePath, lines.join("\n"));
-});
-
-const copyAdvisorToolScripts = Effect.gen(function* () {
-  const serverConfig = yield* ServerConfig;
-  const fs = yield* FileSystem.FileSystem;
-  const path = yield* Path.Path;
-
-  const bundledDir = path.resolve(path.join(import.meta.dirname, "advisor-tools"));
-  const targetDir = serverConfig.advisorToolsDir;
-
-  const exists = yield* fs.exists(bundledDir).pipe(Effect.orElseSucceed(() => false));
-  if (!exists) {
-    yield* Effect.logWarning("advisor tool scripts not found at bundled path, skipping copy", {
-      bundledDir,
-    });
+  const project = readModel.projects.get(LEGACY_ADVISORS_PROJECT_ID);
+  if (!project || project.deletedAt !== null) {
     return;
   }
 
-  const entries = yield* fs.readDirectory(bundledDir);
-  const toolFiles = entries.filter((entry) => entry.startsWith("pp-"));
-  yield* Effect.forEach(
-    toolFiles,
-    (entry) =>
-      Effect.gen(function* () {
-        const src = path.join(bundledDir, entry);
-        const dest = path.join(targetDir, entry);
-        const content = yield* fs.readFileString(src);
-        yield* fs.writeFileString(dest, content);
-        yield* fs.chmod(dest, 0o755);
-      }),
-    { concurrency: "unbounded" },
+  const threads = [...readModel.threads.values()].filter(
+    (thread) => thread.projectId === LEGACY_ADVISORS_PROJECT_ID && thread.deletedAt === null,
   );
-
-  yield* Effect.logInfo("advisor tool scripts copied", {
-    targetDir,
-    fileCount: toolFiles.length,
+  for (const thread of threads) {
+    yield* orchestrationEngine.dispatch({
+      type: "thread.delete",
+      commandId: CommandId.makeUnsafe(crypto.randomUUID()),
+      threadId: thread.id,
+    });
+  }
+  yield* orchestrationEngine.dispatch({
+    type: "project.delete",
+    commandId: CommandId.makeUnsafe(crypto.randomUUID()),
+    projectId: LEGACY_ADVISORS_PROJECT_ID,
   });
+  yield* Effect.logInfo("removed legacy advisors project", { threadCount: threads.length });
 });
 
-const autoBootstrapWelcome = Effect.gen(function* () {
+export const ORPHANED_PROVIDER_SESSION_ERROR =
+  "Provider session did not survive a server restart. Send a new message to continue.";
+
+const logUnlessInterrupted =
+  (message: string, annotations: Record<string, unknown> = {}) =>
+  <E>(cause: Cause.Cause<E>) =>
+    Cause.hasInterrupts(cause)
+      ? Effect.failCause(cause)
+      : Effect.logWarning(message, { ...annotations, cause });
+
+/**
+ * After a crash or kill mid-turn the projection still says `starting`/`running` (or carries an
+ * active turn) for sessions that no longer exist. Settle those threads so sends, stop, archive
+ * and revert are not blocked forever, and finish any assistant message left streaming.
+ */
+export const reconcileProviderSessions = Effect.gen(function* () {
+  const directory = yield* ProviderSessionDirectory;
+  const orchestrationEngine = yield* OrchestrationEngineService;
+  const providerService = yield* ProviderService;
+
+  const liveThreadIds = new Set(
+    (yield* providerService.listSessions()).map((session) => session.threadId),
+  );
+  const readModel = yield* orchestrationEngine.getReadModel();
+  const orphanedThreads = [...readModel.threads.values()].filter(
+    (thread) =>
+      thread.deletedAt === null &&
+      thread.session !== null &&
+      (thread.session.status === "starting" ||
+        thread.session.status === "running" ||
+        thread.session.activeTurnId !== null) &&
+      !liveThreadIds.has(thread.id),
+  );
+
+  for (const thread of orphanedThreads) {
+    const session = thread.session;
+    if (session === null) {
+      continue;
+    }
+    yield* Effect.gen(function* () {
+      const binding = yield* directory.getBinding(thread.id);
+      if (Option.isSome(binding)) {
+        yield* directory.upsert({
+          ...binding.value,
+          status: "stopped",
+          runtimePayload: { activeTurnId: null },
+        });
+      }
+    }).pipe(
+      Effect.catchCause(
+        logUnlessInterrupted("failed to reconcile orphaned provider session binding", {
+          threadId: thread.id,
+        }),
+      ),
+    );
+
+    yield* Effect.gen(function* () {
+      const reconciledAt = new Date().toISOString();
+      yield* orchestrationEngine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.makeUnsafe(crypto.randomUUID()),
+        threadId: thread.id,
+        session: {
+          ...session,
+          status: "error",
+          activeTurnId: null,
+          lastError: ORPHANED_PROVIDER_SESSION_ERROR,
+          updatedAt: reconciledAt,
+        },
+        createdAt: reconciledAt,
+      });
+    }).pipe(
+      Effect.retry({ times: 1 }),
+      Effect.catchCause(
+        logUnlessInterrupted("failed to settle orphaned provider session projection", {
+          threadId: thread.id,
+        }),
+      ),
+    );
+  }
+
+  // Assistant replies cut off by a crash stay `streaming` forever, even when the session was already settled.
+  for (const thread of readModel.threads.values()) {
+    if (thread.deletedAt !== null || liveThreadIds.has(thread.id)) {
+      continue;
+    }
+    for (const message of thread.messages) {
+      if (message.role !== "assistant" || !message.streaming) {
+        continue;
+      }
+      yield* orchestrationEngine
+        .dispatch({
+          type: "thread.message.assistant.complete",
+          commandId: CommandId.makeUnsafe(crypto.randomUUID()),
+          threadId: thread.id,
+          messageId: message.id,
+          ...(message.turnId !== null ? { turnId: message.turnId } : {}),
+          // Stamp with the last streamed chunk so the reply's duration excludes the downtime.
+          createdAt: message.updatedAt,
+        })
+        .pipe(
+          Effect.catchCause(
+            logUnlessInterrupted("failed to complete orphaned streaming assistant message", {
+              threadId: thread.id,
+              messageId: message.id,
+            }),
+          ),
+        );
+    }
+  }
+
+  yield* closeOrphanedApprovals({ threads: readModel.threads.values(), liveThreadIds });
+
+  // A killed server took its Claude processes along, and no session.started may follow to say so.
+  for (const thread of readModel.threads.values()) {
+    if (
+      thread.deletedAt !== null ||
+      liveThreadIds.has(thread.id) ||
+      thread.session?.providerName !== "claudeAgent"
+    ) {
+      continue;
+    }
+    const settledAt = new Date().toISOString();
+    yield* Effect.forEach(
+      settleOpenTasksCommands({
+        threadId: thread.id,
+        activities: thread.activities,
+        createdAt: settledAt,
+        commandId: () => CommandId.makeUnsafe(crypto.randomUUID()),
+      }),
+      (command) => orchestrationEngine.dispatch(command),
+      { discard: true },
+    ).pipe(
+      Effect.catchCause(
+        logUnlessInterrupted("failed to settle orphaned background tasks", {
+          threadId: thread.id,
+        }),
+      ),
+    );
+  }
+}).pipe(Effect.catchCause(logUnlessInterrupted("provider session startup reconciliation failed")));
+
+/** Only the welcome thread gets this; project creation records no default of its own. */
+export const getAutoBootstrapThreadModelSelection = (): ModelSelection => ({
+  provider: "claudeAgent",
+  model: DEFAULT_MODEL_BY_PROVIDER.claudeAgent,
+});
+
+export const autoBootstrapWelcome = Effect.gen(function* () {
   const serverConfig = yield* ServerConfig;
   const projectionReadModelQuery = yield* ProjectionSnapshotQuery;
   const orchestrationEngine = yield* OrchestrationEngineService;
@@ -327,31 +361,34 @@ const autoBootstrapWelcome = Effect.gen(function* () {
         serverConfig.cwd,
       );
       let nextProjectId: ProjectId;
-      let nextProjectDefaultModelSelection: ModelSelection;
+      let nextThreadModelSelection: ModelSelection;
 
       if (Option.isNone(existingProject)) {
         const createdAt = new Date().toISOString();
         nextProjectId = ProjectId.makeUnsafe(crypto.randomUUID());
         const bootstrapProjectTitle = path.basename(serverConfig.cwd) || "project";
-        nextProjectDefaultModelSelection = {
-          provider: "claudeAgent",
-          model: "claude-opus-4-6",
-        };
+        nextThreadModelSelection = getAutoBootstrapThreadModelSelection();
         yield* orchestrationEngine.dispatch({
           type: "project.create",
           commandId: CommandId.makeUnsafe(crypto.randomUUID()),
           projectId: nextProjectId,
           title: bootstrapProjectTitle,
           workspaceRoot: serverConfig.cwd,
-          defaultModelSelection: nextProjectDefaultModelSelection,
           createdAt,
         });
       } else {
         nextProjectId = existingProject.value.id;
-        nextProjectDefaultModelSelection = existingProject.value.defaultModelSelection ?? {
-          provider: "claudeAgent",
-          model: "claude-opus-4-6",
-        };
+        nextThreadModelSelection =
+          existingProject.value.defaultModelSelection ?? getAutoBootstrapThreadModelSelection();
+        // Launching in an archived folder counts as re-adding it, and this path skips project.create.
+        if (existingProject.value.archivedAt) {
+          yield* orchestrationEngine.dispatch({
+            type: "project.meta.update",
+            commandId: CommandId.makeUnsafe(crypto.randomUUID()),
+            projectId: nextProjectId,
+            archivedAt: null,
+          });
+        }
       }
 
       const existingThreadId =
@@ -359,15 +396,16 @@ const autoBootstrapWelcome = Effect.gen(function* () {
       if (Option.isNone(existingThreadId)) {
         const createdAt = new Date().toISOString();
         const createdThreadId = ThreadId.makeUnsafe(crypto.randomUUID());
+        const { defaultRuntimeMode } = yield* getServerSettingsOrDefault;
         yield* orchestrationEngine.dispatch({
           type: "thread.create",
           commandId: CommandId.makeUnsafe(crypto.randomUUID()),
           threadId: createdThreadId,
           projectId: nextProjectId,
           title: "New thread",
-          modelSelection: nextProjectDefaultModelSelection,
+          modelSelection: nextThreadModelSelection,
           interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-          runtimeMode: "full-access",
+          runtimeMode: defaultRuntimeMode,
           branch: null,
           worktreePath: null,
           createdAt,
@@ -403,12 +441,17 @@ const maybeOpenBrowser = Effect.gen(function* () {
     serverConfig.host && !isWildcardHost(serverConfig.host)
       ? `http://${formatHostForUrl(serverConfig.host)}:${serverConfig.port}`
       : localUrl;
-  const target = serverConfig.devUrl?.toString() ?? bindUrl;
+  // Web mode always carries an auth token, so a bare URL would land on a page
+  // whose WebSocket is rejected with 401. Open the tokenized URL instead.
+  const target = serverConfig.devUrl
+    ? appendAuthTokenToUrl(serverConfig.devUrl, serverConfig.authToken)
+    : (formatWebAccessUrl(serverConfig) ?? bindUrl);
 
   yield* openBrowser(target).pipe(
     Effect.catch(() =>
       Effect.logInfo("browser auto-open unavailable", {
-        hint: `Open ${target} in your browser.`,
+        // The target carries the auth token, which must stay out of logs and traces.
+        hint: "Open the access URL printed at startup in your browser.",
       }),
     ),
   );
@@ -416,9 +459,22 @@ const maybeOpenBrowser = Effect.gen(function* () {
 
 const runStartupPhase = <A, E, R>(phase: string, effect: Effect.Effect<A, E, R>) =>
   effect.pipe(
-    Effect.annotateSpans({ "startup.phase": phase }),
-    Effect.withSpan(`server.startup.${phase}`),
+    // Span attributes, not annotateSpans: annotations leak onto every fiber forked in the phase.
+    Effect.withSpan(`server.startup.${phase}`, { attributes: { "startup.phase": phase } }),
   );
+
+/** The take goes first: reconcile settles the cut turn and closes approvals, which hide what it reads. */
+export const settleAndContinueProviderSessions = Effect.gen(function* () {
+  const restartContinuations = yield* runStartupPhase(
+    "provider-sessions.take-continuations",
+    takeRestartContinuations,
+  );
+  yield* runStartupPhase("provider-sessions.reconcile", reconcileProviderSessions);
+  yield* runStartupPhase(
+    "provider-sessions.continue",
+    dispatchRestartContinuations(restartContinuations),
+  );
+});
 
 const makeServerRuntimeStartup = Effect.gen(function* () {
   const serverConfig = yield* ServerConfig;
@@ -470,54 +526,18 @@ const makeServerRuntimeStartup = Effect.gen(function* () {
       orchestrationReactor.start().pipe(Scope.provide(reactorScope)),
     );
 
-    yield* Effect.logDebug("startup phase: bootstrapping advisors workspace");
-    yield* runStartupPhase("advisors.bootstrap", bootstrapAdvisorsProject);
-
-    yield* Effect.logDebug("startup phase: copying advisor skill files");
     yield* runStartupPhase(
-      "advisor.skills",
-      copyAdvisorSkillFiles.pipe(
+      "advisors.remove-legacy",
+      removeLegacyAdvisorsProject.pipe(
         Effect.catchCause((cause) =>
-          Effect.logWarning("failed to copy advisor skill files", {
+          Effect.logWarning("failed to remove legacy advisors project", {
             cause: cause.toString(),
           }),
         ),
       ),
     );
 
-    yield* runStartupPhase(
-      "advisor.migrate",
-      migrateAdvisorDataDir.pipe(
-        Effect.catchCause((cause) =>
-          Effect.logWarning("failed to migrate advisor data directory", {
-            cause: cause.toString(),
-          }),
-        ),
-      ),
-    );
-
-    yield* Effect.logDebug("startup phase: copying advisor tool scripts");
-    yield* runStartupPhase(
-      "advisor.tools",
-      copyAdvisorToolScripts.pipe(
-        Effect.catchCause((cause) =>
-          Effect.logWarning("failed to copy advisor tool scripts", {
-            cause: cause.toString(),
-          }),
-        ),
-      ),
-    );
-
-    yield* runStartupPhase(
-      "advisor.projects-manifest",
-      writeAdvisorProjectsManifest.pipe(
-        Effect.catchCause((cause) =>
-          Effect.logWarning("failed to write advisor projects manifest", {
-            cause: cause.toString(),
-          }),
-        ),
-      ),
-    );
+    yield* settleAndContinueProviderSessions;
 
     yield* Effect.logDebug("startup phase: preparing welcome payload");
     const welcome = yield* runStartupPhase("welcome.prepare", autoBootstrapWelcome);
@@ -536,12 +556,15 @@ const makeServerRuntimeStartup = Effect.gen(function* () {
       }),
     );
   }).pipe(
-    Effect.annotateSpans({
-      "server.mode": serverConfig.mode,
-      "server.port": serverConfig.port,
-      "server.host": serverConfig.host ?? "default",
+    Effect.withSpan("server.startup", {
+      kind: "server",
+      root: true,
+      attributes: {
+        "server.mode": serverConfig.mode,
+        "server.port": serverConfig.port,
+        "server.host": serverConfig.host ?? "default",
+      },
     }),
-    Effect.withSpan("server.startup", { kind: "server", root: true }),
   );
 
   yield* Effect.forkScoped(
@@ -575,7 +598,17 @@ const makeServerRuntimeStartup = Effect.gen(function* () {
       yield* launchStartupHeartbeat;
       yield* Effect.logDebug("startup phase: browser open check");
       yield* runStartupPhase("browser.open", maybeOpenBrowser);
+      // Forked so a slow fetch or pull never delays startup; it catches and logs its own failures.
+      yield* runStartupPhase("projects.auto-pull", autoPullProjectsAtStartup).pipe(
+        Effect.forkScoped,
+      );
       yield* Effect.logDebug("startup phase: complete");
+      yield* Effect.sync(flushCompileCache);
+      // Flush again once lazily imported modules have loaded, since Windows force-kills on quit.
+      yield* Effect.sleep("30 seconds").pipe(
+        Effect.andThen(Effect.sync(flushCompileCache)),
+        Effect.forkScoped,
+      );
     }),
   );
 

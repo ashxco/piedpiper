@@ -2,6 +2,7 @@ import { Effect, FileSystem, Path, Random, Schema } from "effect";
 import * as Crypto from "node:crypto";
 import { homedir } from "node:os";
 import { ServerConfig } from "../config";
+import { writeFileStringAtomically } from "../serverSettings";
 
 const CodexAuthJsonSchema = Schema.Struct({
   tokens: Schema.Struct({
@@ -54,21 +55,22 @@ const getClaudeUserId = Effect.gen(function* () {
   return claudeJson.userID;
 });
 
-const upsertAnonymousId = Effect.gen(function* () {
+export const upsertAnonymousId = Effect.gen(function* () {
   const fileSystem = yield* FileSystem.FileSystem;
   const { anonymousIdPath } = yield* ServerConfig;
 
-  const anonymousId = yield* fileSystem.readFileString(anonymousIdPath).pipe(
-    Effect.catch(() =>
-      Effect.gen(function* () {
-        const randomId = yield* Random.nextUUIDv4;
-        yield* fileSystem.writeFileString(anonymousIdPath, randomId);
-        return randomId;
-      }),
-    ),
+  const existing = yield* fileSystem.readFileString(anonymousIdPath).pipe(
+    Effect.map((contents) => contents.trim()),
+    Effect.orElseSucceed(() => ""),
   );
+  // An empty file is a torn write from an older non-atomic writer; replace it.
+  if (existing.length > 0) {
+    return existing;
+  }
 
-  return anonymousId;
+  const randomId = yield* Random.nextUUIDv4;
+  yield* writeFileStringAtomically(anonymousIdPath, randomId);
+  return randomId;
 });
 
 /**

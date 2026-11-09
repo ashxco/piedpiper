@@ -1,7 +1,11 @@
 import { ThreadId } from "@piedpiper/contracts";
 import { beforeEach, describe, expect, it } from "vitest";
 
-import { useThreadSelectionStore } from "./threadSelectionStore";
+import {
+  deleteThreadsSequentially,
+  getThreadIdsToDeselectAfterDelete,
+  useThreadSelectionStore,
+} from "./threadSelectionStore";
 
 const THREAD_A = ThreadId.makeUnsafe("thread-a");
 const THREAD_B = ThreadId.makeUnsafe("thread-b");
@@ -14,6 +18,47 @@ const ORDERED = [THREAD_A, THREAD_B, THREAD_C, THREAD_D, THREAD_E] as const;
 describe("threadSelectionStore", () => {
   beforeEach(() => {
     useThreadSelectionStore.getState().clearSelection();
+  });
+
+  describe("bulk deletion", () => {
+    it("continues past a failed delete and reports only the first error", async () => {
+      const firstFailure = new Error("first failure");
+      const seenDeletedSets: ThreadId[][] = [];
+      const result = await deleteThreadsSequentially(
+        [THREAD_A, THREAD_B, THREAD_C, THREAD_D],
+        async (id, deletedSoFar) => {
+          seenDeletedSets.push([...deletedSoFar]);
+          if (id === THREAD_B) throw firstFailure;
+          if (id === THREAD_C) throw new Error("second failure");
+        },
+      );
+
+      expect([...result.deletedThreadIds]).toEqual([THREAD_A, THREAD_D]);
+      expect(result.firstError).toBe(firstFailure);
+      expect(seenDeletedSets).toEqual([[], [THREAD_A], [THREAD_A], [THREAD_A]]);
+    });
+
+    it("reports no error when every delete succeeds", async () => {
+      const result = await deleteThreadsSequentially([THREAD_A, THREAD_B], async () => {});
+      expect(result.firstError).toBeNull();
+      expect([...result.deletedThreadIds]).toEqual([THREAD_A, THREAD_B]);
+    });
+
+    it("deselects deleted and missing threads but keeps failed ones selected", () => {
+      const store = useThreadSelectionStore.getState();
+      store.toggleThread(THREAD_A);
+      store.toggleThread(THREAD_B);
+      store.toggleThread(THREAD_C);
+      const selected = [...useThreadSelectionStore.getState().selectedThreadIds];
+      // A deleted; B failed; C disappeared elsewhere.
+      const existing = new Set([THREAD_A, THREAD_B]);
+      store.removeFromSelection(
+        getThreadIdsToDeselectAfterDelete(selected, new Set([THREAD_A]), (id) => existing.has(id)),
+      );
+
+      expect([...useThreadSelectionStore.getState().selectedThreadIds]).toEqual([THREAD_B]);
+      expect(useThreadSelectionStore.getState().anchorThreadId).toBeNull();
+    });
   });
 
   describe("toggleThread", () => {

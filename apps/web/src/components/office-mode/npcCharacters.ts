@@ -9,15 +9,6 @@
  * lines of inline string literals from the component file.
  */
 
-// Tier 1: advisor
-export const TIER_1 = [
-  "character-advisor-brian-chesky",
-  "character-advisor-garry-tan",
-  "character-advisor-jony-ive",
-  "character-advisor-kevin-mitnick",
-  "character-advisor-linus-torvalds",
-];
-
 // Tier 2: Silicon Valley
 export const TIER_2 = [
   "character-sv-big-head",

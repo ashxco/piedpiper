@@ -2,9 +2,11 @@ import { Effect, Exit, Layer, ManagedRuntime, Scope } from "effect";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { CheckpointReactor } from "../Services/CheckpointReactor.ts";
+import { OrchestrationEventMaintenance } from "../Services/OrchestrationEventMaintenance.ts";
 import { ProviderCommandReactor } from "../Services/ProviderCommandReactor.ts";
 import { ProviderRuntimeIngestionService } from "../Services/ProviderRuntimeIngestion.ts";
 import { OrchestrationReactor } from "../Services/OrchestrationReactor.ts";
+import { UsageLimitResumeReactor } from "../Services/UsageLimitResumeReactor.ts";
 import { makeOrchestrationReactor } from "./OrchestrationReactor.ts";
 
 describe("OrchestrationReactor", () => {
@@ -17,7 +19,7 @@ describe("OrchestrationReactor", () => {
     runtime = null;
   });
 
-  it("starts provider ingestion, provider command, and checkpoint reactors", async () => {
+  it("starts provider ingestion, provider command, checkpoint, and usage limit reactors", async () => {
     const started: string[] = [];
 
     runtime = ManagedRuntime.make(
@@ -49,6 +51,24 @@ describe("OrchestrationReactor", () => {
             drain: Effect.void,
           }),
         ),
+        Layer.provideMerge(
+          Layer.succeed(UsageLimitResumeReactor, {
+            start: () => {
+              started.push("usage-limit-resume-reactor");
+              return Effect.void;
+            },
+            drain: Effect.void,
+          }),
+        ),
+        Layer.provideMerge(
+          Layer.succeed(OrchestrationEventMaintenance, {
+            runPass: () => Effect.succeed({ deletedEventCount: 0 }),
+            start: () => {
+              started.push("event-maintenance");
+              return Effect.void;
+            },
+          }),
+        ),
       ),
     );
 
@@ -60,6 +80,8 @@ describe("OrchestrationReactor", () => {
       "provider-runtime-ingestion",
       "provider-command-reactor",
       "checkpoint-reactor",
+      "usage-limit-resume-reactor",
+      "event-maintenance",
     ]);
 
     await Effect.runPromise(Scope.close(scope, Exit.void));

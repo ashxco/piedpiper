@@ -10,11 +10,22 @@ import {
 } from "react";
 import type { TimestampFormat } from "@piedpiper/contracts/settings";
 import type { ActivePlanState, LatestProposedPlanState } from "../../session-logic";
+import { useMediaQuery } from "../../hooks/useMediaQuery";
+import { Sheet, SheetPopup } from "../ui/sheet";
 
 const PlanSidebar = lazy(() => import("../PlanSidebar"));
 
+/** Below this width the inline 340px plan sidebar squeezes the composer, so it becomes a sheet. */
+export const PLAN_SIDEBAR_SHEET_MEDIA_QUERY = "(max-width: 1180px)";
+
+export interface ChatPlanPanelOpenOptions {
+  /** Open even as a sheet; only for explicit user actions, since the sheet covers the chat. */
+  evenAsSheet?: boolean;
+}
+
 export interface ChatPlanPanelHandle {
-  open: () => void;
+  /** Programmatic open; skipped on narrow windows unless `evenAsSheet` is set. */
+  open: (options?: ChatPlanPanelOpenOptions) => void;
   close: () => void;
   toggle: (activePlanTurnId: string | null, sidebarPlanTurnId: string | null) => void;
   /** Signal that the sidebar should open on the next thread-change reset. */
@@ -54,10 +65,13 @@ export const ChatPlanPanel = forwardRef<ChatPlanPanelHandle, ChatPlanPanelProps>
     ref,
   ) {
     const [planSidebarOpen, setPlanSidebarOpen] = useState(false);
+    const useSheet = useMediaQuery(PLAN_SIDEBAR_SHEET_MEDIA_QUERY);
     const planSidebarDismissedForTurnRef = useRef<string | null>(null);
     const planSidebarOpenOnNextThreadRef = useRef(false);
     const onOpenChangeRef = useRef(onOpenChange);
     onOpenChangeRef.current = onOpenChange;
+    const useSheetRef = useRef(useSheet);
+    useSheetRef.current = useSheet;
 
     const setOpen = useCallback((next: boolean) => {
       setPlanSidebarOpen((prev) => {
@@ -70,8 +84,9 @@ export const ChatPlanPanel = forwardRef<ChatPlanPanelHandle, ChatPlanPanelProps>
     useImperativeHandle(
       ref,
       () => ({
-        open: () => {
+        open: (options) => {
           planSidebarDismissedForTurnRef.current = null;
+          if (useSheetRef.current && !options?.evenAsSheet) return;
           setOpen(true);
         },
         close: () => setOpen(false),
@@ -102,7 +117,8 @@ export const ChatPlanPanel = forwardRef<ChatPlanPanelHandle, ChatPlanPanelProps>
     useEffect(() => {
       if (planSidebarOpenOnNextThreadRef.current) {
         planSidebarOpenOnNextThreadRef.current = false;
-        setOpen(true);
+        // An automatic open would put a modal sheet over the new thread on narrow windows.
+        setOpen(!useSheetRef.current);
       } else {
         setOpen(false);
       }
@@ -117,19 +133,44 @@ export const ChatPlanPanel = forwardRef<ChatPlanPanelHandle, ChatPlanPanelProps>
       }
     }, [activePlan?.turnId, activeProposedPlan?.turnId, setOpen]);
 
-    if (!planSidebarOpen) return null;
-
-    return (
+    const renderPlanSidebar = (mode: "sheet" | "sidebar") => (
       <Suspense fallback={null}>
         <PlanSidebar
           activePlan={activePlan}
           activeProposedPlan={activeProposedPlan}
           markdownCwd={markdownCwd}
           workspaceRoot={workspaceRoot}
+          threadId={threadId ?? undefined}
           timestampFormat={timestampFormat}
+          mode={mode}
           onClose={handleClose}
         />
       </Suspense>
     );
+
+    if (useSheet) {
+      return (
+        <Sheet
+          open={planSidebarOpen}
+          onOpenChange={(open) => {
+            if (!open) handleClose();
+          }}
+        >
+          <SheetPopup
+            side="right"
+            aria-label="Plan"
+            showCloseButton={false}
+            className="w-[min(88vw,400px)] max-w-[400px] p-0"
+            style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
+          >
+            {planSidebarOpen ? renderPlanSidebar("sheet") : null}
+          </SheetPopup>
+        </Sheet>
+      );
+    }
+
+    if (!planSidebarOpen) return null;
+
+    return renderPlanSidebar("sidebar");
   },
 );

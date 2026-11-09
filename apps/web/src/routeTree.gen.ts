@@ -10,12 +10,12 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as VirtualOfficeRouteImport } from './routes/virtual-office'
-import { Route as SkillsRouteImport } from './routes/skills'
 import { Route as SettingsRouteImport } from './routes/settings'
-import { Route as AdvisorsRouteImport } from './routes/advisors'
 import { Route as ChatRouteImport } from './routes/_chat'
 import { Route as ChatIndexRouteImport } from './routes/_chat.index'
+import { Route as SettingsKeybindingsRouteImport } from './routes/settings.keybindings'
 import { Route as SettingsGeneralRouteImport } from './routes/settings.general'
+import { Route as SettingsDiagnosticsRouteImport } from './routes/settings.diagnostics'
 import { Route as SettingsArchivedRouteImport } from './routes/settings.archived'
 import { Route as ChatThreadIdRouteImport } from './routes/_chat.$threadId'
 
@@ -26,21 +26,11 @@ const VirtualOfficeRoute = VirtualOfficeRouteImport.update({
 } as any).lazy(() =>
   import('./routes/virtual-office.lazy').then((d) => d.Route),
 )
-const SkillsRoute = SkillsRouteImport.update({
-  id: '/skills',
-  path: '/skills',
-  getParentRoute: () => rootRouteImport,
-} as any).lazy(() => import('./routes/skills.lazy').then((d) => d.Route))
 const SettingsRoute = SettingsRouteImport.update({
   id: '/settings',
   path: '/settings',
   getParentRoute: () => rootRouteImport,
 } as any).lazy(() => import('./routes/settings.lazy').then((d) => d.Route))
-const AdvisorsRoute = AdvisorsRouteImport.update({
-  id: '/advisors',
-  path: '/advisors',
-  getParentRoute: () => rootRouteImport,
-} as any).lazy(() => import('./routes/advisors.lazy').then((d) => d.Route))
 const ChatRoute = ChatRouteImport.update({
   id: '/_chat',
   getParentRoute: () => rootRouteImport,
@@ -50,9 +40,19 @@ const ChatIndexRoute = ChatIndexRouteImport.update({
   path: '/',
   getParentRoute: () => ChatRoute,
 } as any)
+const SettingsKeybindingsRoute = SettingsKeybindingsRouteImport.update({
+  id: '/keybindings',
+  path: '/keybindings',
+  getParentRoute: () => SettingsRoute,
+} as any)
 const SettingsGeneralRoute = SettingsGeneralRouteImport.update({
   id: '/general',
   path: '/general',
+  getParentRoute: () => SettingsRoute,
+} as any)
+const SettingsDiagnosticsRoute = SettingsDiagnosticsRouteImport.update({
+  id: '/diagnostics',
+  path: '/diagnostics',
   getParentRoute: () => SettingsRoute,
 } as any)
 const SettingsArchivedRoute = SettingsArchivedRouteImport.update({
@@ -68,75 +68,73 @@ const ChatThreadIdRoute = ChatThreadIdRouteImport.update({
 
 export interface FileRoutesByFullPath {
   '/': typeof ChatIndexRoute
-  '/advisors': typeof AdvisorsRoute
   '/settings': typeof SettingsRouteWithChildren
-  '/skills': typeof SkillsRoute
   '/virtual-office': typeof VirtualOfficeRoute
   '/$threadId': typeof ChatThreadIdRoute
   '/settings/archived': typeof SettingsArchivedRoute
+  '/settings/diagnostics': typeof SettingsDiagnosticsRoute
   '/settings/general': typeof SettingsGeneralRoute
+  '/settings/keybindings': typeof SettingsKeybindingsRoute
 }
 export interface FileRoutesByTo {
-  '/advisors': typeof AdvisorsRoute
   '/settings': typeof SettingsRouteWithChildren
-  '/skills': typeof SkillsRoute
   '/virtual-office': typeof VirtualOfficeRoute
   '/$threadId': typeof ChatThreadIdRoute
   '/settings/archived': typeof SettingsArchivedRoute
+  '/settings/diagnostics': typeof SettingsDiagnosticsRoute
   '/settings/general': typeof SettingsGeneralRoute
+  '/settings/keybindings': typeof SettingsKeybindingsRoute
   '/': typeof ChatIndexRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/_chat': typeof ChatRouteWithChildren
-  '/advisors': typeof AdvisorsRoute
   '/settings': typeof SettingsRouteWithChildren
-  '/skills': typeof SkillsRoute
   '/virtual-office': typeof VirtualOfficeRoute
   '/_chat/$threadId': typeof ChatThreadIdRoute
   '/settings/archived': typeof SettingsArchivedRoute
+  '/settings/diagnostics': typeof SettingsDiagnosticsRoute
   '/settings/general': typeof SettingsGeneralRoute
+  '/settings/keybindings': typeof SettingsKeybindingsRoute
   '/_chat/': typeof ChatIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
-    | '/advisors'
     | '/settings'
-    | '/skills'
     | '/virtual-office'
     | '/$threadId'
     | '/settings/archived'
+    | '/settings/diagnostics'
     | '/settings/general'
+    | '/settings/keybindings'
   fileRoutesByTo: FileRoutesByTo
   to:
-    | '/advisors'
     | '/settings'
-    | '/skills'
     | '/virtual-office'
     | '/$threadId'
     | '/settings/archived'
+    | '/settings/diagnostics'
     | '/settings/general'
+    | '/settings/keybindings'
     | '/'
   id:
     | '__root__'
     | '/_chat'
-    | '/advisors'
     | '/settings'
-    | '/skills'
     | '/virtual-office'
     | '/_chat/$threadId'
     | '/settings/archived'
+    | '/settings/diagnostics'
     | '/settings/general'
+    | '/settings/keybindings'
     | '/_chat/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   ChatRoute: typeof ChatRouteWithChildren
-  AdvisorsRoute: typeof AdvisorsRoute
   SettingsRoute: typeof SettingsRouteWithChildren
-  SkillsRoute: typeof SkillsRoute
   VirtualOfficeRoute: typeof VirtualOfficeRoute
 }
 
@@ -149,25 +147,11 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof VirtualOfficeRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/skills': {
-      id: '/skills'
-      path: '/skills'
-      fullPath: '/skills'
-      preLoaderRoute: typeof SkillsRouteImport
-      parentRoute: typeof rootRouteImport
-    }
     '/settings': {
       id: '/settings'
       path: '/settings'
       fullPath: '/settings'
       preLoaderRoute: typeof SettingsRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/advisors': {
-      id: '/advisors'
-      path: '/advisors'
-      fullPath: '/advisors'
-      preLoaderRoute: typeof AdvisorsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/_chat': {
@@ -184,11 +168,25 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ChatIndexRouteImport
       parentRoute: typeof ChatRoute
     }
+    '/settings/keybindings': {
+      id: '/settings/keybindings'
+      path: '/keybindings'
+      fullPath: '/settings/keybindings'
+      preLoaderRoute: typeof SettingsKeybindingsRouteImport
+      parentRoute: typeof SettingsRoute
+    }
     '/settings/general': {
       id: '/settings/general'
       path: '/general'
       fullPath: '/settings/general'
       preLoaderRoute: typeof SettingsGeneralRouteImport
+      parentRoute: typeof SettingsRoute
+    }
+    '/settings/diagnostics': {
+      id: '/settings/diagnostics'
+      path: '/diagnostics'
+      fullPath: '/settings/diagnostics'
+      preLoaderRoute: typeof SettingsDiagnosticsRouteImport
       parentRoute: typeof SettingsRoute
     }
     '/settings/archived': {
@@ -222,12 +220,16 @@ const ChatRouteWithChildren = ChatRoute._addFileChildren(ChatRouteChildren)
 
 interface SettingsRouteChildren {
   SettingsArchivedRoute: typeof SettingsArchivedRoute
+  SettingsDiagnosticsRoute: typeof SettingsDiagnosticsRoute
   SettingsGeneralRoute: typeof SettingsGeneralRoute
+  SettingsKeybindingsRoute: typeof SettingsKeybindingsRoute
 }
 
 const SettingsRouteChildren: SettingsRouteChildren = {
   SettingsArchivedRoute: SettingsArchivedRoute,
+  SettingsDiagnosticsRoute: SettingsDiagnosticsRoute,
   SettingsGeneralRoute: SettingsGeneralRoute,
+  SettingsKeybindingsRoute: SettingsKeybindingsRoute,
 }
 
 const SettingsRouteWithChildren = SettingsRoute._addFileChildren(
@@ -236,9 +238,7 @@ const SettingsRouteWithChildren = SettingsRoute._addFileChildren(
 
 const rootRouteChildren: RootRouteChildren = {
   ChatRoute: ChatRouteWithChildren,
-  AdvisorsRoute: AdvisorsRoute,
   SettingsRoute: SettingsRouteWithChildren,
-  SkillsRoute: SkillsRoute,
   VirtualOfficeRoute: VirtualOfficeRoute,
 }
 export const routeTree = rootRouteImport

@@ -10,6 +10,9 @@
 import {
   type CanonicalItemType,
   type CanonicalRequestType,
+  type CodexModelOptions,
+  EventId,
+  type ModelCapabilities,
   ProviderApprovalDecision,
   type ProviderEvent,
   type ProviderRuntimeEvent,
@@ -24,6 +27,14 @@ import {
 } from "@piedpiper/contracts";
 import { Schema } from "effect";
 
+import { codexGoalToProviderGoal } from "../../codex/codexGoalCommand.ts";
+import { CODEX_STANDARD_SERVICE_TIER, normalizeCodexServiceTierId } from "../codexModelList.ts";
+import {
+  CODEX_MCP_ELICITATION_METHOD,
+  CODEX_PERMISSIONS_APPROVAL_METHOD,
+  readRequestedPermissionPaths,
+} from "../../codex/protocolHelpers.ts";
+
 import {
   ProviderAdapterRequestError,
   ProviderAdapterSessionClosedError,
@@ -32,6 +43,82 @@ import {
 } from "../Errors.ts";
 
 export const PROVIDER = "codex" as const;
+
+/**
+ * The Fast toggle as a Codex service tier: on is "fast", an explicit off is null so it
+ * overrides a config-level `service_tier = "fast"`, and unset defers to the user's config.
+ * Checked on Codex CLI 0.166: with config `service_tier = "fast"`, thread/start with
+ * `serviceTier: null` reports "default" while an omitted field reports "priority". null is
+ * used rather than "default" because older CLIs typed the tier as an enum without "default".
+ */
+export function codexServiceTierForFastMode(
+  fastMode: boolean | undefined,
+): "fast" | null | undefined {
+  if (fastMode === true) return "fast";
+  if (fastMode === false) return null;
+  return undefined;
+}
+
+/**
+ * The Fast toggle as `codex exec` config arguments. TOML has no null, so an explicit off
+ * becomes `service_tier="default"` (checked on CLI 0.166), sent only when the Codex config
+ * turns fast on, since older CLIs may reject a tier they do not know.
+ */
+export function codexExecServiceTierArgs(
+  fastMode: boolean | undefined,
+  configuredFastDefault: boolean | undefined,
+): ReadonlyArray<string> {
+  if (fastMode === true) return ["--config", `service_tier="fast"`];
+  if (fastMode === false && configuredFastDefault === true) {
+    return ["--config", `service_tier="default"`];
+  }
+  return [];
+}
+
+/**
+ * The selected tier as a Codex service tier: an explicit `serviceTier` wins, otherwise the older
+ * `fastMode` boolean applies. null is Standard; undefined defers to the user's config.
+ */
+export function resolveCodexServiceTier(
+  options: Pick<CodexModelOptions, "serviceTier" | "fastMode"> | undefined,
+): string | null | undefined {
+  const serviceTier = options?.serviceTier;
+  if (serviceTier === undefined) return codexServiceTierForFastMode(options?.fastMode);
+  if (serviceTier === null || serviceTier === CODEX_STANDARD_SERVICE_TIER) return null;
+  return normalizeCodexServiceTierId(serviceTier);
+}
+
+const CODEX_SERVICE_TIER_ID_PATTERN = /^[\w.-]+$/;
+
+/**
+ * `codex exec` arguments for the selected tier. Standard needs `service_tier="default"` only when
+ * something else is the default, since older CLIs may reject a tier they do not know.
+ */
+export function codexExecServiceTierArgsForOptions(
+  options: Pick<CodexModelOptions, "serviceTier" | "fastMode"> | undefined,
+  capabilities:
+    | Pick<ModelCapabilities, "fastModeDefault" | "serviceTierOptions">
+    | undefined
+    | null,
+): ReadonlyArray<string> {
+  const serviceTier = resolveCodexServiceTier(options);
+  if (serviceTier === undefined) return [];
+  if (serviceTier === null) {
+    const tierDefault = capabilities?.serviceTierOptions?.find((option) => option.isDefault);
+    const nonStandardDefault =
+      capabilities?.fastModeDefault === true ||
+      (tierDefault !== undefined && tierDefault.value !== CODEX_STANDARD_SERVICE_TIER);
+    return nonStandardDefault ? ["--config", `service_tier="${CODEX_STANDARD_SERVICE_TIER}"`] : [];
+  }
+  // Settings keep a saved tier after the catalog stops listing it, and older CLIs may reject it.
+  const listedTiers = capabilities?.serviceTierOptions ?? [];
+  const isOffered =
+    listedTiers.length === 0 || listedTiers.some((option) => option.value === serviceTier);
+  // The id goes into a TOML string, and a stored selection is not guaranteed to be a catalog id.
+  return isOffered && CODEX_SERVICE_TIER_ID_PATTERN.test(serviceTier)
+    ? ["--config", `service_tier="${serviceTier}"`]
+    : [];
+}
 
 export function toMessage(cause: unknown, fallback: string): string {
   if (cause instanceof Error && cause.message.length > 0) {
@@ -228,15 +315,33 @@ export function itemTitle(itemType: CanonicalItemType): string | undefined {
   }
 }
 
+/** `summary` parts as one text: plain strings on current CLIs, `{ text }` objects on older ones. */
+function reasoningSummaryText(summary: unknown): string | undefined {
+  if (!Array.isArray(summary)) return undefined;
+  const parts = summary.flatMap((part) => {
+    const text = asString(part) ?? asString(asObject(part)?.text);
+    return text && text.trim().length > 0 ? [text] : [];
+  });
+  return parts.length > 0 ? parts.join("\n\n") : undefined;
+}
+
 export function itemDetail(
   item: Record<string, unknown>,
   payload: Record<string, unknown>,
+  itemType?: CanonicalItemType,
 ): string | undefined {
   const nestedResult = asObject(item.result);
+  const action = asObject(item.action);
+  const actionQueries = Array.isArray(action?.queries) ? action.queries : [];
   const candidates = [
+    ...(itemType === "web_search"
+      ? [item.query, action?.query, ...actionQueries, action?.pattern, action?.url].map(asString)
+      : []),
     asString(item.command),
     asString(item.title),
-    asString(item.summary),
+    asString(item.revisedPrompt),
+    asString(item.summary) ??
+      (itemType === "reasoning" ? reasoningSummaryText(item.summary) : undefined),
     asString(item.text),
     asString(item.path),
     asString(item.prompt),
@@ -275,6 +380,296 @@ export function toRequestTypeFromMethod(method: string): CanonicalRequestType {
     default:
       return "unknown";
   }
+}
+
+function nonEmptyString(value: unknown): string | undefined {
+  const text = asString(value)?.trim();
+  return text ? text : undefined;
+}
+
+// Legacy execCommandApproval sends the command as an argv array.
+function commandDetail(value: unknown): string | undefined {
+  if (Array.isArray(value)) {
+    return nonEmptyString(value.filter((part) => typeof part === "string").join(" "));
+  }
+  return nonEmptyString(value);
+}
+
+const MAX_DESCRIBED_FILE_CHANGES = 20;
+
+// Apply-patch approvals carry the edited paths only as the keys of `fileChanges`.
+export function describeFileChanges(fileChanges: unknown): string | undefined {
+  const changes = asObject(fileChanges);
+  if (!changes) return undefined;
+  const entries = Object.entries(changes).toSorted(([left], [right]) => left.localeCompare(right));
+  if (entries.length === 0) return undefined;
+  const described = entries.slice(0, MAX_DESCRIBED_FILE_CHANGES).map(([path, change]) => {
+    const record = asObject(change);
+    const type = nonEmptyString(record?.type) ?? "change";
+    const movePath = type === "update" ? nonEmptyString(record?.move_path) : undefined;
+    return movePath ? `${type} ${path} -> ${movePath}` : `${type} ${path}`;
+  });
+  const remaining = entries.length - described.length;
+  return remaining > 0 ? `${described.join("\n")}\n+${remaining} more` : described.join("\n");
+}
+
+/** Path -> change kind (`{ type, move_path? }`) recorded from a fileChange item, without diff bodies. */
+export type CodexFileChangeKinds = Readonly<Record<string, unknown>>;
+
+const FILE_CHANGE_TRACKER_RESET_METHODS = new Set([
+  "turn/completed",
+  "session/connecting",
+  "session/closed",
+  "session/exited",
+]);
+
+/**
+ * Remembers the paths each in-flight fileChange item touches, because current
+ * Codex sends `item/fileChange/requestApproval` without any file paths.
+ */
+export function makeCodexFileChangeTracker() {
+  const byThread = new Map<string, Map<string, CodexFileChangeKinds>>();
+
+  /** Records the event and returns the file changes known for it when it is a file-change approval. */
+  const observe = (event: ProviderEvent): CodexFileChangeKinds | undefined => {
+    const threadKey = String(event.threadId);
+    if (FILE_CHANGE_TRACKER_RESET_METHODS.has(event.method)) {
+      byThread.delete(threadKey);
+      return undefined;
+    }
+    const item = asObject(asObject(event.payload)?.item);
+    const itemId = asString(item?.id);
+    if (event.method === "item/started" && itemId && item?.type === "fileChange") {
+      const kinds: Record<string, unknown> = {};
+      for (const change of asArray(item.changes) ?? []) {
+        const record = asObject(change);
+        const path = nonEmptyString(record?.path);
+        if (!path) continue;
+        kinds[path] = typeof record?.kind === "string" ? { type: record.kind } : record?.kind;
+      }
+      let items = byThread.get(threadKey);
+      if (!items) {
+        items = new Map();
+        byThread.set(threadKey, items);
+      }
+      items.set(itemId, kinds);
+      return undefined;
+    }
+    if (event.method === "item/completed" && itemId) {
+      byThread.get(threadKey)?.delete(itemId);
+      return undefined;
+    }
+    if (event.kind === "request" && event.method === "item/fileChange/requestApproval") {
+      const requestItemId = event.itemId ?? asString(asObject(event.payload)?.itemId);
+      return requestItemId ? byThread.get(threadKey)?.get(requestItemId) : undefined;
+    }
+    return undefined;
+  };
+
+  return { observe };
+}
+
+const isCompactedStateEvent = (event: ProviderRuntimeEvent): boolean =>
+  event.type === "thread.state.changed" && event.payload.state === "compacted";
+
+/**
+ * A CLI can report one compaction both as the contextCompaction item and as the deprecated
+ * thread/compacted notification, in either order. Pairs them per turn so each yields one row.
+ */
+export function makeCodexCompactionDeduper() {
+  const byThread = new Map<
+    string,
+    { turnId: string | undefined; item: number; notification: number }
+  >();
+
+  const apply = (
+    event: ProviderEvent,
+    runtimeEvents: ReadonlyArray<ProviderRuntimeEvent>,
+  ): ReadonlyArray<ProviderRuntimeEvent> => {
+    if (!runtimeEvents.some(isCompactedStateEvent)) return runtimeEvents;
+    const threadKey = String(event.threadId);
+    const turnId = event.turnId ? String(event.turnId) : undefined;
+    let counts = byThread.get(threadKey);
+    if (!counts || counts.turnId !== turnId) {
+      counts = { turnId, item: 0, notification: 0 };
+      byThread.set(threadKey, counts);
+    }
+    const isNotification = event.method === "thread/compacted";
+    const seen = isNotification ? ++counts.notification : ++counts.item;
+    const seenFromOtherSource = isNotification ? counts.item : counts.notification;
+    return seen > seenFromOtherSource
+      ? runtimeEvents
+      : runtimeEvents.filter((runtimeEvent) => !isCompactedStateEvent(runtimeEvent));
+  };
+
+  return { apply };
+}
+
+/** Matches `dropSupersededProviderRetryActivities` in the web app, which keeps the latest per id. */
+const CODEX_PROVIDER_RETRY_DETAIL_KIND = "provider_retry";
+
+// Runtime events showing Codex moved on, so the row settles and the next warning starts a new one.
+const CODEX_RETRY_SETTLING_EVENT_TYPES: ReadonlySet<ProviderRuntimeEvent["type"]> = new Set([
+  "turn.started",
+  "turn.completed",
+  "turn.aborted",
+  "item.started",
+  "item.completed",
+  "content.delta",
+  "task.started",
+  "task.progress",
+  "runtime.error",
+  "session.exited",
+]);
+
+type CodexRetryOutcome = "recovered" | "failed" | "stopped";
+
+function codexRetryOutcome(event: ProviderRuntimeEvent): CodexRetryOutcome {
+  switch (event.type) {
+    case "turn.completed":
+      return event.payload.state === "failed"
+        ? "failed"
+        : event.payload.state === "completed"
+          ? "recovered"
+          : "stopped";
+    case "turn.aborted":
+      return "stopped";
+    case "runtime.error":
+    case "session.exited":
+      return "failed";
+    default:
+      return "recovered";
+  }
+}
+
+function codexRetrySettledMessage(
+  outcome: CodexRetryOutcome,
+  attempts: number,
+  detail: Record<string, unknown>,
+): string {
+  const retries = `${attempts} ${attempts === 1 ? "retry" : "retries"}`;
+  if (outcome === "recovered") return `Recovered after ${retries}`;
+  if (outcome === "stopped") return "Stopped while retrying";
+  return asObject(detail.error)?.codexErrorInfo === "serverOverloaded"
+    ? `Still at capacity after ${retries}`
+    : `Gave up after ${retries}`;
+}
+
+/**
+ * Codex sends one `error` with `willRetry` per attempt. Gives the attempts of one streak a shared
+ * `retryId`, so they read as a single updating row, and settles that row when the streak ends.
+ */
+export function makeCodexRetryStreakTracker() {
+  const streakByThread = new Map<
+    string,
+    {
+      readonly retryId: string;
+      readonly attempts: number;
+      readonly detail: Record<string, unknown>;
+      readonly turnId: ProviderEvent["turnId"];
+    }
+  >();
+
+  const apply = (
+    event: ProviderEvent,
+    runtimeEvents: ReadonlyArray<ProviderRuntimeEvent>,
+  ): ReadonlyArray<ProviderRuntimeEvent> => {
+    const threadKey = String(event.threadId);
+    const payload = asObject(event.payload);
+    const streak = streakByThread.get(threadKey);
+    // Codex logs connection errors between attempts, which says nothing about how the streak ends.
+    if (event.method === "process/stderr") return runtimeEvents;
+    if (event.method !== "error" || payload?.willRetry !== true) {
+      const settling = runtimeEvents.find((item) =>
+        CODEX_RETRY_SETTLING_EVENT_TYPES.has(item.type),
+      );
+      if (!settling || !streak) return runtimeEvents;
+      streakByThread.delete(threadKey);
+      const outcome = codexRetryOutcome(settling);
+      const settled: ProviderRuntimeEvent = {
+        ...runtimeEventBase(
+          { ...event, ...(event.turnId ? {} : { turnId: streak.turnId }) },
+          event.threadId,
+        ),
+        eventId: EventId.makeUnsafe(`${event.id}:retry-settled`),
+        type: "runtime.warning",
+        payload: {
+          message: codexRetrySettledMessage(outcome, streak.attempts, streak.detail),
+          detail: {
+            ...streak.detail,
+            kind: CODEX_PROVIDER_RETRY_DETAIL_KIND,
+            retryId: streak.retryId,
+            state: outcome,
+            willRetry: false,
+            attempts: streak.attempts,
+          },
+        },
+      };
+      return [settled, ...runtimeEvents];
+    }
+    const retryId = streak?.retryId ?? `codex-retry:${event.id}`;
+    streakByThread.set(threadKey, {
+      retryId,
+      attempts: (streak?.attempts ?? 0) + 1,
+      detail: payload,
+      turnId: event.turnId ?? streak?.turnId,
+    });
+    return runtimeEvents.map((runtimeEvent) =>
+      runtimeEvent.type === "runtime.warning"
+        ? {
+            ...runtimeEvent,
+            payload: {
+              ...runtimeEvent.payload,
+              detail: {
+                ...payload,
+                kind: CODEX_PROVIDER_RETRY_DETAIL_KIND,
+                retryId,
+                state: "retrying",
+              },
+            },
+          }
+        : runtimeEvent,
+    );
+  };
+
+  return { apply };
+}
+
+export function toRequestOpenedDetail(
+  method: string,
+  payload: Record<string, unknown> | undefined,
+  fileChanges?: CodexFileChangeKinds,
+): string | undefined {
+  if (method === CODEX_PERMISSIONS_APPROVAL_METHOD) {
+    const paths = readRequestedPermissionPaths(payload);
+    const requested = [...paths.read, ...paths.write];
+    return (
+      nonEmptyString(payload?.reason) ??
+      (requested.length > 0 ? `Access: ${requested.join(", ")}` : undefined)
+    );
+  }
+  if (method === CODEX_MCP_ELICITATION_METHOD) {
+    return nonEmptyString(payload?.message) ?? nonEmptyString(payload?.serverName);
+  }
+  if (method === "item/fileChange/requestApproval") {
+    return (
+      nonEmptyString(payload?.reason) ??
+      describeFileChanges(fileChanges) ??
+      nonEmptyString(payload?.grantRoot)
+    );
+  }
+  if (method === "applyPatchApproval") {
+    return (
+      nonEmptyString(payload?.reason) ??
+      describeFileChanges(payload?.fileChanges) ??
+      nonEmptyString(payload?.grantRoot)
+    );
+  }
+  return (
+    commandDetail(payload?.command) ??
+    nonEmptyString(payload?.reason) ??
+    nonEmptyString(payload?.prompt)
+  );
 }
 
 export function toRequestTypeFromKind(kind: unknown): CanonicalRequestType {
@@ -335,52 +730,71 @@ export function toCanonicalUserInputAnswers(
   );
 }
 
+function toUserInputOption(entry: unknown, index: number) {
+  const fromString = asString(entry)?.trim();
+  if (fromString) return { label: fromString, description: fromString };
+  const option = asObject(entry);
+  if (!option) return undefined;
+  const description = asString(option.description)?.trim();
+  const label = asString(option.label)?.trim() || description || `Option ${index + 1}`;
+  return { label, description: description || label };
+}
+
+/**
+ * Codex waits until this request is answered, so a blank field gets a stand-in rather than losing
+ * the question. No options means a free-text answer. Any object entry yields a question, which
+ * `hasCodexUserInputQuestions` relies on.
+ */
 export function toUserInputQuestions(payload: Record<string, unknown> | undefined) {
   const questions = asArray(payload?.questions);
   if (!questions) {
     return undefined;
   }
 
-  const parsedQuestions = questions
-    .map((entry) => {
-      const question = asObject(entry);
-      if (!question) return undefined;
-      const options = asArray(question.options)
-        ?.map((option) => {
-          const optionRecord = asObject(option);
-          if (!optionRecord) return undefined;
-          const label = asString(optionRecord.label)?.trim();
-          const description = asString(optionRecord.description)?.trim();
-          if (!label || !description) {
-            return undefined;
-          }
-          return { label, description };
-        })
-        .filter((option): option is { label: string; description: string } => option !== undefined);
-      const id = asString(question.id)?.trim();
-      const header = asString(question.header)?.trim();
-      const prompt = asString(question.question)?.trim();
-      if (!id || !header || !prompt || !options || options.length === 0) {
-        return undefined;
-      }
-      return {
-        id,
-        header,
-        question: prompt,
+  const parsedQuestions = questions.flatMap((entry, index) => {
+    const question = asObject(entry);
+    if (!question) return [];
+    const header = asString(question.header)?.trim();
+    const options = (asArray(question.options) ?? []).flatMap((option, optionIndex) => {
+      const parsed = toUserInputOption(option, optionIndex);
+      return parsed ? [parsed] : [];
+    });
+    return [
+      {
+        id: asString(question.id)?.trim() || `question-${index + 1}`,
+        header: header || "Question",
+        question: asString(question.question)?.trim() || header || "Codex is asking for input.",
         options,
-      };
-    })
-    .filter(
-      (
-        question,
-      ): question is {
-        id: string;
-        header: string;
-        question: string;
-        options: Array<{ label: string; description: string }>;
-      } => question !== undefined,
-    );
+      },
+    ];
+  });
 
+  return parsedQuestions.length > 0 ? parsedQuestions : undefined;
+}
+
+/**
+ * A `request_user_input_async` item as panel questions; undefined for any other item. Codex does
+ * not wait for these, so options carry no description and free text is always allowed.
+ */
+export function toCodexAsyncQuestions(item: Record<string, unknown> | undefined) {
+  if (item?.type !== "agentMessage" || item.delivery !== "async") return undefined;
+  const parsedQuestions = (asArray(item.questions) ?? []).flatMap((entry, index) => {
+    const question = asObject(entry);
+    const title = asString(question?.title)?.trim();
+    if (!title) return [];
+    const labels = (asArray(question?.options) ?? []).flatMap((option) => {
+      const label = asString(option)?.trim();
+      return label ? [label] : [];
+    });
+    return [
+      {
+        id: String(index),
+        header: "Question",
+        question: title,
+        options: [...new Set(labels)].map((label) => ({ label, description: label })),
+      },
+    ];
+  });
   return parsedQuestions.length > 0 ? parsedQuestions : undefined;
 }
 
@@ -526,6 +940,45 @@ export function runtimeEventBase(
   };
 }
 
+/** "Stop hook (user): reason" for a `hook/completed` run that stopped the turn, else undefined. */
+export function codexHookStopMessage(
+  payload: Record<string, unknown> | undefined,
+): string | undefined {
+  const run = asObject(payload?.run);
+  if (run?.status !== "stopped" || !Array.isArray(run.entries)) return undefined;
+  const reason = run.entries
+    .flatMap((entry) => {
+      const record = asObject(entry);
+      const text = record?.kind === "stop" ? asString(record.text)?.trim() : undefined;
+      return text ? [text] : [];
+    })
+    .join("\n");
+  if (!reason) return undefined;
+  // Codex sends camelCase names ("stop", "preToolUse"); show them as "Stop", "PreToolUse".
+  const rawEventName = asString(run.eventName)?.trim();
+  const eventName = rawEventName ? rawEventName[0]!.toUpperCase() + rawEventName.slice(1) : "Codex";
+  const source = asString(run.source)?.trim();
+  return `${eventName} hook${source ? ` (${source})` : ""}: ${reason}`;
+}
+
+function isFailedImageGeneration(item: Record<string, unknown>): boolean {
+  return item.type === "imageGeneration" && item.failure !== undefined && item.failure !== null;
+}
+
+function imageGenerationTitle(status: string | undefined): string {
+  switch (status) {
+    case "completed":
+      return "Generated image";
+    case "failed":
+      return "Image generation failed";
+    case "declined":
+    case "stopped":
+      return "Image generation stopped";
+    default:
+      return "Generating image";
+  }
+}
+
 export function mapItemLifecycle(
   event: ProviderEvent,
   canonicalThreadId: ThreadId,
@@ -543,13 +996,19 @@ export function mapItemLifecycle(
     return undefined;
   }
 
-  const detail = itemDetail(source, payload ?? {});
+  const detail = itemDetail(source, payload ?? {}, itemType);
   const status =
     lifecycle === "item.started"
       ? "inProgress"
       : lifecycle === "item.completed"
-        ? "completed"
+        ? source.status === "failed" || source.status === "declined" || source.status === "stopped"
+          ? source.status
+          : isFailedImageGeneration(source)
+            ? "failed"
+            : "completed"
         : undefined;
+  const title =
+    source.type === "imageGeneration" ? imageGenerationTitle(status) : itemTitle(itemType);
 
   return {
     ...runtimeEventBase(event, canonicalThreadId),
@@ -557,7 +1016,7 @@ export function mapItemLifecycle(
     payload: {
       itemType,
       ...(status ? { status } : {}),
-      ...(itemTitle(itemType) ? { title: itemTitle(itemType) } : {}),
+      ...(title ? { title } : {}),
       ...(detail ? { detail } : {}),
       ...(event.payload !== undefined ? { data: event.payload } : {}),
     },
@@ -567,6 +1026,7 @@ export function mapItemLifecycle(
 export function mapToRuntimeEvents(
   event: ProviderEvent,
   canonicalThreadId: ThreadId,
+  fileChanges?: CodexFileChangeKinds,
 ): ReadonlyArray<ProviderRuntimeEvent> {
   const payload = asObject(event.payload);
   const turn = asObject(payload?.turn);
@@ -605,14 +1065,17 @@ export function mapToRuntimeEvents(
       ];
     }
 
-    const detail =
-      asString(payload?.command) ?? asString(payload?.reason) ?? asString(payload?.prompt);
+    const detail = toRequestOpenedDetail(event.method, payload, fileChanges);
+    const methodRequestType = toRequestTypeFromMethod(event.method);
     return [
       {
         ...runtimeEventBase(event, canonicalThreadId),
         type: "request.opened",
         payload: {
-          requestType: toRequestTypeFromMethod(event.method),
+          requestType:
+            methodRequestType === "unknown" && event.requestKind !== undefined
+              ? toRequestTypeFromKind(event.requestKind)
+              : methodRequestType,
           ...(detail ? { detail } : {}),
           ...(event.payload !== undefined ? { args: event.payload } : {}),
         },
@@ -730,6 +1193,22 @@ export function mapToRuntimeEvents(
                   : toThreadState(asObject(payload?.thread)?.state ?? payload?.state),
           ...(event.payload !== undefined ? { detail: event.payload } : {}),
         },
+      },
+    ];
+  }
+
+  if (event.method === "thread/goal/updated" || event.method === "thread/goal/cleared") {
+    const goal =
+      event.method === "thread/goal/updated" ? codexGoalToProviderGoal(payload?.goal) : null;
+    // An update this build cannot read says nothing about the goal, so it must not read as cleared.
+    if (event.method === "thread/goal/updated" && goal === null) {
+      return [];
+    }
+    return [
+      {
+        ...runtimeEventBase(event, canonicalThreadId),
+        type: "thread.goal.updated",
+        payload: { goal },
       },
     ];
   }
@@ -867,9 +1346,26 @@ export function mapToRuntimeEvents(
     if (!source) {
       return [];
     }
+    const asyncQuestions = toCodexAsyncQuestions(item);
+    if (asyncQuestions) {
+      // Stable ids: Codex can replay the item, and the answer is matched by request id.
+      const stableId = `codex-async:${canonicalThreadId}:${asString(source.id) ?? event.id}`;
+      return [
+        {
+          ...runtimeEventBase(event, canonicalThreadId),
+          eventId: EventId.makeUnsafe(stableId),
+          requestId: RuntimeRequestId.makeUnsafe(stableId),
+          type: "user-input.requested",
+          payload: {
+            responseMode: "message",
+            questions: asyncQuestions,
+          },
+        },
+      ];
+    }
     const itemType = source ? toCanonicalItemType(source.type ?? source.kind) : "unknown";
     if (itemType === "plan") {
-      const detail = itemDetail(source, payload ?? {});
+      const detail = itemDetail(source, payload ?? {}, itemType);
       if (!detail) {
         return [];
       }
@@ -884,7 +1380,22 @@ export function mapToRuntimeEvents(
       ];
     }
     const completed = mapItemLifecycle(event, canonicalThreadId, "item.completed");
-    return completed ? [completed] : [];
+    if (!completed) {
+      return [];
+    }
+    // Newer CLIs deprecate thread/compacted in favor of this item; the timeline row needs the state event.
+    if (itemType === "context_compaction" && source.status !== "failed") {
+      return [
+        completed,
+        {
+          ...runtimeEventBase(event, canonicalThreadId),
+          eventId: EventId.makeUnsafe(`${event.id}:thread-compacted`),
+          type: "thread.state.changed",
+          payload: { state: "compacted" },
+        },
+      ];
+    }
+    return [completed];
   }
 
   if (
@@ -980,6 +1491,16 @@ export function mapToRuntimeEvents(
           requestType,
           ...(event.payload !== undefined ? { resolution: event.payload } : {}),
         },
+      },
+    ];
+  }
+
+  if (event.method === "item/tool/requestUserInput/resolved" && event.requestId) {
+    return [
+      {
+        ...runtimeEventBase(event, canonicalThreadId),
+        type: "user-input.resolved",
+        payload: { answers: {} },
       },
     ];
   }
@@ -1263,6 +1784,19 @@ export function mapToRuntimeEvents(
     ];
   }
 
+  if (event.method === "hook/completed") {
+    const message = codexHookStopMessage(payload);
+    return message
+      ? [
+          {
+            type: "runtime.warning",
+            ...runtimeEventBase(event, canonicalThreadId),
+            payload: { message, ...(event.payload !== undefined ? { detail: event.payload } : {}) },
+          },
+        ]
+      : [];
+  }
+
   if (event.method === "process/stderr") {
     const message = event.message ?? "Codex process stderr";
     const isFatal = isFatalCodexProcessStderrMessage(message);
@@ -1285,6 +1819,18 @@ export function mapToRuntimeEvents(
               ...(event.payload !== undefined ? { detail: event.payload } : {}),
             },
           },
+    ];
+  }
+
+  if (event.method === "session/autoModeUnsupported") {
+    return [
+      {
+        type: "runtime.warning",
+        ...runtimeEventBase(event, canonicalThreadId),
+        payload: {
+          message: event.message ?? "Auto mode is not supported by this Codex CLI.",
+        },
+      },
     ];
   }
 

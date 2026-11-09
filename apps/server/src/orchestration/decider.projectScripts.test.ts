@@ -94,6 +94,79 @@ describe("decider project scripts", () => {
     expect((event.payload as { scripts?: unknown[] }).scripts).toEqual(scripts);
   });
 
+  const readModelWithScripts = (scripts: ReadonlyArray<{ readonly id: string }>) => {
+    const now = new Date().toISOString();
+    return Effect.runPromise(
+      projectEvent(createEmptyReadModel(now), {
+        sequence: 1,
+        eventId: asEventId("evt-project-create-script-ids"),
+        aggregateKind: "project",
+        aggregateId: asProjectId("project-script-ids"),
+        type: "project.created",
+        occurredAt: now,
+        commandId: CommandId.makeUnsafe("cmd-project-create-script-ids"),
+        causationEventId: null,
+        correlationId: CommandId.makeUnsafe("cmd-project-create-script-ids"),
+        metadata: {},
+        payload: {
+          projectId: asProjectId("project-script-ids"),
+          title: "Script IDs",
+          workspaceRoot: "/tmp/script-ids",
+          defaultModelSelection: null,
+          scripts: scripts.map((script) => ({
+            id: script.id,
+            name: script.id,
+            command: "true",
+            icon: "play",
+            runOnWorktreeCreate: false,
+          })),
+          createdAt: now,
+          updatedAt: now,
+        },
+      }),
+    );
+  };
+
+  const updateScripts = (
+    readModel: Awaited<ReturnType<typeof readModelWithScripts>>,
+    ids: ReadonlyArray<string>,
+  ) =>
+    Effect.runPromise(
+      Effect.exit(
+        decideOrchestrationCommand({
+          command: {
+            type: "project.meta.update",
+            commandId: CommandId.makeUnsafe("cmd-project-update-script-ids"),
+            projectId: asProjectId("project-script-ids"),
+            scripts: ids.map((id) => ({
+              id,
+              name: id,
+              command: "true",
+              icon: "play",
+              runOnWorktreeCreate: false,
+            })),
+          },
+          readModel,
+        }),
+      ),
+    );
+
+  it.each(["Foo_Bar", "-leading", "a".repeat(25)])(
+    "rejects a new script with invalid id %s",
+    async (id) => {
+      const readModel = await readModelWithScripts([]);
+      const exit = await updateScripts(readModel, [id]);
+      expect(exit._tag).toBe("Failure");
+      expect(JSON.stringify(exit)).toContain(`Script ID '${id}'`);
+    },
+  );
+
+  it("keeps an already-persisted invalid script id editable and removable", async () => {
+    const readModel = await readModelWithScripts([{ id: "Legacy_Id" }]);
+    expect((await updateScripts(readModel, ["Legacy_Id", "lint"]))._tag).toBe("Success");
+    expect((await updateScripts(readModel, []))._tag).toBe("Success");
+  });
+
   it("emits user message and turn-start-requested events for thread.turn.start", async () => {
     const now = new Date().toISOString();
     const initial = createEmptyReadModel(now);

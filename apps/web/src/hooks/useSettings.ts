@@ -27,11 +27,12 @@ import {
   UnifiedSettings,
 } from "@piedpiper/contracts/settings";
 import { ensureNativeApi } from "~/nativeApi";
-import { useLocalStorage } from "./useLocalStorage";
+import { getLocalStorageItem, useLocalStorage } from "./useLocalStorage";
 import { normalizeCustomModelSlugs } from "~/modelSelection";
 import { Predicate, Schema, Struct } from "effect";
 import { DeepMutable } from "effect/Types";
-import { deepMerge } from "@piedpiper/shared/Struct";
+import { applyServerSettingsPatch } from "@piedpiper/shared/serverSettings";
+import { toastManager } from "~/components/ui/toast";
 import { applySettingsUpdated, getServerConfig, useServerSettings } from "~/rpc/serverState";
 
 const CLIENT_SETTINGS_STORAGE_KEY = "piedpiper:client-settings:v1";
@@ -60,6 +61,47 @@ function splitPatch(patch: Partial<UnifiedSettings>): {
   };
 }
 
+/**
+ * Optimistically applies a server settings patch, then persists it. When the server refuses the
+ * write (for example an unparseable settings.json), the previous settings are restored and the
+ * failure is reported, so the UI never shows a value that was not saved.
+ */
+export function persistServerSettingsPatch(
+  serverPatch: ServerSettingsPatch,
+  options?: {
+    readonly updateSettings?: (patch: ServerSettingsPatch) => Promise<unknown>;
+    readonly onError?: (message: string) => void;
+  },
+): Promise<void> {
+  const previousServerSettings = getServerConfig()?.settings ?? null;
+  if (previousServerSettings) {
+    applySettingsUpdated(applyServerSettingsPatch(previousServerSettings, serverPatch));
+  }
+  const updateSettings =
+    options?.updateSettings ?? ((patch) => ensureNativeApi().server.updateSettings(patch));
+  const onError = options?.onError ?? reportSettingsSaveError;
+  // The server pushes the saved settings on success, which reconciles the optimistic value.
+  return Promise.resolve()
+    .then(() => updateSettings(serverPatch))
+    .then(
+      () => undefined,
+      (error: unknown) => {
+        if (previousServerSettings) {
+          applySettingsUpdated(previousServerSettings);
+        }
+        onError(error instanceof Error ? error.message : String(error));
+      },
+    );
+}
+
+function reportSettingsSaveError(message: string): void {
+  toastManager.add({
+    type: "error",
+    title: "Could not save settings",
+    description: message,
+  });
+}
+
 // ── Hooks ────────────────────────────────────────────────────────────
 
 /**
@@ -67,9 +109,9 @@ function splitPatch(patch: Partial<UnifiedSettings>): {
  * only re-render when the slice they care about changes.
  */
 
-export function useSettings<T extends UnifiedSettings = UnifiedSettings>(
-  selector?: (s: UnifiedSettings) => T,
-): T {
+export function useSettings(): UnifiedSettings;
+export function useSettings<T>(selector: (s: UnifiedSettings) => T): T;
+export function useSettings<T>(selector?: (s: UnifiedSettings) => T): T | UnifiedSettings {
   const serverSettings = useServerSettings();
   const [clientSettings] = useLocalStorage(
     CLIENT_SETTINGS_STORAGE_KEY,
@@ -85,7 +127,23 @@ export function useSettings<T extends UnifiedSettings = UnifiedSettings>(
     [clientSettings, serverSettings],
   );
 
-  return useMemo(() => (selector ? selector(merged) : (merged as T)), [merged, selector]);
+  return useMemo(() => (selector ? selector(merged) : merged), [merged, selector]);
+}
+
+/**
+ * Non-reactive read of the client (localStorage) settings, for places that only
+ * need a value once, such as a `useState` initializer in a component rendered
+ * many times. Falls back to defaults when storage is empty or unreadable.
+ */
+export function readClientSettingsSnapshot(): ClientSettings {
+  try {
+    return (
+      getLocalStorageItem(CLIENT_SETTINGS_STORAGE_KEY, ClientSettingsSchema) ??
+      DEFAULT_CLIENT_SETTINGS
+    );
+  } catch {
+    return DEFAULT_CLIENT_SETTINGS;
+  }
 }
 
 /**
@@ -106,12 +164,7 @@ export function useUpdateSettings() {
       const { serverPatch, clientPatch } = splitPatch(patch);
 
       if (Object.keys(serverPatch).length > 0) {
-        const currentServerConfig = getServerConfig();
-        if (currentServerConfig) {
-          applySettingsUpdated(deepMerge(currentServerConfig.settings, serverPatch));
-        }
-        // Fire-and-forget RPC — push will reconcile on success
-        void ensureNativeApi().server.updateSettings(serverPatch);
+        void persistServerSettingsPatch(serverPatch);
       }
 
       if (Object.keys(clientPatch).length > 0) {

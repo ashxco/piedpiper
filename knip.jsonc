@@ -1,0 +1,41 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+  // OS tools the dev scripts, desktop app and tests shell out to.
+  "ignoreBinaries": ["hyprctl", "mkfifo", "pgrep", "pkill", "plutil", "ssh-keygen"],
+  // `!` marks production code: `knip:production` audits only these files, so dev scripts,
+  // test helpers and integration harnesses are not reported as unused there.
+  "workspaces": {
+    ".": {
+      "project": ["*.{js,mjs,cjs,ts,mts,cts}"],
+    },
+    "apps/desktop": {
+      "project": ["src/**/*.ts!", "scripts/**/*.mjs"],
+    },
+    "apps/server": {
+      "project": ["src/**/*.ts!", "!src/testUtils/**!", "scripts/**/*.ts", "integration/**/*.ts"],
+      // Built first so the server bundle can embed the web client.
+      "ignoreDependencies": ["@piedpiper/web"],
+    },
+    "apps/web": {
+      // vitest.browser.config.ts only lists browser tests; the default vitest run picks up the rest.
+      "entry": ["src/**/*.test.{ts,tsx}"],
+      "project": ["src/**/*.{ts,tsx,css}!", "test/**/*.{ts,tsx}"],
+    },
+    "scripts": {
+      // Invoked by root package.json scripts with `node`/`bun run`.
+      "entry": ["*.ts!", "*.mjs!"],
+      "project": ["**/*.{ts,mjs}!"],
+    },
+    // These workspace packages are private to this monorepo.
+    "packages/*": {
+      "includeEntryExports": true,
+      "project": ["src/**/*.ts!"],
+    },
+    "packages/shared": {
+      "includeEntryExports": true,
+      "project": ["src/**/*.ts!"],
+      // Loaded as a TypeScript language-service plugin from tsconfig.
+      "ignoreDependencies": ["@effect/language-service"],
+    },
+  },
+}

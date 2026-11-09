@@ -1,5 +1,11 @@
 import type { ComponentType } from "react";
-import { ArchiveIcon, ArrowLeftIcon, Settings2Icon } from "lucide-react";
+import {
+  ActivityIcon,
+  ArchiveIcon,
+  ArrowLeftIcon,
+  KeyboardIcon,
+  Settings2Icon,
+} from "lucide-react";
 import { useNavigate } from "@tanstack/react-router";
 
 import {
@@ -11,8 +17,13 @@ import {
   SidebarMenuItem,
   SidebarSeparator,
 } from "../ui/sidebar";
+import { useNavigateToMainApp } from "../sidebar/mainAppLocation";
 
-export type SettingsSectionPath = "/settings/general" | "/settings/archived";
+export type SettingsSectionPath =
+  | "/settings/general"
+  | "/settings/keybindings"
+  | "/settings/archived"
+  | "/settings/diagnostics";
 
 export const SETTINGS_NAV_ITEMS: ReadonlyArray<{
   label: string;
@@ -20,11 +31,14 @@ export const SETTINGS_NAV_ITEMS: ReadonlyArray<{
   icon: ComponentType<{ className?: string }>;
 }> = [
   { label: "General", to: "/settings/general", icon: Settings2Icon },
+  { label: "Keybindings", to: "/settings/keybindings", icon: KeyboardIcon },
   { label: "Archive", to: "/settings/archived", icon: ArchiveIcon },
+  { label: "Diagnostics", to: "/settings/diagnostics", icon: ActivityIcon },
 ];
 
 export function SettingsSidebarNav({ pathname }: { pathname: string }) {
   const navigate = useNavigate();
+  const navigateToMainApp = useNavigateToMainApp();
 
   return (
     <>
@@ -69,7 +83,7 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
             <SidebarMenuButton
               size="sm"
               className="gap-2 px-2 py-2 text-xs text-muted-foreground hover:bg-accent hover:text-foreground"
-              onClick={() => window.history.back()}
+              onClick={() => void navigateToMainApp()}
             >
               <ArrowLeftIcon className="size-4" />
               <span>Back</span>

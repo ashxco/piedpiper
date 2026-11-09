@@ -2,6 +2,8 @@ import { Schema } from "effect";
 import { NonNegativeInt, PositiveInt, TrimmedNonEmptyString } from "./baseSchemas";
 
 const TrimmedNonEmptyStringSchema = TrimmedNonEmptyString;
+// File names may start or end with spaces, so paths are kept exactly as Git reports them.
+export const GitFilePath = Schema.String.check(Schema.isNonEmpty());
 const GIT_LIST_BRANCHES_MAX_LIMIT = 200;
 
 // Domain Types
@@ -93,6 +95,8 @@ export type GitResolvedPullRequest = typeof GitResolvedPullRequest.Type;
 
 export const GitStatusInput = Schema.Struct({
   cwd: TrimmedNonEmptyStringSchema,
+  /** Omitted or true may fetch a stale upstream; false reads local refs only (passive polls). */
+  refreshUpstream: Schema.optional(Schema.Boolean),
 });
 export type GitStatusInput = typeof GitStatusInput.Type;
 
@@ -107,9 +111,7 @@ export const GitRunStackedActionInput = Schema.Struct({
   action: GitStackedAction,
   commitMessage: Schema.optional(TrimmedNonEmptyStringSchema.check(Schema.isMaxLength(10_000))),
   featureBranch: Schema.optional(Schema.Boolean),
-  filePaths: Schema.optional(
-    Schema.Array(TrimmedNonEmptyStringSchema).check(Schema.isMinLength(1)),
-  ),
+  filePaths: Schema.optional(Schema.Array(GitFilePath).check(Schema.isMinLength(1))),
 });
 export type GitRunStackedActionInput = typeof GitRunStackedActionInput.Type;
 
@@ -217,6 +219,7 @@ const GitStatusPr = Schema.Struct({
   baseBranch: TrimmedNonEmptyStringSchema,
   headBranch: TrimmedNonEmptyStringSchema,
   state: GitStatusPrState,
+  isDraft: Schema.optional(Schema.Boolean),
 });
 
 export const GitStatusResult = Schema.Struct({
@@ -226,9 +229,11 @@ export const GitStatusResult = Schema.Struct({
   branch: Schema.NullOr(TrimmedNonEmptyStringSchema),
   hasWorkingTreeChanges: Schema.Boolean,
   workingTree: Schema.Struct({
+    // Absolute worktree root that every files[].path is relative to; absent when unresolved.
+    rootPath: Schema.optional(GitFilePath),
     files: Schema.Array(
       Schema.Struct({
-        path: TrimmedNonEmptyStringSchema,
+        path: GitFilePath,
         insertions: NonNegativeInt,
         deletions: NonNegativeInt,
       }),
@@ -257,6 +262,38 @@ export const GitCreateWorktreeResult = Schema.Struct({
 });
 export type GitCreateWorktreeResult = typeof GitCreateWorktreeResult.Type;
 
+export const GitCreateWorktreeProgressEvent = Schema.Union([
+  Schema.Struct({
+    kind: Schema.Literal("checkout_progress"),
+    percent: NonNegativeInt,
+    completed: NonNegativeInt,
+    total: NonNegativeInt,
+  }),
+  Schema.Struct({
+    kind: Schema.Literal("finished"),
+    result: GitCreateWorktreeResult,
+  }),
+]);
+export type GitCreateWorktreeProgressEvent = typeof GitCreateWorktreeProgressEvent.Type;
+
+export const GitDiffPreviewScope = Schema.Literals(["uncommitted", "branch"]);
+export type GitDiffPreviewScope = typeof GitDiffPreviewScope.Type;
+
+export const GitDiffPreviewInput = Schema.Struct({
+  cwd: TrimmedNonEmptyStringSchema,
+  scope: GitDiffPreviewScope,
+  ignoreWhitespace: Schema.optional(Schema.Boolean),
+});
+export type GitDiffPreviewInput = typeof GitDiffPreviewInput.Type;
+
+export const GitDiffPreviewResult = Schema.Struct({
+  diff: Schema.String,
+  baseRef: Schema.NullOr(Schema.String),
+  truncated: Schema.Boolean,
+  untrackedIncomplete: Schema.Boolean,
+});
+export type GitDiffPreviewResult = typeof GitDiffPreviewResult.Type;
+
 export const GitResolvePullRequestResult = Schema.Struct({
   pullRequest: GitResolvedPullRequest,
 });
@@ -266,6 +303,10 @@ export const GitPreparePullRequestThreadResult = Schema.Struct({
   pullRequest: GitResolvedPullRequest,
   branch: TrimmedNonEmptyStringSchema,
   worktreePath: TrimmedNonEmptyStringSchema.pipe(Schema.NullOr),
+  /** False when the checkout kept its own state, so its code differs from the PR head. */
+  isOnPullRequestHead: Schema.optional(Schema.Boolean),
+  /** False when an existing worktree was reused without moving. */
+  checkoutChanged: Schema.optional(Schema.Boolean),
 });
 export type GitPreparePullRequestThreadResult = typeof GitPreparePullRequestThreadResult.Type;
 

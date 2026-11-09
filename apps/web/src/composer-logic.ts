@@ -1,8 +1,10 @@
 import { splitPromptIntoComposerSegments } from "./composer-editor-mentions";
+import { isComposerPathWord } from "./lib/composerProviderCommands";
 import { INLINE_TERMINAL_CONTEXT_PLACEHOLDER } from "./lib/terminalContext";
+import { isMacPlatform } from "./lib/utils";
 
 export type ComposerTriggerKind = "path" | "slash-command" | "slash-model";
-export type ComposerSlashCommand = "model" | "plan" | "default";
+export type ComposerSlashCommand = "model" | "plan" | "default" | "compact" | "usage-limits";
 
 export interface ComposerTrigger {
   kind: ComposerTriggerKind;
@@ -11,15 +13,9 @@ export interface ComposerTrigger {
   rangeEnd: number;
 }
 
-const SLASH_COMMANDS: readonly string[] = ["model", "plan", "default"];
+/** Prefix the Claude traits picker writes into the prompt for ultrathink effort. */
+export const ULTRATHINK_PROMPT_PREFIX = "Ultrathink:\n";
 
-let _additionalSlashCommands: readonly string[] = [];
-export function registerAdditionalSlashCommands(commands: readonly string[]): void {
-  _additionalSlashCommands = commands;
-}
-export function getAllSlashCommands(): readonly string[] {
-  return [...SLASH_COMMANDS, ..._additionalSlashCommands];
-}
 const isInlineTokenSegment = (
   segment: { type: "text"; text: string } | { type: "mention" } | { type: "terminal-context" },
 ): boolean => segment.type !== "text";
@@ -59,7 +55,7 @@ export function expandCollapsedComposerCursor(text: string, cursorInput: number)
 
   for (const segment of segments) {
     if (segment.type === "mention") {
-      const expandedLength = segment.path.length + 1;
+      const expandedLength = segment.tokenLength;
       if (remaining <= 1) {
         return expandedCursor + (remaining === 0 ? 0 : expandedLength);
       }
@@ -131,7 +127,7 @@ export function collapseExpandedComposerCursor(text: string, cursorInput: number
 
   for (const segment of segments) {
     if (segment.type === "mention") {
-      const expandedLength = segment.path.length + 1;
+      const expandedLength = segment.tokenLength;
       if (remaining === 0) {
         return collapsedCursor;
       }
@@ -200,6 +196,7 @@ export function detectComposerTrigger(text: string, cursorInput: number): Compos
   if (linePrefix.startsWith("/")) {
     const commandMatch = /^\/(\S*)$/.exec(linePrefix);
     if (commandMatch) {
+      if (isComposerPathWord(text, lineStart, cursor)) return null;
       const commandQuery = commandMatch[1] ?? "";
       if (commandQuery.toLowerCase() === "model") {
         return {
@@ -209,18 +206,15 @@ export function detectComposerTrigger(text: string, cursorInput: number): Compos
           rangeEnd: cursor,
         };
       }
-      if (getAllSlashCommands().some((command) => command.startsWith(commandQuery.toLowerCase()))) {
-        return {
-          kind: "slash-command",
-          query: commandQuery,
-          rangeStart: lineStart,
-          rangeEnd: cursor,
-        };
-      }
-      return null;
+      return {
+        kind: "slash-command",
+        query: commandQuery,
+        rangeStart: lineStart,
+        rangeEnd: cursor,
+      };
     }
 
-    const modelMatch = /^\/model(?:\s+(.*))?$/.exec(linePrefix);
+    const modelMatch = /^\/model(?:\s+(.*))?$/i.exec(linePrefix);
     if (modelMatch) {
       return {
         kind: "slash-model",
@@ -245,9 +239,21 @@ export function detectComposerTrigger(text: string, cursorInput: number): Compos
   };
 }
 
+/** Caret and trigger after replacing composer text and continuing at the end. */
+export function composerStateAtPromptEnd(text: string): {
+  cursor: number;
+  trigger: ComposerTrigger | null;
+} {
+  const cursor = collapseExpandedComposerCursor(text, text.length);
+  return {
+    cursor,
+    trigger: detectComposerTrigger(text, expandCollapsedComposerCursor(text, cursor)),
+  };
+}
+
 export function parseStandaloneComposerSlashCommand(
   text: string,
-): Exclude<ComposerSlashCommand, "model"> | null {
+): Extract<ComposerSlashCommand, "plan" | "default"> | null {
   const match = /^\/(plan|default)\s*$/i.exec(text.trim());
   if (!match) {
     return null;
@@ -255,6 +261,11 @@ export function parseStandaloneComposerSlashCommand(
   const command = match[1]?.toLowerCase();
   if (command === "plan") return "plan";
   return "default";
+}
+
+/** Exact `/usage-limits` opens the limits panel in place of starting a turn. */
+export function isStandaloneUsageLimitsSlashCommand(text: string): boolean {
+  return /^\/usage-limits\s*$/i.test(text.trim());
 }
 
 export function replaceTextRange(
@@ -267,4 +278,29 @@ export function replaceTextRange(
   const safeEnd = Math.max(safeStart, Math.min(text.length, rangeEnd));
   const nextText = `${text.slice(0, safeStart)}${replacement}${text.slice(safeEnd)}`;
   return { text: nextText, cursor: safeStart + replacement.length };
+}
+
+export interface ComposerLineBoundaryMove {
+  alter: "move" | "extend";
+  direction: "backward" | "forward";
+}
+
+/** macOS Chromium maps Home/End to document boundaries; the composer wants line boundaries. */
+export function resolveComposerLineBoundaryMove(
+  event: Pick<
+    KeyboardEvent,
+    "key" | "altKey" | "metaKey" | "ctrlKey" | "shiftKey" | "isComposing" | "keyCode"
+  >,
+  platform: string,
+): ComposerLineBoundaryMove | null {
+  if (!isMacPlatform(platform)) return null;
+  if (event.key !== "Home" && event.key !== "End") return null;
+  if (event.altKey || event.metaKey || event.ctrlKey) return null;
+  if (event.isComposing || event.keyCode === 229) {
+    return null;
+  }
+  return {
+    alter: event.shiftKey ? "extend" : "move",
+    direction: event.key === "Home" ? "backward" : "forward",
+  };
 }

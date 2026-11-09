@@ -7,6 +7,7 @@ import {
   GitRunStackedActionResult,
   GitRunStackedActionInput,
   GitResolvePullRequestResult,
+  GitStatusResult,
 } from "../src/git";
 
 const decodeCreateWorktreeInput = Schema.decodeUnknownSync(GitCreateWorktreeInput);
@@ -16,6 +17,7 @@ const decodePreparePullRequestThreadInput = Schema.decodeUnknownSync(
 const decodeRunStackedActionInput = Schema.decodeUnknownSync(GitRunStackedActionInput);
 const decodeRunStackedActionResult = Schema.decodeUnknownSync(GitRunStackedActionResult);
 const decodeResolvePullRequestResult = Schema.decodeUnknownSync(GitResolvePullRequestResult);
+const decodeStatusResult = Schema.decodeUnknownSync(GitStatusResult);
 
 describe("GitCreateWorktreeInput", () => {
   it("accepts omitted newBranch for existing-branch worktrees", () => {
@@ -71,6 +73,48 @@ describe("GitRunStackedActionInput", () => {
 
     expect(parsed.actionId).toBe("action-1");
     expect(parsed.action).toBe("commit_push");
+  });
+
+  it("keeps leading and trailing whitespace in selected file paths", () => {
+    const parsed = decodeRunStackedActionInput({
+      actionId: "action-1",
+      cwd: "/repo",
+      action: "commit",
+      filePaths: [" notes.txt", "draft.md "],
+    });
+
+    expect(parsed.filePaths).toEqual([" notes.txt", "draft.md "]);
+    expect(() =>
+      decodeRunStackedActionInput({
+        actionId: "action-1",
+        cwd: "/repo",
+        action: "commit",
+        filePaths: [""],
+      }),
+    ).toThrow();
+  });
+});
+
+describe("GitStatusResult", () => {
+  it("keeps leading and trailing whitespace in working tree paths", () => {
+    const parsed = decodeStatusResult({
+      isRepo: true,
+      hasOriginRemote: false,
+      isDefaultBranch: true,
+      branch: "main",
+      hasWorkingTreeChanges: true,
+      workingTree: {
+        files: [{ path: " notes.txt ", insertions: 1, deletions: 0 }],
+        insertions: 1,
+        deletions: 0,
+      },
+      hasUpstream: false,
+      aheadCount: 0,
+      behindCount: 0,
+      pr: null,
+    });
+
+    expect(parsed.workingTree.files[0]?.path).toBe(" notes.txt ");
   });
 });
 

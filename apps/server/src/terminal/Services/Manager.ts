@@ -13,13 +13,16 @@ import {
   TerminalCwdError,
   TerminalError,
   TerminalHistoryError,
+  TerminalMetadataStreamEvent,
   TerminalNotRunningError,
   TerminalOpenInput,
+  TerminalResizeError,
   TerminalResizeInput,
   TerminalRestartInput,
   TerminalSessionSnapshot,
   TerminalSessionLookupError,
   TerminalSessionStatus,
+  TerminalWriteError,
   TerminalWriteInput,
 } from "@piedpiper/contracts";
 import { PtyProcess } from "./PTY";
@@ -30,7 +33,9 @@ export {
   TerminalError,
   TerminalHistoryError,
   TerminalNotRunningError,
+  TerminalResizeError,
   TerminalSessionLookupError,
+  TerminalWriteError,
 };
 
 export interface TerminalSessionState {
@@ -71,7 +76,8 @@ export interface TerminalManagerShape {
    * Open or attach to a terminal session.
    *
    * Reuses an existing session for the same thread/terminal id and restores
-   * persisted history on first open.
+   * persisted history on first open. With `resume`, a stopped session is
+   * returned without a respawn and a closed one fails with a lookup error.
    */
   readonly open: (
     input: TerminalOpenInput,
@@ -115,6 +121,16 @@ export interface TerminalManagerShape {
    */
   readonly subscribe: (
     listener: (event: TerminalEvent) => Effect.Effect<void>,
+  ) => Effect.Effect<() => void>;
+
+  /**
+   * Subscribe to terminal status changes: a snapshot of the live sessions, then
+   * every upsert and removal, with nothing lost between them.
+   *
+   * Returns an unsubscribe function.
+   */
+  readonly subscribeMetadata: (
+    listener: (event: TerminalMetadataStreamEvent) => Effect.Effect<void>,
   ) => Effect.Effect<() => void>;
 }
 

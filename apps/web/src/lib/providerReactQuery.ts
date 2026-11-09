@@ -12,6 +12,7 @@ interface CheckpointDiffQueryInput {
   fromTurnCount: number | null;
   toTurnCount: number | null;
   cacheScope?: string | null;
+  ignoreWhitespace?: boolean;
   enabled?: boolean;
 }
 
@@ -25,6 +26,7 @@ export const providerQueryKeys = {
       input.fromTurnCount,
       input.toTurnCount,
       input.cacheScope ?? null,
+      input.ignoreWhitespace === true,
     ] as const,
 };
 
@@ -33,6 +35,7 @@ function decodeCheckpointDiffRequest(input: CheckpointDiffQueryInput) {
     return Schema.decodeUnknownOption(OrchestrationGetFullThreadDiffInput)({
       threadId: input.threadId,
       toTurnCount: input.toTurnCount,
+      ...(input.ignoreWhitespace === true ? { ignoreWhitespace: true } : {}),
     }).pipe(Option.map((fields) => ({ kind: "fullThreadDiff" as const, input: fields })));
   }
 
@@ -40,6 +43,7 @@ function decodeCheckpointDiffRequest(input: CheckpointDiffQueryInput) {
     threadId: input.threadId,
     fromTurnCount: input.fromTurnCount,
     toTurnCount: input.toTurnCount,
+    ...(input.ignoreWhitespace === true ? { ignoreWhitespace: true } : {}),
   }).pipe(Option.map((fields) => ({ kind: "turnDiff" as const, input: fields })));
 }
 
@@ -60,7 +64,7 @@ function normalizeCheckpointErrorMessage(error: unknown): string {
   }
 
   const lower = message.toLowerCase();
-  if (lower.includes("not a git repository")) {
+  if (lower.includes("not a git repository") || lower.includes("cannot use bare repository")) {
     return "Turn diffs are unavailable because this project is not a git repository.";
   }
 

@@ -1,33 +1,42 @@
 @import "tailwindcss";
 
 @custom-variant dark (&:is(.dark, .dark *));
+/* Window Controls Overlay: active when Electron exposes native titlebar control geometry. */
+@custom-variant wco (&:is(.wco, .wco *));
 
 @theme inline {
   --animate-skeleton: skeleton 2s -1s infinite linear;
+  /* Stepped so in-progress text shimmer repaints ~15 times a second instead of every frame. */
+  --animate-shimmer-text: skeleton 2s -1s infinite steps(30);
+  /* Duty-cycled indicators: flat holds with short stepped ramps, so frames are only produced while the value changes. */
+  --animate-status-pulse: status-pulse 2s infinite;
+  --animate-status-ping: status-ping 2s infinite;
   --color-warning-foreground: var(--warning-foreground);
   --color-warning: var(--warning);
   --color-success-foreground: var(--success-foreground);
   --color-success: var(--success);
+  --color-diff-addition: var(--diff-addition);
+  --color-diff-deletion: var(--diff-deletion);
   --color-info-foreground: var(--info-foreground);
   --color-info: var(--info);
   --color-destructive-foreground: var(--destructive-foreground);
   --color-ring: var(--ring);
-  --color-input: var(--input);
-  --color-border: var(--border);
+  --color-input: var(--contrast-input);
+  --color-border: var(--contrast-border);
   --color-destructive: var(--destructive);
-  --color-accent-foreground: var(--accent-foreground);
+  --color-accent-foreground: var(--contrast-accent-foreground);
   --color-accent: var(--accent);
-  --color-muted-foreground: var(--muted-foreground);
+  --color-muted-foreground: var(--contrast-muted-foreground);
   --color-muted: var(--muted);
-  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary-foreground: var(--contrast-secondary-foreground);
   --color-secondary: var(--secondary);
   --color-primary-foreground: var(--primary-foreground);
   --color-primary: var(--primary);
-  --color-popover-foreground: var(--popover-foreground);
+  --color-popover-foreground: var(--contrast-popover-foreground);
   --color-popover: var(--popover);
-  --color-card-foreground: var(--card-foreground);
+  --color-card-foreground: var(--contrast-card-foreground);
   --color-card: var(--card);
-  --color-foreground: var(--foreground);
+  --color-foreground: var(--contrast-foreground);
   --color-background: var(--background);
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
@@ -39,6 +48,33 @@
   @keyframes skeleton {
     to {
       background-position: -200% 0;
+    }
+  }
+  @keyframes status-pulse {
+    0%,
+    40% {
+      opacity: 1;
+      animation-timing-function: steps(6);
+    }
+    50%,
+    90% {
+      opacity: 0.5;
+      animation-timing-function: steps(6);
+    }
+    100% {
+      opacity: 1;
+    }
+  }
+  @keyframes status-ping {
+    0% {
+      opacity: 0.9;
+      scale: 0.75;
+      animation-timing-function: steps(8);
+    }
+    40%,
+    100% {
+      opacity: 0;
+      scale: 2;
     }
   }
 }
@@ -56,7 +92,7 @@
 /* Blur the sidebar directly when an alert dialog is open, since
    backdrop-filter on the dialog's backdrop can't reach through the
    sidebar's own stacking context. */
-body:has([data-slot="alert-dialog-backdrop"]) [data-slot="sidebar-container"] {
+:root[data-alert-dialog-open] [data-slot="sidebar-container"] {
   filter: blur(12px) brightness(0.6);
   transition: filter 0.2s ease-out;
 }
@@ -136,8 +172,71 @@ body:has([data-slot="alert-dialog-backdrop"]) [data-slot="sidebar-container"] {
   }
 }
 
+/* Appearance contrast (client setting, written to <html> by lib/appearanceContrast.ts). At the default
+   every mix is 100%/0%, so the roles below equal the raw tokens. Redeclared on the thread sidebar
+   because it overrides the raw tokens locally and a var() resolves where it is declared. */
+:root {
+  --appearance-contrast-base: 100%;
+  --appearance-contrast-boost: 0%;
+  --appearance-contrast-border-boost: 0%;
+  --appearance-contrast-target: black;
+
+  @variant dark {
+    --appearance-contrast-target: white;
+  }
+}
+
+:root,
+.contrast-palette {
+  --contrast-foreground: color-mix(
+    in oklab,
+    color-mix(in oklab, var(--foreground) var(--appearance-contrast-base), var(--background)),
+    var(--appearance-contrast-target) var(--appearance-contrast-boost)
+  );
+  --contrast-muted-foreground: color-mix(
+    in oklab,
+    color-mix(in oklab, var(--muted-foreground) var(--appearance-contrast-base), var(--background)),
+    var(--appearance-contrast-target) var(--appearance-contrast-boost)
+  );
+  --contrast-card-foreground: color-mix(
+    in oklab,
+    color-mix(in oklab, var(--card-foreground) var(--appearance-contrast-base), var(--card)),
+    var(--appearance-contrast-target) var(--appearance-contrast-boost)
+  );
+  --contrast-popover-foreground: color-mix(
+    in oklab,
+    color-mix(in oklab, var(--popover-foreground) var(--appearance-contrast-base), var(--popover)),
+    var(--appearance-contrast-target) var(--appearance-contrast-boost)
+  );
+  --contrast-accent-foreground: color-mix(
+    in oklab,
+    color-mix(in oklab, var(--accent-foreground) var(--appearance-contrast-base), var(--accent)),
+    var(--appearance-contrast-target) var(--appearance-contrast-boost)
+  );
+  --contrast-secondary-foreground: color-mix(
+    in oklab,
+    color-mix(
+      in oklab,
+      var(--secondary-foreground) var(--appearance-contrast-base),
+      var(--secondary)
+    ),
+    var(--appearance-contrast-target) var(--appearance-contrast-boost)
+  );
+  --contrast-border: color-mix(
+    in srgb,
+    color-mix(in srgb, var(--border) var(--appearance-contrast-base), transparent),
+    var(--foreground) var(--appearance-contrast-border-boost)
+  );
+  --contrast-input: color-mix(
+    in srgb,
+    color-mix(in srgb, var(--input) var(--appearance-contrast-base), transparent),
+    var(--foreground) var(--appearance-contrast-border-boost)
+  );
+}
+
 body {
   font-family:
+    "DM Sans Variable",
     "DM Sans",
     -apple-system,
     BlinkMacSystemFont,
@@ -161,22 +260,95 @@ body,
   overscroll-behavior-y: none;
 }
 
-body::after {
-  content: "";
-  position: fixed;
-  inset: 0;
-  pointer-events: none;
-  opacity: 0.035;
-  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+/* Grain lives in surface backgrounds, not a fixed overlay: a full-viewport overlay makes the compositor
+   re-blend the whole window on every animated frame. The 0.035 opacity is baked into the SVG rect.
+   Exactly one layer per stack opts in with the surface-grain utility (sidebar wrapper, SidebarInset,
+   standalone screens) so translucent layers never double the density. */
+:root {
+  --surface-grain: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.035'/%3E%3C/svg%3E");
+}
+
+@utility surface-grain {
+  background-image: var(--surface-grain);
   background-repeat: repeat;
   background-size: 256px 256px;
 }
 
+/* Chat column width (client setting, mirrored to <html data-chat-width>). The composer and
+   full-width banners are 4rem wider than the timeline. */
+:root {
+  --chat-max-width: 48rem;
+  --chat-composer-max-width: 52rem;
+}
+
+:root[data-chat-width="wide"] {
+  --chat-max-width: 72rem;
+  --chat-composer-max-width: 76rem;
+}
+
+:root[data-chat-width="full"] {
+  --chat-max-width: 100%;
+  --chat-composer-max-width: 100%;
+}
+
+/* Diff code follows the code-size setting; the offsets keep @pierre/diffs' 13px/20px at the 14px default. */
+:root {
+  --diffs-font-size: calc(var(--font-size-code, 14px) - 1px);
+  --diffs-line-height: calc(var(--font-size-code, 14px) + 6px);
+}
+
+/* Diff colours (client setting, mirrored to <html data-diff-color-scheme>). Every added/removed
+   surface, marker and +N/-N count reads these two tokens. */
+:root {
+  --diff-addition: var(--success);
+  --diff-deletion: var(--destructive);
+}
+
+:root[data-diff-color-scheme="blue-orange"] {
+  --diff-addition: var(--color-blue-600);
+  --diff-deletion: var(--color-orange-600);
+  --diffs-addition-color-override: var(--diff-addition);
+  --diffs-deletion-color-override: var(--diff-deletion);
+}
+
+:root.dark[data-diff-color-scheme="blue-orange"] {
+  --diff-addition: var(--color-blue-400);
+  --diff-deletion: var(--color-orange-400);
+}
+
 pre,
-code,
+code {
+  font-family: var(
+    --code-font-family,
+    "SF Mono",
+    "SFMono-Regular",
+    Consolas,
+    "Liberation Mono",
+    Menlo,
+    monospace
+  );
+}
+
 textarea,
 input {
   font-family: "SF Mono", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+}
+
+/* Find in thread: names match THREAD_FIND_HIGHLIGHT_NAME and THREAD_FIND_ACTIVE_HIGHLIGHT_NAME. */
+::highlight(piedpiper-thread-find) {
+  color: var(--color-foreground);
+  background-color: oklch(0.826487 0.157967 78.604 / 0.3);
+}
+
+::highlight(piedpiper-thread-find-active) {
+  color: oklch(0.216164 0.028283 77.423);
+  background-color: oklch(0.774202 0.151946 74.331);
+}
+
+/* A workspace area with no control of its own takes F6 focus itself; keep that visible. */
+[data-workspace-area]:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
 }
 
 /* Window drag region (frameless titlebar) */
@@ -284,12 +456,12 @@ label:has(> select#reasoning-effort) select {
 }
 
 .chat-markdown ul {
-  padding-left: 1.25rem;
+  padding-inline-start: 1.25rem;
   list-style-type: disc;
 }
 
 .chat-markdown ol {
-  padding-left: 1.25rem;
+  padding-inline-start: 1.25rem;
   list-style-type: decimal;
 }
 
@@ -314,9 +486,9 @@ label:has(> select#reasoning-effort) select {
 }
 
 .chat-markdown a {
-  color: var(--foreground);
+  color: var(--contrast-foreground);
   text-decoration: underline;
-  text-decoration-color: color-mix(in srgb, var(--foreground) 40%, transparent);
+  text-decoration-color: color-mix(in srgb, var(--contrast-foreground) 40%, transparent);
 }
 
 .chat-markdown a:hover {
@@ -324,24 +496,26 @@ label:has(> select#reasoning-effort) select {
 }
 
 .chat-markdown blockquote {
-  border-left: 2px solid var(--border);
-  padding-left: 0.8rem;
-  color: var(--muted-foreground);
+  border-inline-start: 2px solid var(--contrast-border);
+  padding-inline-start: 0.8rem;
+  color: var(--contrast-muted-foreground);
 }
 
 .chat-markdown :not(pre) > code {
-  border: 1px solid var(--border);
+  border: 1px solid var(--contrast-border);
   border-radius: 0.375rem;
   background: var(--muted);
   padding: 0.1rem 0.35rem;
-  color: var(--foreground);
-  font-size: 0.75rem;
+  color: var(--contrast-foreground);
+  font-size: calc(var(--font-size-code, 14px) - 2px);
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
 }
 
 .chat-markdown pre {
   max-width: 100%;
   overflow-x: auto;
-  border: 1px solid var(--border);
+  border: 1px solid var(--contrast-border);
   border-radius: 0.75rem;
   background: var(--muted);
   padding: 0.8rem 0.9rem;
@@ -352,16 +526,18 @@ label:has(> select#reasoning-effort) select {
   background: transparent;
   padding: 0;
   line-height: 1.5;
-  font-size: 0.875rem;
+  font-size: var(--font-size-code, 0.875rem);
 }
 
 .chat-markdown .chat-markdown-codeblock {
+  --chat-markdown-codeblock-copy-button-space: 1.5rem;
   position: relative;
   margin: 0.65rem 0;
 }
 
 .chat-markdown .chat-markdown-codeblock pre {
   margin: 0;
+  padding-right: calc(0.9rem + var(--chat-markdown-codeblock-copy-button-space));
 }
 
 .chat-markdown .chat-markdown-copy-button {
@@ -375,9 +551,10 @@ label:has(> select#reasoning-effort) select {
   height: 1.5rem;
   width: 1.5rem;
   border-radius: 0.375rem;
-  border: 1px solid var(--border);
+  border: 1px solid var(--contrast-border);
   background: color-mix(in srgb, var(--background) 82%, transparent);
-  color: var(--muted-foreground);
+  color: var(--contrast-muted-foreground);
+  cursor: pointer;
   opacity: 0;
   pointer-events: none;
   transition:
@@ -393,24 +570,64 @@ label:has(> select#reasoning-effort) select {
 }
 
 .chat-markdown .chat-markdown-copy-button:hover {
-  color: var(--foreground);
-  border-color: color-mix(in srgb, var(--border) 70%, var(--foreground));
+  color: var(--contrast-foreground);
+  border-color: color-mix(in srgb, var(--contrast-border) 70%, var(--contrast-foreground));
 }
 
-.chat-markdown .chat-markdown-shiki .shiki {
+.chat-markdown .chat-markdown-shiki :is(.shiki, .diffs) {
   background: color-mix(in srgb, var(--muted) 78%, var(--background)) !important;
+}
+
+/* Plain-text fences override the highlighter's inline foreground colors. */
+.chat-markdown
+  .chat-markdown-codeblock:is(
+    [data-language="text" i],
+    [data-language="txt" i],
+    [data-language="plain" i],
+    [data-language="plaintext" i]
+  ),
+.chat-markdown
+  .chat-markdown-codeblock:is(
+    [data-language="text" i],
+    [data-language="txt" i],
+    [data-language="plain" i],
+    [data-language="plaintext" i]
+  )
+  :is(pre, pre *) {
+  color: inherit !important;
 }
 
 .chat-markdown table {
   width: 100%;
   border-collapse: collapse;
+  overflow-wrap: normal;
+  word-break: normal;
 }
 
 .chat-markdown th,
 .chat-markdown td {
-  border: 1px solid var(--border);
+  border: 1px solid var(--contrast-border);
   padding: 0.35rem 0.45rem;
-  text-align: left;
+  text-align: start;
+  vertical-align: top;
+}
+
+.chat-markdown :is(th, td) {
+  max-width: 24rem;
+  overflow-wrap: break-word;
+}
+
+/* A display formula keeps its natural width and scrolls with the table. */
+.chat-markdown :is(th, td):has([data-markdown-math]) {
+  max-width: none;
+}
+
+.chat-markdown .chat-markdown-table-container {
+  margin: 0.65rem 0;
+}
+
+.chat-markdown .chat-markdown-table-scroll > table {
+  margin: 0;
 }
 
 /* Diffs theme bridge (match diff surfaces to app palette) */
@@ -419,10 +636,57 @@ label:has(> select#reasoning-effort) select {
 }
 
 .diff-render-file {
-  border: 1px solid var(--border);
+  border: 1px solid var(--contrast-border);
   border-radius: 0.5rem;
   overflow: clip;
   background: color-mix(in srgb, var(--card) 92%, var(--background));
+}
+
+.diff-render-file-placeholder {
+  background-image: repeating-linear-gradient(
+    to bottom,
+    transparent 0 calc(var(--diff-placeholder-line-height) - 1px),
+    color-mix(in srgb, var(--contrast-border) 35%, transparent) 0
+      var(--diff-placeholder-line-height)
+  );
+}
+
+.diff-render-file-placeholder-header {
+  position: sticky;
+  top: 0;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  /* Lines the path up with the viewer's, which has its chevron and file icon before it. */
+  padding-inline: 68px 12px;
+  cursor: pointer;
+  /* The viewer's own header font, and its title takes the foreground of the diff theme. */
+  font-family: var(
+    --diffs-header-font-family,
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    Roboto,
+    "Helvetica Neue",
+    "Noto Sans",
+    "Liberation Sans",
+    Arial,
+    sans-serif
+  );
+  font-size: var(--diffs-font-size, 13px);
+  line-height: var(--diffs-line-height, 20px);
+  color: #0a0a0a;
+  background-color: color-mix(in srgb, var(--card) 94%, var(--contrast-foreground));
+  border-bottom: 1px solid var(--contrast-border);
+}
+
+:root.dark .diff-render-file-placeholder-header {
+  color: #fafafa;
+}
+
+/* Like the viewer's title, which keeps the end of a long path in view. */
+.diff-render-file-placeholder-header [data-title] {
+  direction: rtl;
 }
 
 @keyframes ultrathink-rainbow {

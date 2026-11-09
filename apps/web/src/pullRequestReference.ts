@@ -1,5 +1,5 @@
-const GITHUB_PULL_REQUEST_URL_PATTERN =
-  /^https:\/\/github\.com\/[^/\s]+\/[^/\s]+\/pull\/(\d+)(?:[/?#].*)?$/i;
+const PULL_REQUEST_URL_PATTERN =
+  /^https?:\/\/[^/?#\s]+\/[^/\s]+\/[^/\s]+\/pull\/(\d+)(?:[/?#].*)?$/i;
 const PULL_REQUEST_NUMBER_PATTERN = /^#?(\d+)$/;
 const GITHUB_CLI_PR_CHECKOUT_PATTERN = /^gh\s+pr\s+checkout\s+(.+)$/i;
 
@@ -15,7 +15,7 @@ export function parsePullRequestReference(input: string): string | null {
     return null;
   }
 
-  const urlMatch = GITHUB_PULL_REQUEST_URL_PATTERN.exec(normalizedInput);
+  const urlMatch = PULL_REQUEST_URL_PATTERN.exec(normalizedInput);
   if (urlMatch?.[1]) {
     return normalizedInput;
   }

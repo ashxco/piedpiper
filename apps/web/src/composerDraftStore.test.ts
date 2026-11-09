@@ -12,15 +12,22 @@ import {
   clearPromotedDraftThread,
   clearPromotedDraftThreads,
   type ComposerImageAttachment,
+  composerDraftHasUserContent,
+  discardComposerDraftContent,
+  moveFailedFirstSendToDraftThread,
+  selectThreadHasUnsentDraft,
   useComposerDraftStore,
+  deriveEffectiveComposerModelState,
 } from "./composerDraftStore";
 import { removeLocalStorageItem, setLocalStorageItem } from "./hooks/useLocalStorage";
+import { partializeComposerDraftStoreState } from "./lib/composerDraftPersistence";
 import {
   INLINE_TERMINAL_CONTEXT_PLACEHOLDER,
   insertInlineTerminalContextPlaceholder,
   type TerminalContextDraft,
 } from "./lib/terminalContext";
-import { createDebouncedStorage } from "./lib/storage";
+import { createDebouncedStorage, createDeferredStorage } from "./lib/storage";
+import { useReviewCommentDraftStore } from "./reviewCommentDraftStore";
 
 function makeImage(input: {
   id: string;
@@ -211,6 +218,67 @@ describe("composerDraftStore clearComposerContent", () => {
   });
 });
 
+describe("unsent draft marker", () => {
+  const threadId = ThreadId.makeUnsafe("thread-unsent");
+  let originalRevokeObjectUrl: typeof URL.revokeObjectURL;
+  let revokeSpy: ReturnType<typeof vi.fn<(url: string) => void>>;
+
+  beforeEach(() => {
+    resetComposerDraftStore();
+    originalRevokeObjectUrl = URL.revokeObjectURL;
+    revokeSpy = vi.fn();
+    URL.revokeObjectURL = revokeSpy;
+  });
+
+  afterEach(() => {
+    URL.revokeObjectURL = originalRevokeObjectUrl;
+  });
+
+  it("flags threads with typed text, images or terminal contexts, but not settings alone", () => {
+    const hasDraft = () => selectThreadHasUnsentDraft(useComposerDraftStore.getState(), threadId);
+    expect(hasDraft()).toBe(false);
+    useComposerDraftStore.getState().setRuntimeMode(threadId, "approval-required");
+    expect(hasDraft()).toBe(false);
+    useComposerDraftStore.getState().setPrompt(threadId, "half a thought");
+    expect(hasDraft()).toBe(true);
+    useComposerDraftStore.getState().setPrompt(threadId, "");
+    useComposerDraftStore
+      .getState()
+      .addImage(threadId, makeImage({ id: "img-1", previewUrl: "blob:draft" }));
+    expect(hasDraft()).toBe(true);
+    expect(
+      selectThreadHasUnsentDraft(useComposerDraftStore.getState(), ThreadId.makeUnsafe("other")),
+    ).toBe(false);
+  });
+
+  it("only changes when a draft appears or disappears, not on every keystroke", () => {
+    const changes: boolean[] = [];
+    let previous = selectThreadHasUnsentDraft(useComposerDraftStore.getState(), threadId);
+    const unsubscribe = useComposerDraftStore.subscribe((state) => {
+      const next = selectThreadHasUnsentDraft(state, threadId);
+      if (next !== previous) changes.push(next);
+      previous = next;
+    });
+    for (const prompt of ["h", "he", "hel", "hello", ""]) {
+      useComposerDraftStore.getState().setPrompt(threadId, prompt);
+    }
+    unsubscribe();
+    expect(changes).toEqual([true, false]);
+  });
+
+  it("discards the draft content and revokes image preview URLs", () => {
+    useComposerDraftStore.getState().setPrompt(threadId, "draft");
+    useComposerDraftStore
+      .getState()
+      .addImage(threadId, makeImage({ id: "img-2", previewUrl: "blob:discard" }));
+
+    discardComposerDraftContent(threadId);
+
+    expect(selectThreadHasUnsentDraft(useComposerDraftStore.getState(), threadId)).toBe(false);
+    expect(revokeSpy).toHaveBeenCalledWith("blob:discard");
+  });
+});
+
 describe("composerDraftStore syncPersistedAttachments", () => {
   const threadId = ThreadId.makeUnsafe("thread-sync-persisted");
 
@@ -293,6 +361,20 @@ describe("composerDraftStore terminal contexts", () => {
     expect(draft?.terminalContexts.map((context) => context.id)).toEqual(["ctx-1"]);
   });
 
+  it("caps oversized terminal selections when they are added", () => {
+    useComposerDraftStore
+      .getState()
+      .addTerminalContext(
+        threadId,
+        makeTerminalContext({ id: "ctx-big", text: "z".repeat(200_000) }),
+      );
+
+    const text =
+      useComposerDraftStore.getState().draftsByThreadId[threadId]?.terminalContexts[0]?.text;
+    expect(text?.length).toBe(64_000);
+    expect(text?.endsWith("… truncated …")).toBe(true);
+  });
+
   it("clears terminal contexts when clearing composer content", () => {
     useComposerDraftStore
       .getState()
@@ -343,12 +425,9 @@ describe("composerDraftStore terminal contexts", () => {
       .getState()
       .addTerminalContext(threadId, makeTerminalContext({ id: "ctx-persist" }));
 
-    const persistApi = useComposerDraftStore.persist as unknown as {
-      getOptions: () => {
-        partialize: (state: ReturnType<typeof useComposerDraftStore.getState>) => unknown;
-      };
-    };
-    const persistedState = persistApi.getOptions().partialize(useComposerDraftStore.getState()) as {
+    const persistedState = partializeComposerDraftStoreState(
+      useComposerDraftStore.getState(),
+    ) as unknown as {
       draftsByThreadId?: Record<string, { terminalContexts?: Array<Record<string, unknown>> }>;
     };
 
@@ -551,16 +630,79 @@ describe("composerDraftStore project draft thread mapping", () => {
     expect(useComposerDraftStore.getState().draftsByThreadId[threadId]).toBeUndefined();
   });
 
+  it("clears a deleted thread's diff comments with its draft", () => {
+    const comment = {
+      id: "comment-1",
+      sectionId: "turn-1",
+      sectionTitle: "Turn 1",
+      filePath: "src/app.ts",
+      startIndex: 1,
+      endIndex: 1,
+      rangeLabel: "line 11",
+      text: "Rename this",
+      diff: "+new line",
+    };
+    useReviewCommentDraftStore.getState().addComment(threadId, comment);
+
+    useComposerDraftStore.getState().clearDraftThread(threadId);
+
+    expect(useReviewCommentDraftStore.getState().commentsByThreadId[threadId]).toBeUndefined();
+  });
+
   it("clears a promoted draft by thread id", () => {
     const store = useComposerDraftStore.getState();
     store.setProjectDraftThreadId(projectId, threadId);
-    store.setPrompt(threadId, "promote me");
 
     clearPromotedDraftThread(threadId);
 
     expect(useComposerDraftStore.getState().getDraftThreadByProjectId(projectId)).toBeNull();
     expect(useComposerDraftStore.getState().getDraftThread(threadId)).toBeNull();
     expect(useComposerDraftStore.getState().draftsByThreadId[threadId]).toBeUndefined();
+  });
+
+  it("keeps composer content typed after the first send when the draft thread is promoted", () => {
+    const store = useComposerDraftStore.getState();
+    store.setProjectDraftThreadId(projectId, threadId);
+    store.setPrompt(threadId, "first message");
+    // Sending clears the composer; the user then types before thread.created arrives.
+    store.clearComposerContent(threadId);
+    store.setPrompt(threadId, "typed after send");
+
+    clearPromotedDraftThread(threadId);
+
+    expect(useComposerDraftStore.getState().getDraftThreadByProjectId(projectId)).toBeNull();
+    expect(useComposerDraftStore.getState().getDraftThread(threadId)).toBeNull();
+    expect(useComposerDraftStore.getState().draftsByThreadId[threadId]?.prompt).toBe(
+      "typed after send",
+    );
+  });
+
+  it("drops a model-only composer record when the draft thread is promoted", () => {
+    const store = useComposerDraftStore.getState();
+    store.setProjectDraftThreadId(projectId, threadId);
+    store.setModelSelection(threadId, modelSelection("codex", "gpt-5.4"));
+    store.setPrompt(threadId, "first message");
+    store.clearComposerContent(threadId);
+    expect(useComposerDraftStore.getState().draftsByThreadId[threadId]).toBeDefined();
+
+    clearPromotedDraftThread(threadId);
+
+    expect(useComposerDraftStore.getState().getDraftThread(threadId)).toBeNull();
+    expect(useComposerDraftStore.getState().getDraftThreadByProjectId(projectId)).toBeNull();
+    expect(useComposerDraftStore.getState().draftsByThreadId[threadId]).toBeUndefined();
+  });
+
+  it("finalizePromotedDraftThread is a no-op without draft metadata and keeps content", () => {
+    const store = useComposerDraftStore.getState();
+    store.setPrompt(threadId, "server thread text");
+    const before = useComposerDraftStore.getState();
+
+    store.finalizePromotedDraftThread(threadId);
+
+    expect(useComposerDraftStore.getState()).toBe(before);
+    expect(useComposerDraftStore.getState().draftsByThreadId[threadId]?.prompt).toBe(
+      "server thread text",
+    );
   });
 
   it("does not clear composer drafts for existing server threads during promotion cleanup", () => {
@@ -583,7 +725,7 @@ describe("composerDraftStore project draft thread mapping", () => {
     clearPromotedDraftThreads([threadId]);
 
     expect(useComposerDraftStore.getState().getDraftThread(threadId)).toBeNull();
-    expect(useComposerDraftStore.getState().draftsByThreadId[threadId]).toBeUndefined();
+    expect(useComposerDraftStore.getState().draftsByThreadId[threadId]?.prompt).toBe("promote me");
     expect(
       useComposerDraftStore.getState().getDraftThreadByProjectId(otherProjectId)?.threadId,
     ).toBe(otherThreadId);
@@ -670,6 +812,224 @@ describe("composerDraftStore project draft thread mapping", () => {
       worktreePath: null,
       envMode: "worktree",
     });
+  });
+
+  it("skips a promoting draft for project reuse and restores it once the flag clears", () => {
+    const store = useComposerDraftStore.getState();
+    store.setProjectDraftThreadId(projectId, threadId, { branch: "main" });
+    store.setDraftThreadPromoting(threadId, true);
+
+    expect(useComposerDraftStore.getState().getDraftThreadByProjectId(projectId)).toBeNull();
+    expect(
+      useComposerDraftStore
+        .getState()
+        .getDraftThreadByProjectId(projectId, { includePromoting: true })?.threadId,
+    ).toBe(threadId);
+    expect(useComposerDraftStore.getState().getDraftThread(threadId)?.promoting).toBe(true);
+
+    store.setDraftThreadPromoting(threadId, false);
+    expect(useComposerDraftStore.getState().getDraftThreadByProjectId(projectId)).toEqual(
+      expect.objectContaining({ threadId, branch: "main" }),
+    );
+    expect(useComposerDraftStore.getState().getDraftThread(threadId)).not.toHaveProperty(
+      "promoting",
+    );
+  });
+
+  it("keeps a promoting draft when a fresh draft takes over the project", () => {
+    const store = useComposerDraftStore.getState();
+    store.setProjectDraftThreadId(projectId, threadId);
+    store.setPrompt(threadId, "in flight");
+    store.setDraftThreadPromoting(threadId, true);
+
+    store.clearProjectDraftThreadId(projectId);
+    store.setProjectDraftThreadId(projectId, otherThreadId);
+
+    const state = useComposerDraftStore.getState();
+    expect(state.getDraftThreadByProjectId(projectId)?.threadId).toBe(otherThreadId);
+    expect(state.getDraftThread(threadId)?.promoting).toBe(true);
+    expect(state.draftsByThreadId[threadId]?.prompt).toBe("in flight");
+
+    // A failed send leaves the draft unmapped while the fresh draft owns the project.
+    store.setDraftThreadPromoting(threadId, false);
+    expect(useComposerDraftStore.getState().getDraftThreadByProjectId(projectId)?.threadId).toBe(
+      otherThreadId,
+    );
+    expect(useComposerDraftStore.getState().getDraftThread(threadId)).not.toBeNull();
+  });
+
+  it("drops a promoting draft once the server thread is finalized", () => {
+    const store = useComposerDraftStore.getState();
+    store.setProjectDraftThreadId(projectId, threadId);
+    store.setDraftThreadPromoting(threadId, true);
+
+    clearPromotedDraftThreads([threadId]);
+
+    expect(useComposerDraftStore.getState().getDraftThread(threadId)).toBeNull();
+    expect(
+      useComposerDraftStore.getState().getDraftThreadByProjectId(projectId, {
+        includePromoting: true,
+      }),
+    ).toBeNull();
+  });
+});
+
+describe("moveFailedFirstSendToDraftThread", () => {
+  const projectId = ProjectId.makeUnsafe("project-a");
+  const failedThreadId = ThreadId.makeUnsafe("thread-failed");
+  const retryThreadId = ThreadId.makeUnsafe("thread-retry");
+  const draftThread = {
+    createdAt: "2026-01-01T00:00:00.000Z",
+    runtimeMode: "full-access" as const,
+    interactionMode: "plan" as const,
+    branch: "main",
+    worktreePath: null,
+    envMode: "worktree" as const,
+  };
+
+  beforeEach(() => {
+    resetComposerDraftStore();
+  });
+
+  it("restores the unsent message into a new draft thread that survives thread.deleted cleanup", () => {
+    const store = useComposerDraftStore.getState();
+    store.setProjectDraftThreadId(projectId, failedThreadId, draftThread);
+    // Send clears composer content and thread.created finalizes the draft before the failure.
+    store.clearComposerContent(failedThreadId);
+    clearPromotedDraftThread(failedThreadId);
+
+    const image = makeImage({ id: "img-1", previewUrl: "blob:img-1" });
+    const context = makeTerminalContext({ id: "ctx-1" });
+    const prompt = `${INLINE_TERMINAL_CONTEXT_PLACEHOLDER} retry this`;
+    moveFailedFirstSendToDraftThread({
+      fromThreadId: failedThreadId,
+      toThreadId: retryThreadId,
+      projectId,
+      draftThread,
+      restore: { prompt, images: [image], terminalContexts: [context] },
+    });
+    // The rollback's thread.deleted event lands after the restore.
+    const revokeSpy = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+    useComposerDraftStore.getState().clearDraftThread(failedThreadId);
+
+    const state = useComposerDraftStore.getState();
+    expect(revokeSpy).not.toHaveBeenCalled();
+    revokeSpy.mockRestore();
+    expect(state.draftsByThreadId[failedThreadId]).toBeUndefined();
+    expect(state.getDraftThreadByProjectId(projectId)).toMatchObject({
+      threadId: retryThreadId,
+      branch: "main",
+      envMode: "worktree",
+      interactionMode: "plan",
+    });
+    const retryDraft = state.draftsByThreadId[retryThreadId];
+    expect(retryDraft?.prompt).toBe(prompt);
+    expect(retryDraft?.images.map((entry) => entry.id)).toEqual(["img-1"]);
+    expect(retryDraft?.terminalContexts).toEqual([{ ...context, threadId: retryThreadId }]);
+  });
+
+  it("moves diff comments so the rollback's cleanup does not lose them", () => {
+    const comment = {
+      id: "comment-1",
+      sectionId: "turn-1",
+      sectionTitle: "Turn 1",
+      filePath: "src/app.ts",
+      startIndex: 1,
+      endIndex: 1,
+      rangeLabel: "line 11",
+      text: "Rename this",
+      diff: "+new line",
+    };
+    const store = useComposerDraftStore.getState();
+    store.setProjectDraftThreadId(projectId, failedThreadId, draftThread);
+    useReviewCommentDraftStore.getState().addComment(failedThreadId, comment);
+
+    moveFailedFirstSendToDraftThread({
+      fromThreadId: failedThreadId,
+      toThreadId: retryThreadId,
+      projectId,
+      draftThread,
+      restore: null,
+    });
+    useComposerDraftStore.getState().clearDraftThread(failedThreadId);
+
+    const { commentsByThreadId } = useReviewCommentDraftStore.getState();
+    expect(commentsByThreadId[failedThreadId]).toBeUndefined();
+    expect(commentsByThreadId[retryThreadId]).toEqual([comment]);
+    useReviewCommentDraftStore.getState().clearComments(retryThreadId);
+  });
+
+  it("keeps text typed during the failed send instead of overwriting it", () => {
+    const store = useComposerDraftStore.getState();
+    store.setProjectDraftThreadId(projectId, failedThreadId, draftThread);
+    store.setModelSelection(failedThreadId, modelSelection("codex", "gpt-5.4"));
+    store.setPrompt(failedThreadId, "typed while sending");
+
+    moveFailedFirstSendToDraftThread({
+      fromThreadId: failedThreadId,
+      toThreadId: retryThreadId,
+      projectId,
+      draftThread,
+      restore: null,
+    });
+    useComposerDraftStore.getState().clearDraftThread(failedThreadId);
+
+    const state = useComposerDraftStore.getState();
+    expect(state.draftsByThreadId[retryThreadId]?.prompt).toBe("typed while sending");
+    expect(state.draftsByThreadId[retryThreadId]?.modelSelectionByProvider.codex?.model).toBe(
+      "gpt-5.4",
+    );
+    expect(state.getDraftThread(failedThreadId)).toBeNull();
+    expect(state.getDraftThread(retryThreadId)?.projectId).toBe(projectId);
+  });
+
+  it("does not delete another draft thread that took over the project mapping", () => {
+    const otherThreadId = ThreadId.makeUnsafe("thread-other-draft");
+    const store = useComposerDraftStore.getState();
+    store.setProjectDraftThreadId(projectId, failedThreadId, draftThread);
+    store.clearComposerContent(failedThreadId);
+    clearPromotedDraftThread(failedThreadId);
+    // The user opens a new draft for the project and starts typing before turn.start fails.
+    store.setProjectDraftThreadId(projectId, otherThreadId, draftThread);
+    store.setPrompt(otherThreadId, "unrelated draft");
+    store.addImages(otherThreadId, [makeImage({ id: "img-other", previewUrl: "blob:other" })]);
+    const revokeSpy = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+
+    moveFailedFirstSendToDraftThread({
+      fromThreadId: failedThreadId,
+      toThreadId: retryThreadId,
+      projectId,
+      draftThread,
+      restore: { prompt: "retry this", images: [], terminalContexts: [] },
+    });
+    useComposerDraftStore.getState().clearDraftThread(failedThreadId);
+
+    const state = useComposerDraftStore.getState();
+    expect(revokeSpy).not.toHaveBeenCalled();
+    revokeSpy.mockRestore();
+    expect(state.projectDraftThreadIdByProjectId[projectId]).toBe(otherThreadId);
+    expect(state.getDraftThread(otherThreadId)?.projectId).toBe(projectId);
+    expect(state.draftsByThreadId[otherThreadId]?.prompt).toBe("unrelated draft");
+    expect(state.draftsByThreadId[otherThreadId]?.images.map((entry) => entry.id)).toEqual([
+      "img-other",
+    ]);
+    expect(state.getDraftThread(retryThreadId)).toMatchObject({ projectId, branch: "main" });
+    expect(state.draftsByThreadId[retryThreadId]?.prompt).toBe("retry this");
+  });
+});
+
+describe("composerDraftHasUserContent", () => {
+  beforeEach(() => {
+    resetComposerDraftStore();
+  });
+
+  it("reports whether a thread's own draft has user content", () => {
+    const threadId = ThreadId.makeUnsafe("thread-content");
+    expect(composerDraftHasUserContent(threadId)).toBe(false);
+    useComposerDraftStore.getState().setPrompt(threadId, "hello");
+    expect(composerDraftHasUserContent(threadId)).toBe(true);
+    useComposerDraftStore.getState().setPrompt(threadId, "");
+    expect(composerDraftHasUserContent(threadId)).toBe(false);
   });
 });
 
@@ -972,6 +1332,32 @@ describe("composerDraftStore sticky composer settings", () => {
     expect(useComposerDraftStore.getState().stickyActiveProvider).toBe("codex");
   });
 
+  it("keeps remembered sticky options when only the model changes", () => {
+    const store = useComposerDraftStore.getState();
+
+    store.setStickyModelSelection(
+      modelSelection("codex", "gpt-5.3-codex", { reasoningEffort: "high", fastMode: true }),
+    );
+    store.setStickyModelSelection(modelSelection("codex", "gpt-5.4"));
+
+    expect(useComposerDraftStore.getState().stickyModelSelectionByProvider.codex).toEqual(
+      modelSelection("codex", "gpt-5.4", { reasoningEffort: "high", fastMode: true }),
+    );
+  });
+
+  it("replaces sticky options when the update carries its own options", () => {
+    const store = useComposerDraftStore.getState();
+
+    store.setStickyModelSelection(
+      modelSelection("codex", "gpt-5.3-codex", { reasoningEffort: "high", fastMode: true }),
+    );
+    store.setStickyModelSelection(modelSelection("codex", "gpt-5.4", { reasoningEffort: "low" }));
+
+    expect(useComposerDraftStore.getState().stickyModelSelectionByProvider.codex).toEqual(
+      modelSelection("codex", "gpt-5.4", { reasoningEffort: "low" }),
+    );
+  });
+
   it("applies sticky activeProvider to new drafts", () => {
     const store = useComposerDraftStore.getState();
     const threadId = ThreadId.makeUnsafe("thread-sticky-active-provider");
@@ -1028,6 +1414,12 @@ describe("composerDraftStore runtime and interaction settings", () => {
     expect(useComposerDraftStore.getState().draftsByThreadId[threadId]?.runtimeMode).toBe(
       "approval-required",
     );
+  });
+
+  it("stores the Auto runtime mode in the composer draft", () => {
+    useComposerDraftStore.getState().setRuntimeMode(threadId, "auto");
+
+    expect(useComposerDraftStore.getState().draftsByThreadId[threadId]?.runtimeMode).toBe("auto");
   });
 
   it("stores interaction mode overrides in the composer draft", () => {
@@ -1114,6 +1506,18 @@ describe("createDebouncedStorage", () => {
     expect(base.setItem).toHaveBeenCalledWith("key", "v3");
   });
 
+  it("removeItem drops the captured value so flush writes nothing afterwards", () => {
+    const base = createMockStorage();
+    const storage = createDebouncedStorage(base);
+
+    storage.setItem("key", "v1");
+    storage.removeItem("key");
+    storage.flush();
+    vi.advanceTimersByTime(300);
+
+    expect(base.setItem).not.toHaveBeenCalled();
+  });
+
   it("removeItem cancels a pending setItem write", () => {
     const base = createMockStorage();
     const storage = createDebouncedStorage(base);
@@ -1171,5 +1575,208 @@ describe("createDebouncedStorage", () => {
     vi.advanceTimersByTime(300);
     expect(base.setItem).toHaveBeenCalledTimes(1);
     expect(base.setItem).toHaveBeenCalledWith("key", "v2");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Deferred composer draft serialization
+// ---------------------------------------------------------------------------
+
+describe("composer draft persistence", () => {
+  const threadId = ThreadId.makeUnsafe("thread-deferred");
+  const heavyThreadId = ThreadId.makeUnsafe("thread-heavy");
+
+  beforeEach(async () => {
+    await useComposerDraftStore.persist.clearStorage();
+    resetComposerDraftStore();
+    vi.useFakeTimers();
+  });
+
+  afterEach(async () => {
+    vi.useRealTimers();
+    await useComposerDraftStore.persist.clearStorage();
+    resetComposerDraftStore();
+  });
+
+  it("defers the draft walk and JSON serialization until the debounce fires", async () => {
+    useComposerDraftStore.getState().setPrompt(heavyThreadId, "keep this image");
+    const attachments = [
+      {
+        id: "heavy-image",
+        name: "image.png",
+        mimeType: "image/png",
+        sizeBytes: 4096,
+        dataUrl: `data:image/png;base64,${"AQID".repeat(1024)}`,
+      },
+    ];
+    let attachmentReads = 0;
+    useComposerDraftStore.setState((state) => ({
+      draftsByThreadId: {
+        ...state.draftsByThreadId,
+        [heavyThreadId]: {
+          ...state.draftsByThreadId[heavyThreadId]!,
+          get persistedAttachments() {
+            attachmentReads += 1;
+            return attachments;
+          },
+        },
+      },
+    }));
+    attachmentReads = 0;
+    const stringify = vi.spyOn(JSON, "stringify");
+    try {
+      for (let index = 1; index <= 20; index++) {
+        useComposerDraftStore.getState().setPrompt(threadId, `Draft ${index}`);
+      }
+      expect(attachmentReads).toBe(0);
+      expect(stringify).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(300);
+      expect(attachmentReads).toBe(1);
+      expect(stringify).toHaveBeenCalledTimes(1);
+
+      resetComposerDraftStore();
+      await useComposerDraftStore.persist.rehydrate();
+      expect(useComposerDraftStore.getState().draftsByThreadId[threadId]?.prompt).toBe("Draft 20");
+      expect(
+        useComposerDraftStore.getState().draftsByThreadId[heavyThreadId]?.persistedAttachments,
+      ).toEqual(attachments);
+    } finally {
+      stringify.mockRestore();
+    }
+  });
+
+  it("drops a pending write when storage is cleared", async () => {
+    useComposerDraftStore.getState().setPrompt(threadId, "never persisted");
+    await useComposerDraftStore.persist.clearStorage();
+    await vi.advanceTimersByTimeAsync(300);
+
+    resetComposerDraftStore();
+    await useComposerDraftStore.persist.rehydrate();
+    expect(useComposerDraftStore.getState().draftsByThreadId[threadId]).toBeUndefined();
+  });
+});
+
+describe("createDeferredStorage", () => {
+  const serialize = vi.fn((value: string) => `s:${value}`);
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    serialize.mockClear();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("neither serializes nor writes until the debounce fires", () => {
+    const base = createMockStorage();
+    const storage = createDeferredStorage(base, serialize);
+
+    storage.setItem("key", "v1");
+    storage.setItem("key", "v2");
+    expect(serialize).not.toHaveBeenCalled();
+    expect(base.setItem).not.toHaveBeenCalled();
+
+    vi.advanceTimersByTime(300);
+    expect(serialize).toHaveBeenCalledTimes(1);
+    expect(base.setItem).toHaveBeenCalledTimes(1);
+    expect(base.setItem).toHaveBeenCalledWith("key", "s:v2");
+  });
+
+  it("flush serializes and writes the pending value immediately", () => {
+    const base = createMockStorage();
+    const storage = createDeferredStorage(base, serialize);
+
+    storage.setItem("key", "v1");
+    storage.flush();
+    expect(base.setItem).toHaveBeenCalledWith("key", "s:v1");
+
+    vi.advanceTimersByTime(300);
+    expect(serialize).toHaveBeenCalledTimes(1);
+    expect(base.setItem).toHaveBeenCalledTimes(1);
+  });
+
+  it("delegates getItem to the base storage immediately", () => {
+    const base = createMockStorage();
+    base.setItem("key", "stored");
+    base.setItem.mockClear();
+    const storage = createDeferredStorage(base, serialize);
+
+    expect(storage.getItem("key")).toBe("stored");
+    expect(base.getItem).toHaveBeenCalledWith("key");
+  });
+
+  it("flush is a no-op when nothing is pending", () => {
+    const base = createMockStorage();
+    const storage = createDeferredStorage(base, serialize);
+
+    storage.flush();
+    expect(serialize).not.toHaveBeenCalled();
+    expect(base.setItem).not.toHaveBeenCalled();
+  });
+
+  it("setItem writes normally after removeItem cancels a pending write", () => {
+    const base = createMockStorage();
+    const storage = createDeferredStorage(base, serialize);
+
+    storage.setItem("key", "v1");
+    storage.removeItem("key");
+    storage.setItem("key", "v2");
+    vi.advanceTimersByTime(300);
+
+    expect(base.setItem).toHaveBeenCalledTimes(1);
+    expect(base.setItem).toHaveBeenCalledWith("key", "s:v2");
+  });
+
+  it("removeItem drops the pending value so a later flush writes nothing", () => {
+    const base = createMockStorage();
+    const storage = createDeferredStorage(base, serialize);
+
+    storage.setItem("key", "v1");
+    storage.removeItem("key");
+    storage.flush();
+    vi.advanceTimersByTime(300);
+
+    expect(base.removeItem).toHaveBeenCalledWith("key");
+    expect(serialize).not.toHaveBeenCalled();
+    expect(base.setItem).not.toHaveBeenCalled();
+  });
+});
+
+describe("deriveEffectiveComposerModelState and an old CLI", () => {
+  const providers = [
+    {
+      provider: "claudeAgent",
+      enabled: true,
+      installed: true,
+      status: "ready",
+      models: [{ slug: "claude-sonnet-4-6", name: "Sonnet", isCustom: false, capabilities: null }],
+      updateRequiredModels: [{ slug: "claude-opus-5-5", name: "Opus 5.5", minVersion: "2.1.280" }],
+    },
+  ] as never;
+
+  it("falls back to a runnable model for a thread created with a gated one", () => {
+    const { selectedModel } = deriveEffectiveComposerModelState({
+      draft: null,
+      providers,
+      selectedProvider: "claudeAgent",
+      threadModelSelection: { provider: "claudeAgent", model: "claude-opus-5-5" },
+      projectModelSelection: null,
+      settings: {} as never,
+    });
+    expect(selectedModel).toBe("claude-sonnet-4-6");
+  });
+
+  it("keeps a model the CLI can run", () => {
+    const { selectedModel } = deriveEffectiveComposerModelState({
+      draft: null,
+      providers,
+      selectedProvider: "claudeAgent",
+      threadModelSelection: { provider: "claudeAgent", model: "claude-sonnet-4-6" },
+      projectModelSelection: null,
+      settings: {} as never,
+    });
+    expect(selectedModel).toBe("claude-sonnet-4-6");
   });
 });

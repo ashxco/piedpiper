@@ -1,10 +1,14 @@
 import { ThreadId } from "@piedpiper/contracts";
 import { describe, expect, it } from "vitest";
 
+import { appendReviewCommentsToPrompt } from "../reviewCommentContext";
+import { IMAGE_ONLY_BOOTSTRAP_PROMPT } from "./imageOnlyBootstrapPrompt";
+
 import {
   appendTerminalContextsToPrompt,
   buildTerminalContextPreviewTitle,
   buildTerminalContextBlock,
+  clampTerminalContextText,
   countInlineTerminalContextPlaceholders,
   deriveDisplayedUserMessageState,
   ensureInlineTerminalContextPlaceholders,
@@ -17,8 +21,11 @@ import {
   insertInlineTerminalContextPlaceholder,
   isTerminalContextExpired,
   materializeInlineTerminalContextPrompt,
+  normalizeTerminalContextSelection,
   removeInlineTerminalContextPlaceholder,
   stripInlineTerminalContextPlaceholders,
+  TERMINAL_CONTEXT_TEXT_MAX_CHARS,
+  TERMINAL_CONTEXT_TRUNCATION_MARKER,
   type TerminalContextDraft,
 } from "./terminalContext";
 
@@ -125,6 +132,44 @@ describe("terminalContext", () => {
     });
   });
 
+  it("hides diff comment blocks from the visible text but keeps them for copying", () => {
+    const prompt = appendReviewCommentsToPrompt(
+      appendTerminalContextsToPrompt("Investigate this", [makeContext()]),
+      [
+        {
+          id: "comment-1",
+          sectionId: "turn-1",
+          sectionTitle: "Turn 1",
+          filePath: "src/app.ts",
+          startIndex: 1,
+          endIndex: 1,
+          rangeLabel: "line 11",
+          text: "Rename this",
+          diff: "+new line",
+        },
+      ],
+    );
+    const displayed = deriveDisplayedUserMessageState(prompt);
+    expect(displayed.visibleText).toBe("Investigate this");
+    expect(displayed.copyText).toBe(prompt);
+    expect(displayed.contextCount).toBe(1);
+  });
+
+  it("hides the image-only bootstrap prompt from display and copy text", () => {
+    for (const prompt of [
+      IMAGE_ONLY_BOOTSTRAP_PROMPT,
+      `Ultrathink:\n${IMAGE_ONLY_BOOTSTRAP_PROMPT}`,
+    ]) {
+      expect(deriveDisplayedUserMessageState(prompt)).toEqual({
+        visibleText: "",
+        copyText: "",
+        contextCount: 0,
+        previewTitle: null,
+        contexts: [],
+      });
+    }
+  });
+
   it("preserves prompt text when no trailing terminal context block exists", () => {
     expect(extractTrailingTerminalContexts("No attached context")).toEqual({
       promptText: "No attached context",
@@ -146,6 +191,13 @@ describe("terminalContext", () => {
         }),
       ]),
     ).toBeNull();
+  });
+
+  it("never splits an emoji when shortening the preview title", () => {
+    const text = `${"a".repeat(176)}😀${"b".repeat(20)}`;
+    const title = buildTerminalContextPreviewTitle([makeContext({ text })]);
+    expect(title?.endsWith(`\n${"a".repeat(176)}...`)).toBe(true);
+    expect(title).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/);
   });
 
   it("tracks inline terminal context placeholders in prompt text", () => {
@@ -206,5 +258,63 @@ describe("terminalContext", () => {
         [makeContext()],
       ),
     ).toBe("Investigate @terminal-1:12-13 carefully");
+  });
+
+  it("leaves terminal text within the cap untouched", () => {
+    const text = "x".repeat(TERMINAL_CONTEXT_TEXT_MAX_CHARS);
+    expect(clampTerminalContextText(text)).toBe(text);
+  });
+
+  it("caps oversized terminal text without splitting a surrogate pair", () => {
+    const text = `${"t".repeat(63_985)}${"😀".repeat(8)}`;
+    const clamped = clampTerminalContextText(text);
+    expect(clamped).toBe(`${"t".repeat(63_985)}${TERMINAL_CONTEXT_TRUNCATION_MARKER}`);
+    expect(clamped.length).toBeLessThanOrEqual(TERMINAL_CONTEXT_TEXT_MAX_CHARS);
+  });
+
+  it("caps oversized selections at capture and in the sent block", () => {
+    const text = "y".repeat(TERMINAL_CONTEXT_TEXT_MAX_CHARS * 2);
+    const normalized = normalizeTerminalContextSelection(makeContext({ text }));
+    expect(normalized?.text.length).toBe(TERMINAL_CONTEXT_TEXT_MAX_CHARS);
+    expect(normalized?.text.endsWith(TERMINAL_CONTEXT_TRUNCATION_MARKER)).toBe(true);
+    expect(normalized?.lineStart).toBe(12);
+    expect(normalized?.lineEnd).toBe(13);
+
+    const block = buildTerminalContextBlock([makeContext({ text })]);
+    expect(block.length).toBeLessThan(TERMINAL_CONTEXT_TEXT_MAX_CHARS + 200);
+    expect(block).toContain("… truncated …");
+  });
+
+  it("caps the rendered block when a selection has many short lines", () => {
+    const text = Array.from({ length: 30_000 }, () => "ok").join("\n");
+    const context = makeContext({ text, lineStart: 1, lineEnd: 30_000 });
+    const block = buildTerminalContextBlock([context]);
+    const header = `<terminal_context>\n- ${formatTerminalContextLabel(context)}:\n`;
+    const footer = "\n</terminal_context>";
+    expect(block.length).toBeLessThanOrEqual(
+      header.length + TERMINAL_CONTEXT_TEXT_MAX_CHARS + footer.length,
+    );
+    const bodyLines = block.split("\n").slice(2, -1);
+    expect(bodyLines[0]).toBe("  1 | ok");
+    // The marker is its own unnumbered line after the numbered ones.
+    expect(bodyLines.at(-1)).toBe("  … truncated …");
+    expect(bodyLines.at(-2)).toMatch(/^ {2}\d+ \| ok$/);
+    expect(bodyLines.filter((line) => line.includes("truncated"))).toHaveLength(1);
+  });
+
+  it("renders the capture-time truncation marker as an unnumbered line", () => {
+    const text = "z".repeat(TERMINAL_CONTEXT_TEXT_MAX_CHARS * 2);
+    const block = buildTerminalContextBlock([makeContext({ text })]);
+    expect(block).not.toMatch(/\d+ \| … truncated …/);
+    expect(block).toContain("\n  … truncated …\n</terminal_context>");
+    expect(extractTrailingTerminalContexts(`hi\n\n${block}`).contexts[0]?.body).toMatch(
+      /… truncated …$/,
+    );
+  });
+
+  it("leaves small multi-line selections unchanged", () => {
+    const block = buildTerminalContextBlock([makeContext({ text: "a\nb", lineStart: 3 })]);
+    expect(block).toContain("  3 | a\n  4 | b\n</terminal_context>");
+    expect(block).not.toContain("truncated");
   });
 });

@@ -42,6 +42,16 @@ describe("providerQueryKeys.checkpointDiff", () => {
       }),
     );
   });
+
+  it("caches whitespace-ignoring diffs separately", () => {
+    const baseInput = { threadId, fromTurnCount: 1, toTurnCount: 2 } as const;
+    expect(providerQueryKeys.checkpointDiff({ ...baseInput, ignoreWhitespace: true })).not.toEqual(
+      providerQueryKeys.checkpointDiff(baseInput),
+    );
+    expect(providerQueryKeys.checkpointDiff({ ...baseInput, ignoreWhitespace: false })).toEqual(
+      providerQueryKeys.checkpointDiff(baseInput),
+    );
+  });
 });
 
 describe("checkpointDiffQueryOptions", () => {
@@ -90,6 +100,42 @@ describe("checkpointDiffQueryOptions", () => {
     expect(getTurnDiff).not.toHaveBeenCalled();
   });
 
+  it("forwards ignoreWhitespace to both diff APIs", async () => {
+    const getTurnDiff = vi.fn().mockResolvedValue({ diff: "patch" });
+    const getFullThreadDiff = vi.fn().mockResolvedValue({ diff: "patch" });
+    mockNativeApi({ getTurnDiff, getFullThreadDiff });
+
+    const queryClient = new QueryClient();
+    await queryClient.fetchQuery(
+      checkpointDiffQueryOptions({
+        threadId,
+        fromTurnCount: 1,
+        toTurnCount: 2,
+        ignoreWhitespace: true,
+      }),
+    );
+    await queryClient.fetchQuery(
+      checkpointDiffQueryOptions({
+        threadId,
+        fromTurnCount: 0,
+        toTurnCount: 2,
+        ignoreWhitespace: true,
+      }),
+    );
+
+    expect(getTurnDiff).toHaveBeenCalledWith({
+      threadId,
+      fromTurnCount: 1,
+      toTurnCount: 2,
+      ignoreWhitespace: true,
+    });
+    expect(getFullThreadDiff).toHaveBeenCalledWith({
+      threadId,
+      toTurnCount: 2,
+      ignoreWhitespace: true,
+    });
+  });
+
   it("fails fast on invalid range and does not call provider RPC", async () => {
     const getTurnDiff = vi.fn().mockResolvedValue({ diff: "patch" });
     const getFullThreadDiff = vi.fn().mockResolvedValue({ diff: "patch" });
@@ -109,6 +155,28 @@ describe("checkpointDiffQueryOptions", () => {
     );
     expect(getTurnDiff).not.toHaveBeenCalled();
     expect(getFullThreadDiff).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "fatal: not a git repository (or any of the parent directories): .git",
+    "fatal: cannot use bare repository '/tmp/planted' (safe.bareRepository is 'explicit')",
+  ])("explains that diffs are unavailable for %s", async (gitError) => {
+    const getTurnDiff = vi.fn().mockRejectedValue(new Error(gitError));
+    mockNativeApi({ getTurnDiff, getFullThreadDiff: vi.fn() });
+
+    const queryClient = new QueryClient();
+
+    await expect(
+      queryClient.fetchQuery({
+        ...checkpointDiffQueryOptions({
+          threadId,
+          fromTurnCount: 3,
+          toTurnCount: 4,
+          cacheScope: "turn:git-error",
+        }),
+        retry: false,
+      }),
+    ).rejects.toThrow("Turn diffs are unavailable because this project is not a git repository.");
   });
 
   it("retries checkpoint-not-ready errors longer than generic failures", () => {

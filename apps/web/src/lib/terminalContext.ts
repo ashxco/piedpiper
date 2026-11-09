@@ -1,4 +1,7 @@
 import { type ThreadId } from "@piedpiper/contracts";
+import { sliceSurrogateSafe } from "@piedpiper/shared/String";
+import { stripTrailingReviewComments } from "../reviewCommentContext";
+import { isImageOnlyBootstrapPrompt } from "./imageOnlyBootstrapPrompt";
 
 export interface TerminalContextSelection {
   terminalId: string;
@@ -43,6 +46,21 @@ export function normalizeTerminalContextText(text: string): string {
   return text.replace(/\r\n/g, "\n").replace(/^\n+|\n+$/g, "");
 }
 
+/** Upper bound for one terminal selection's text, so a large selection cannot make the turn unsendable. */
+export const TERMINAL_CONTEXT_TEXT_MAX_CHARS = 64_000;
+export const TERMINAL_CONTEXT_TRUNCATION_MARKER = "\n… truncated …";
+
+export function clampTerminalContextText(
+  text: string,
+  maxChars: number = TERMINAL_CONTEXT_TEXT_MAX_CHARS,
+): string {
+  if (text.length <= maxChars) {
+    return text;
+  }
+  const end = Math.max(0, maxChars - TERMINAL_CONTEXT_TRUNCATION_MARKER.length);
+  return `${sliceSurrogateSafe(text, end)}${TERMINAL_CONTEXT_TRUNCATION_MARKER}`;
+}
+
 export function hasTerminalContextText(context: { text: string }): boolean {
   return normalizeTerminalContextText(context.text).length > 0;
 }
@@ -68,13 +86,13 @@ function previewTerminalContextText(text: string): string {
     visibleLines.push("...");
   }
   const preview = visibleLines.join("\n");
-  return preview.length > 180 ? `${preview.slice(0, 177)}...` : preview;
+  return preview.length > 180 ? `${sliceSurrogateSafe(preview, 177)}...` : preview;
 }
 
 export function normalizeTerminalContextSelection(
   selection: TerminalContextSelection,
 ): TerminalContextSelection | null {
-  const text = normalizeTerminalContextText(selection.text);
+  const text = clampTerminalContextText(normalizeTerminalContextText(selection.text));
   const terminalId = selection.terminalId.trim();
   const terminalLabel = selection.terminalLabel.trim();
   if (text.length === 0 || terminalId.length === 0 || terminalLabel.length === 0) {
@@ -143,10 +161,42 @@ export function buildTerminalContextPreviewTitle(
   return previews.length > 0 ? previews : null;
 }
 
+/** Unnumbered so the model cannot mistake it for real output on some line. */
+const TERMINAL_CONTEXT_TRUNCATED_BODY_LINE = "  … truncated …";
+
+/**
+ * Numbered body lines, capped on their rendered size: the per-line `N | ` prefixes
+ * can otherwise grow a selection of many short lines far past the text cap.
+ */
 function buildTerminalContextBodyLines(selection: TerminalContextSelection): string[] {
-  return normalizeTerminalContextText(selection.text)
-    .split("\n")
-    .map((line, index) => `  ${selection.lineStart + index} | ${line}`);
+  let text = normalizeTerminalContextText(selection.text);
+  let truncated = text.endsWith(TERMINAL_CONTEXT_TRUNCATION_MARKER);
+  if (truncated) {
+    text = normalizeTerminalContextText(text.slice(0, -TERMINAL_CONTEXT_TRUNCATION_MARKER.length));
+  }
+  const budget = TERMINAL_CONTEXT_TEXT_MAX_CHARS - TERMINAL_CONTEXT_TRUNCATED_BODY_LINE.length - 1;
+  const lines: string[] = [];
+  let used = 0;
+  const sourceLines = text.split("\n");
+  for (let index = 0; index < sourceLines.length; index += 1) {
+    const prefix = `  ${selection.lineStart + index} | `;
+    const separator = lines.length > 0 ? 1 : 0;
+    const line = `${prefix}${sourceLines[index]}`;
+    if (used + separator + line.length > budget) {
+      const room = budget - used - separator - prefix.length;
+      if (room > 0) {
+        lines.push(`${prefix}${sliceSurrogateSafe(sourceLines[index]!, room)}`);
+      }
+      truncated = true;
+      break;
+    }
+    lines.push(line);
+    used += separator + line.length;
+  }
+  if (truncated) {
+    lines.push(TERMINAL_CONTEXT_TRUNCATED_BODY_LINE);
+  }
+  return lines;
 }
 
 export function buildTerminalContextBlock(
@@ -235,9 +285,12 @@ export function extractTrailingTerminalContexts(prompt: string): ExtractedTermin
 }
 
 export function deriveDisplayedUserMessageState(prompt: string): DisplayedUserMessageState {
+  if (isImageOnlyBootstrapPrompt(prompt)) {
+    return { visibleText: "", copyText: "", contextCount: 0, previewTitle: null, contexts: [] };
+  }
   const extractedContexts = extractTrailingTerminalContexts(prompt);
   return {
-    visibleText: extractedContexts.promptText,
+    visibleText: stripTrailingReviewComments(extractedContexts.promptText),
     copyText: prompt,
     contextCount: extractedContexts.contextCount,
     previewTitle: extractedContexts.previewTitle,

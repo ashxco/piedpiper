@@ -1,7 +1,14 @@
+import { randomBytes } from "node:crypto";
+
 import { NetService } from "@piedpiper/shared/Net";
+import {
+  OTEL_ENVIRONMENT_VARIABLE_NAMES,
+  parseOtelEnvironment,
+  resolveOtlpSignal,
+} from "@piedpiper/shared/otelEnvironment";
 import { parsePersistedServerObservabilitySettings } from "@piedpiper/shared/serverSettings";
 import { Config, Effect, FileSystem, LogLevel, Option, Path, Schema } from "effect";
-import { Command, Flag, GlobalFlag } from "effect/unstable/cli";
+import { Argument, CliError, Command, Flag, GlobalFlag } from "effect/unstable/cli";
 
 import {
   DEFAULT_PORT,
@@ -10,13 +17,23 @@ import {
   resolveStaticDir,
   ServerConfig,
   RuntimeMode,
+  traceFileConfig,
+  traceMaxFilesConfig,
   type ServerConfigShape,
 } from "./config";
 import { readBootstrapEnvelope } from "./bootstrap";
+import { resolveCwdArgument } from "./cwdArgument";
+import { untilLauncherLoss } from "./launcherWatch";
 import { resolveBaseDir } from "./os-jank";
 import { runServer } from "./server";
+import { traceCommand } from "./traceSummary";
 
 const PortSchema = Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 65535 }));
+
+/** Loopback unless --host/PIEDPIPER_HOST/bootstrap says otherwise, in every mode. */
+export const DEFAULT_HOST = "127.0.0.1";
+
+export const generateAuthToken = (): string => randomBytes(24).toString("hex");
 
 const BootstrapEnvelopeSchema = Schema.Struct({
   mode: Schema.optional(RuntimeMode),
@@ -30,6 +47,8 @@ const BootstrapEnvelopeSchema = Schema.Struct({
   logWebSocketEvents: Schema.optional(Schema.Boolean),
   otlpTracesUrl: Schema.optional(Schema.String),
   otlpMetricsUrl: Schema.optional(Schema.String),
+  otlpLogsUrl: Schema.optional(Schema.String),
+  shellEnvironmentPrepared: Schema.optional(Schema.Boolean),
 });
 
 const modeFlag = Flag.choice("mode", RuntimeMode.literals).pipe(
@@ -63,6 +82,23 @@ const authTokenFlag = Flag.string("auth-token").pipe(
   Flag.withAlias("token"),
   Flag.optional,
 );
+// Variadic only to refuse extras, which the parser would drop: `~/My Project` must not create `~/My`.
+const cwdArgument = Argument.string("cwd").pipe(
+  Argument.withDescription("Folder to open. Optional; defaults to the current directory."),
+  Argument.variadic(),
+  Argument.mapEffect((values) =>
+    values.length > 1
+      ? Effect.fail(
+          new CliError.InvalidValue({
+            option: "cwd",
+            value: values.join(" "),
+            expected: "one folder. Quote a path that contains spaces.",
+            kind: "argument",
+          }),
+        )
+      : Effect.succeed(Option.fromUndefinedOr(values[0])),
+  ),
+);
 const bootstrapFdFlag = Flag.integer("bootstrap-fd").pipe(
   Flag.withSchema(Schema.Int),
   Flag.withDescription("Read one-time bootstrap secrets from the given file descriptor."),
@@ -88,18 +124,19 @@ const EnvServerConfig = Config.all({
   traceTimingEnabled: Config.boolean("PIEDPIPER_TRACE_TIMING_ENABLED").pipe(
     Config.withDefault(true),
   ),
-  traceFile: Config.string("PIEDPIPER_TRACE_FILE").pipe(
-    Config.option,
-    Config.map(Option.getOrUndefined),
-  ),
+  traceFile: traceFileConfig.pipe(Config.map(Option.getOrUndefined)),
   traceMaxBytes: Config.int("PIEDPIPER_TRACE_MAX_BYTES").pipe(Config.withDefault(10 * 1024 * 1024)),
-  traceMaxFiles: Config.int("PIEDPIPER_TRACE_MAX_FILES").pipe(Config.withDefault(10)),
-  traceBatchWindowMs: Config.int("PIEDPIPER_TRACE_BATCH_WINDOW_MS").pipe(Config.withDefault(200)),
+  traceMaxFiles: traceMaxFilesConfig,
+  traceBatchWindowMs: Config.int("PIEDPIPER_TRACE_BATCH_WINDOW_MS").pipe(Config.withDefault(1_000)),
   otlpTracesUrl: Config.string("PIEDPIPER_OTLP_TRACES_URL").pipe(
     Config.option,
     Config.map(Option.getOrUndefined),
   ),
   otlpMetricsUrl: Config.string("PIEDPIPER_OTLP_METRICS_URL").pipe(
+    Config.option,
+    Config.map(Option.getOrUndefined),
+  ),
+  otlpLogsUrl: Config.string("PIEDPIPER_OTLP_LOGS_URL").pipe(
     Config.option,
     Config.map(Option.getOrUndefined),
   ),
@@ -142,11 +179,22 @@ const EnvServerConfig = Config.all({
   ),
 });
 
+/** The OTEL_* and PIEDPIPER_OTLP_* export variables, read through the ConfigProvider. */
+const OtelEnvironmentVariables = Config.all(
+  Object.fromEntries(
+    OTEL_ENVIRONMENT_VARIABLE_NAMES.map((name) => [
+      name,
+      Config.string(name).pipe(Config.option, Config.map(Option.getOrUndefined)),
+    ]),
+  ),
+);
+
 interface CliServerFlags {
   readonly mode: Option.Option<RuntimeMode>;
   readonly port: Option.Option<number>;
   readonly host: Option.Option<string>;
   readonly baseDir: Option.Option<string>;
+  readonly cwd: Option.Option<string>;
   readonly devUrl: Option.Option<URL>;
   readonly noBrowser: Option.Option<boolean>;
   readonly authToken: Option.Option<string>;
@@ -166,7 +214,7 @@ const loadPersistedObservabilitySettings = Effect.fn(function* (settingsPath: st
   const fs = yield* FileSystem.FileSystem;
   const exists = yield* fs.exists(settingsPath).pipe(Effect.orElseSucceed(() => false));
   if (!exists) {
-    return { otlpTracesUrl: undefined, otlpMetricsUrl: undefined };
+    return { otlpTracesUrl: undefined, otlpMetricsUrl: undefined, otlpLogsUrl: undefined };
   }
 
   const raw = yield* fs.readFileString(settingsPath).pipe(Effect.orElseSucceed(() => ""));
@@ -181,6 +229,8 @@ export const resolveServerConfig = (
     const { findAvailablePort } = yield* NetService;
     const path = yield* Path.Path;
     const fs = yield* FileSystem.FileSystem;
+    // Before any other work, so a mistyped command leaves nothing behind.
+    const cwd = yield* resolveCwdArgument(flags.cwd);
     const env = yield* EnvServerConfig;
     const bootstrapFd = Option.getOrUndefined(flags.bootstrapFd) ?? env.bootstrapFd;
     const bootstrapEnvelope =
@@ -251,7 +301,7 @@ export const resolveServerConfig = (
         () => mode === "desktop",
       ),
     );
-    const authToken = Option.getOrUndefined(
+    const configuredAuthToken = Option.getOrUndefined(
       resolveOptionPrecedence(
         flags.authToken,
         Option.fromUndefinedOr(env.authToken),
@@ -260,6 +310,8 @@ export const resolveServerConfig = (
         ),
       ),
     );
+    // Web mode never runs open: without a configured token, mint one for this process.
+    const authToken = configuredAuthToken ?? (mode === "web" ? generateAuthToken() : undefined);
     const autoBootstrapProjectFromCwd = resolveBooleanFlag(
       flags.autoBootstrapProjectFromCwd,
       Option.getOrElse(
@@ -291,9 +343,40 @@ export const resolveServerConfig = (
         Option.fromUndefinedOr(env.host),
         Option.flatMap(bootstrapEnvelope, (bootstrap) => Option.fromUndefinedOr(bootstrap.host)),
       ),
-      () => (mode === "desktop" ? "127.0.0.1" : undefined),
+      () => DEFAULT_HOST,
     );
     const logLevel = Option.getOrElse(cliLogLevel, () => env.logLevel);
+    const otelEnvironment = parseOtelEnvironment(yield* OtelEnvironmentVariables);
+    // Messages never include header values or endpoints, which can carry API keys.
+    yield* Effect.forEach(otelEnvironment.warnings, (warning) => Effect.logWarning(warning), {
+      discard: true,
+    });
+    const bootstrapValue = <K extends "otlpTracesUrl" | "otlpMetricsUrl" | "otlpLogsUrl">(key: K) =>
+      Option.getOrUndefined(
+        Option.flatMap(bootstrapEnvelope, (bootstrap) => Option.fromUndefinedOr(bootstrap[key])),
+      );
+    // PIEDPIPER_OTLP_*_URL wins, then the standard OTEL endpoints, then bootstrap and settings.
+    const traces = resolveOtlpSignal(
+      otelEnvironment,
+      "traces",
+      env.otlpTracesUrl,
+      bootstrapValue("otlpTracesUrl"),
+      persistedObservabilitySettings.otlpTracesUrl,
+    );
+    const metrics = resolveOtlpSignal(
+      otelEnvironment,
+      "metrics",
+      env.otlpMetricsUrl,
+      bootstrapValue("otlpMetricsUrl"),
+      persistedObservabilitySettings.otlpMetricsUrl,
+    );
+    const logs = resolveOtlpSignal(
+      otelEnvironment,
+      "logs",
+      env.otlpLogsUrl,
+      bootstrapValue("otlpLogsUrl"),
+      persistedObservabilitySettings.otlpLogsUrl,
+    );
 
     const config: ServerConfigShape = {
       logLevel,
@@ -302,27 +385,20 @@ export const resolveServerConfig = (
       traceBatchWindowMs: env.traceBatchWindowMs,
       traceMaxBytes: env.traceMaxBytes,
       traceMaxFiles: env.traceMaxFiles,
-      otlpTracesUrl:
-        env.otlpTracesUrl ??
-        Option.getOrUndefined(
-          Option.flatMap(bootstrapEnvelope, (bootstrap) =>
-            Option.fromUndefinedOr(bootstrap.otlpTracesUrl),
-          ),
-        ) ??
-        persistedObservabilitySettings.otlpTracesUrl,
-      otlpMetricsUrl:
-        env.otlpMetricsUrl ??
-        Option.getOrUndefined(
-          Option.flatMap(bootstrapEnvelope, (bootstrap) =>
-            Option.fromUndefinedOr(bootstrap.otlpMetricsUrl),
-          ),
-        ) ??
-        persistedObservabilitySettings.otlpMetricsUrl,
+      otlpTracesUrl: traces?.url,
+      otlpMetricsUrl: metrics?.url,
+      otlpLogsUrl: logs?.url,
+      otlpExportOptions: {
+        traces: traces?.options ?? otelEnvironment.piedpiper.traces,
+        metrics: metrics?.options ?? otelEnvironment.piedpiper.metrics,
+        logs: logs?.options ?? otelEnvironment.piedpiper.logs,
+      },
       otlpExportIntervalMs: env.otlpExportIntervalMs,
       otlpServiceName: env.otlpServiceName,
       mode,
       port,
-      cwd: process.cwd(),
+      cwd,
+      ...(Option.isSome(flags.cwd) ? { createCwdOnStartup: true } : {}),
       baseDir,
       ...derivedPaths,
       serverTracePath,
@@ -333,6 +409,13 @@ export const resolveServerConfig = (
       authToken,
       autoBootstrapProjectFromCwd,
       logWebSocketEvents,
+      // Only the desktop's bootstrap envelope sets this; standalone and dev runs keep probing.
+      shellEnvironmentPrepared: Option.getOrElse(
+        Option.flatMap(bootstrapEnvelope, (bootstrap) =>
+          Option.fromUndefinedOr(bootstrap.shellEnvironmentPrepared),
+        ),
+        () => false,
+      ),
     };
 
     return config;
@@ -343,6 +426,7 @@ const commandFlags = {
   port: portFlag,
   host: hostFlag,
   baseDir: baseDirFlag,
+  cwd: cwdArgument,
   devUrl: devUrlFlag,
   noBrowser: noBrowserFlag,
   authToken: authTokenFlag,
@@ -357,9 +441,12 @@ const rootCommand = Command.make("piedpiper", commandFlags).pipe(
     Effect.gen(function* () {
       const logLevel = yield* GlobalFlag.LogLevel;
       const config = yield* resolveServerConfig(flags, logLevel);
-      return yield* runServer.pipe(Effect.provideService(ServerConfig, config));
+      const run = runServer.pipe(Effect.provideService(ServerConfig, config));
+      // A desktop backend must not outlive the Electron process that launched it.
+      return config.mode === "desktop" ? yield* untilLauncherLoss(run) : yield* run;
     }),
   ),
+  Command.withSubcommands([traceCommand]),
 );
 
 export const cli = rootCommand;

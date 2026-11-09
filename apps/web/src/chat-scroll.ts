@@ -22,3 +22,21 @@ export function isScrollContainerNearBottom(
   const distanceFromBottom = scrollHeight - clientHeight - scrollTop;
   return distanceFromBottom <= threshold;
 }
+
+type MatchMediaFn = (query: string) => Pick<MediaQueryList, "matches">;
+
+function defaultMatchMedia(): MatchMediaFn | null {
+  if (typeof window === "undefined" || typeof window.matchMedia !== "function") return null;
+  return (query) => window.matchMedia(query);
+}
+
+/** Returns "auto" when the OS asks for reduced motion, otherwise "smooth". */
+export function getSmoothScrollBehavior(
+  matchMedia: MatchMediaFn | null = defaultMatchMedia(),
+): ScrollBehavior {
+  try {
+    return matchMedia?.("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth";
+  } catch {
+    return "smooth";
+  }
+}

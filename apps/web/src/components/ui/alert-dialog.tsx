@@ -1,12 +1,21 @@
 "use client";
 
 import { AlertDialog as AlertDialogPrimitive } from "@base-ui/react/alert-dialog";
+import { useEffect } from "react";
 
+import { acquireAlertDialogOpenFlag } from "~/components/ui/alert-dialog-open-flag";
+import { ControlledOpenContext, renderRetainedPopup } from "~/components/ui/dialog";
 import { cn } from "~/lib/utils";
 
 const AlertDialogCreateHandle = AlertDialogPrimitive.createHandle;
 
-const AlertDialog = AlertDialogPrimitive.Root;
+function AlertDialog<Payload>(props: AlertDialogPrimitive.Root.Props<Payload>) {
+  return (
+    <ControlledOpenContext value={props.open}>
+      <AlertDialogPrimitive.Root {...props} />
+    </ControlledOpenContext>
+  );
+}
 
 const AlertDialogPortal = AlertDialogPrimitive.Portal;
 
@@ -15,6 +24,8 @@ function AlertDialogTrigger(props: AlertDialogPrimitive.Trigger.Props) {
 }
 
 function AlertDialogBackdrop({ className, ...props }: AlertDialogPrimitive.Backdrop.Props) {
+  // The backdrop stays mounted through the exit animation, matching the old :has() lifetime.
+  useEffect(() => acquireAlertDialogOpenFlag(), []);
   return (
     <AlertDialogPrimitive.Backdrop
       className={cn(
@@ -31,7 +42,7 @@ function AlertDialogViewport({ className, ...props }: AlertDialogPrimitive.Viewp
   return (
     <AlertDialogPrimitive.Viewport
       className={cn(
-        "fixed inset-0 z-[500001] grid grid-rows-[1fr_auto_3fr] justify-items-center p-4",
+        "fixed inset-0 z-[500001] grid grid-rows-[1fr_auto_3fr] justify-items-center p-4 [-webkit-app-region:no-drag]",
         className,
       )}
       data-slot="alert-dialog-viewport"
@@ -61,6 +72,7 @@ function AlertDialogPopup({
             className,
           )}
           data-slot="alert-dialog-popup"
+          render={renderRetainedPopup}
           {...props}
         />
       </AlertDialogViewport>
@@ -102,7 +114,7 @@ function AlertDialogFooter({
 function AlertDialogTitle({ className, ...props }: AlertDialogPrimitive.Title.Props) {
   return (
     <AlertDialogPrimitive.Title
-      className={cn("font-heading font-semibold text-xl leading-none", className)}
+      className={cn("wrap-anywhere font-heading font-semibold text-xl leading-snug", className)}
       data-slot="alert-dialog-title"
       {...props}
     />
@@ -112,7 +124,7 @@ function AlertDialogTitle({ className, ...props }: AlertDialogPrimitive.Title.Pr
 function AlertDialogDescription({ className, ...props }: AlertDialogPrimitive.Description.Props) {
   return (
     <AlertDialogPrimitive.Description
-      className={cn("text-muted-foreground text-sm", className)}
+      className={cn("wrap-anywhere text-muted-foreground text-sm", className)}
       data-slot="alert-dialog-description"
       {...props}
     />

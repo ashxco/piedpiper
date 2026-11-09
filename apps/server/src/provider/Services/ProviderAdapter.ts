@@ -10,6 +10,7 @@
 import type {
   ApprovalRequestId,
   ProviderApprovalDecision,
+  ProviderGoal,
   ProviderKind,
   ProviderUserInputAnswers,
   ProviderRuntimeEvent,
@@ -40,6 +41,22 @@ export interface ProviderThreadTurnSnapshot {
 export interface ProviderThreadSnapshot {
   readonly threadId: ThreadId;
   readonly turns: ReadonlyArray<ProviderThreadTurnSnapshot>;
+}
+
+export type ProviderGoalRequest =
+  | { readonly type: "get" }
+  | { readonly type: "clear" }
+  | {
+      readonly type: "set";
+      readonly objective?: string;
+      readonly status: "active" | "paused";
+    };
+
+export interface ProviderGoalResponse {
+  /** The goal after the request; null when there is none. */
+  readonly goal: ProviderGoal | null;
+  /** For a clear: whether there was a goal to clear. */
+  readonly cleared?: boolean;
 }
 
 export interface ProviderAdapterShape<TError> {
@@ -102,6 +119,12 @@ export interface ProviderAdapterShape<TError> {
   readonly hasSession: (threadId: ThreadId) => Effect.Effect<boolean>;
 
   /**
+   * Count background tasks (subagents, background shells) the provider still
+   * tracks as running for a session; 0 when unknown or there is no session.
+   */
+  readonly countLiveBackgroundTasks?: (threadId: ThreadId) => Effect.Effect<number>;
+
+  /**
    * Read a provider thread snapshot.
    */
   readonly readThread: (threadId: ThreadId) => Effect.Effect<ProviderThreadSnapshot, TError>;
@@ -113,6 +136,18 @@ export interface ProviderAdapterShape<TError> {
     threadId: ThreadId,
     numTurns: number,
   ) => Effect.Effect<ProviderThreadSnapshot, TError>;
+
+  /** Whether `rollbackThread` can work for this thread; absent means it can. */
+  readonly canRollbackThread?: (threadId: ThreadId) => Effect.Effect<boolean, TError>;
+
+  /** Start provider-native context compaction, when supported. */
+  readonly compactThread?: (threadId: ThreadId) => Effect.Effect<void, TError>;
+
+  /** One call to the provider's native goal API, when it has one. These start no turn themselves. */
+  readonly runGoalRequest?: (
+    threadId: ThreadId,
+    request: ProviderGoalRequest,
+  ) => Effect.Effect<ProviderGoalResponse, TError>;
 
   /**
    * Stop all sessions owned by this adapter.

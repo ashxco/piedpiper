@@ -11,7 +11,7 @@ import {
   type ServerSettings,
 } from "@piedpiper/contracts";
 import { Atom } from "effect/unstable/reactivity";
-import { useCallback, useRef } from "react";
+import { useCallback, useLayoutEffect, useRef } from "react";
 
 import type { WsRpcClient } from "../wsRpcClient";
 import { appAtomRegistry, resetAppAtomRegistryForTests } from "./atomRegistry";
@@ -97,6 +97,7 @@ export function applyServerConfigEvent(event: ServerConfigStreamEvent): void {
       }
       const nextConfig = {
         ...latestServerConfig,
+        keybindings: event.payload.keybindings,
         issues: event.payload.issues,
       } satisfies ServerConfig;
       resolveServerConfig(nextConfig);
@@ -246,7 +247,9 @@ function useLatestAtomSubscription<A>(
   listener: (value: NonNullable<A>) => void,
 ): void {
   const listenerRef = useRef(listener);
-  listenerRef.current = listener;
+  useLayoutEffect(() => {
+    listenerRef.current = listener;
+  });
 
   const stableListener = useCallback((value: A | null) => {
     if (value === null) {

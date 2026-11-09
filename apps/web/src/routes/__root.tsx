@@ -4,21 +4,36 @@ import {
   type ServerLifecycleWelcomePayload,
 } from "@piedpiper/contracts";
 import {
+  Link,
   Outlet,
   createRootRouteWithContext,
   type ErrorComponentProps,
   useNavigate,
   useLocation,
 } from "@tanstack/react-router";
-import { useEffect, useEffectEvent, useRef } from "react";
+import { CheckIcon, CopyIcon } from "lucide-react";
+import { useEffect, useEffectEvent, useLayoutEffect, useRef, useState } from "react";
 import { QueryClient, useQueryClient } from "@tanstack/react-query";
 import { Throttler } from "@tanstack/react-pacer";
 
-import { APP_DISPLAY_NAME } from "../branding";
+import { APP_DISPLAY_NAME, APP_VERSION } from "../branding";
 import { AppSidebarLayout } from "../components/AppSidebarLayout";
+import { CommandPalette } from "../components/CommandPalette";
+import { ConfirmDialogHost } from "../components/ConfirmDialogHost";
+import { ProjectFilePicker } from "../components/ProjectFilePicker";
+import { QuitHoldOverlay } from "../components/QuitHoldOverlay";
+import { ThreadNotificationCoordinator } from "../components/ThreadNotificationCoordinator";
+import { useServerFreezeToast } from "../components/useServerFreezeToast";
+import {
+  SlowRpcRequestToastCoordinator,
+  WebSocketConnectionBanner,
+} from "../components/WebSocketConnectionSurface";
 import { Button } from "../components/ui/button";
 import { AnchoredToastProvider, ToastProvider, toastManager } from "../components/ui/toast";
 import { resolveAndPersistPreferredEditor } from "../editorPreferences";
+import { useCopyToClipboard } from "../hooks/useCopyToClipboard";
+import { isChunkReloadScheduled } from "../lib/chunkReloadGuard";
+import { buildErrorReport, errorMessage } from "../lib/rootErrorReport";
 import { readNativeApi } from "../nativeApi";
 import {
   getServerConfigUpdatedNotification,
@@ -33,32 +48,63 @@ import {
   clearPromotedDraftThreads,
   useComposerDraftStore,
 } from "../composerDraftStore";
-import { useStore } from "../store";
+import { startLiveBackgroundTaskRefresh, useStore } from "../store";
 import { useUiStateStore } from "../uiStateStore";
-import { useTerminalStateStore } from "../terminalStateStore";
-import { terminalRunningSubprocessFromEvent } from "../terminalActivity";
-import { migrateLocalSettingsToServer } from "../hooks/useSettings";
+import {
+  createTerminalStreamSubscribedHandler,
+  useTerminalStateStore,
+} from "../terminalStateStore";
+import { useTerminalTabStateStore } from "../terminalTabStateStore";
+import {
+  applyThreadTitleRegenerationEvents,
+  clearThreadTitleRegenerations,
+} from "../threadTitleRegenerationStore";
+import { migrateLocalSettingsToServer, useSettings } from "../hooks/useSettings";
 import { providerQueryKeys } from "../lib/providerReactQuery";
 import { projectQueryKeys } from "../lib/projectReactQuery";
 import { collectActiveTerminalThreadIds } from "../lib/terminalStateCleanup";
-import { deriveOrchestrationBatchEffects } from "../orchestrationEventEffects";
+import {
+  deriveOrchestrationBatchEffects,
+  resolveThreadGitCwds,
+} from "../orchestrationEventEffects";
+import { invalidateGitQueries, invalidateGitStatusQuery } from "../lib/gitReactQuery";
 import { createOrchestrationRecoveryCoordinator } from "../orchestrationRecovery";
 import { getWsRpcClient } from "~/wsRpcClient";
+import { useAppearanceFontSizeSync } from "~/terminalAppearanceFonts";
+import { useCodeFontFamilySync } from "~/codeFontFamily";
+import { applyAppearanceContrast } from "~/lib/appearanceContrast";
 
 export const Route = createRootRouteWithContext<{
   queryClient: QueryClient;
 }>()({
   component: RootRouteView,
   errorComponent: RootRouteErrorView,
+  notFoundComponent: RootRouteNotFoundView,
   head: () => ({
     meta: [{ name: "title", content: APP_DISPLAY_NAME }],
   }),
 });
 
+function RootRouteNotFoundView() {
+  return (
+    <main className="flex min-h-0 min-w-0 flex-1 items-center justify-center p-6">
+      <div className="flex max-w-sm flex-col items-center gap-4 text-center">
+        <h1 className="text-lg font-medium text-foreground">Page not found</h1>
+        <p className="text-sm text-muted-foreground">
+          This link doesn't point to a page in {APP_DISPLAY_NAME}. Go home to choose a project or
+          start a thread.
+        </p>
+        <Button render={<Link to="/" replace />}>Go home</Button>
+      </div>
+    </main>
+  );
+}
+
 function RootRouteView() {
   if (!readNativeApi()) {
     return (
-      <div className="flex h-screen flex-col bg-background text-foreground">
+      <div className="flex h-screen flex-col bg-background surface-grain text-foreground">
+        <ContrastAppearanceSync />
         <div className="flex flex-1 items-center justify-center">
           <p className="text-sm text-muted-foreground">
             Connecting to {APP_DISPLAY_NAME} server...
@@ -72,7 +118,18 @@ function RootRouteView() {
     <ToastProvider>
       <AnchoredToastProvider>
         <ServerStateBootstrap />
+        <ChatWidthSync />
+        <DiffColorSchemeSync />
+        <FontSizeAppearanceSync />
+        <ContrastAppearanceSync />
         <EventRouter />
+        <ThreadNotificationCoordinator />
+        <ConfirmDialogHost />
+        <QuitHoldOverlay />
+        <CommandPalette />
+        <ProjectFilePicker />
+        <WebSocketConnectionBanner />
+        <SlowRpcRequestToastCoordinator />
         <AppSidebarLayout>
           <Outlet />
         </AppSidebarLayout>
@@ -81,12 +138,27 @@ function RootRouteView() {
   );
 }
 
-function RootRouteErrorView({ error, reset }: ErrorComponentProps) {
+function RootRouteErrorView(props: ErrorComponentProps) {
+  // A lazy chunk that failed resolves to undefined and throws here; the scheduled reload replaces the page.
+  if (isChunkReloadScheduled()) return null;
+  return <RootRouteErrorContent {...props} />;
+}
+
+function RootRouteErrorContent({ error, reset }: ErrorComponentProps) {
   const message = errorMessage(error);
-  const details = errorDetails(error);
+  // Router pathname rather than window.location: desktop uses hash history, where the window path is always "/".
+  const pathname = useLocation({ select: (location) => location.pathname });
+  const [timestamp] = useState(() => new Date().toISOString());
+  const report = buildErrorReport({
+    error,
+    appName: APP_DISPLAY_NAME,
+    appVersion: APP_VERSION,
+    pathname,
+    timestamp,
+  });
 
   return (
-    <div className="flex min-h-screen flex-col items-center justify-center bg-background text-foreground">
+    <div className="flex min-h-screen flex-col items-center justify-center bg-background surface-grain text-foreground">
       <h1 className="text-3xl font-bold tracking-tight">Something went wrong</h1>
       <p className="mt-3 max-w-md text-center text-sm text-muted-foreground">{message}</p>
 
@@ -97,6 +169,7 @@ function RootRouteErrorView({ error, reset }: ErrorComponentProps) {
         <Button size="sm" variant="ghost" onClick={() => window.location.reload()}>
           Reload app
         </Button>
+        <CopyErrorReportButton report={report} />
       </div>
 
       <details className="group mt-12">
@@ -104,40 +177,32 @@ function RootRouteErrorView({ error, reset }: ErrorComponentProps) {
           <span className="group-open:hidden">Show error details</span>
           <span className="hidden group-open:inline">Hide error details</span>
         </summary>
-        <pre className="mt-3 max-h-48 max-w-lg overflow-auto rounded-lg bg-muted/30 px-4 py-3 font-mono text-[11px] text-muted-foreground/60">
-          {details}
+        <pre className="mt-3 max-h-48 max-w-lg overflow-auto whitespace-pre-wrap rounded-lg bg-muted/30 px-4 py-3 font-mono text-[11px] text-muted-foreground/60">
+          {report}
         </pre>
       </details>
     </div>
   );
 }
 
-function errorMessage(error: unknown): string {
-  if (error instanceof Error && error.message.trim().length > 0) {
-    return error.message;
-  }
+function CopyErrorReportButton({ report }: { report: string }) {
+  // This view renders outside the toast provider, so a failed copy is reported on the button itself.
+  const [copyFailed, setCopyFailed] = useState(false);
+  const { copyToClipboard, isCopied } = useCopyToClipboard({ onError: () => setCopyFailed(true) });
 
-  if (typeof error === "string" && error.trim().length > 0) {
-    return error;
-  }
-
-  return "An unexpected router error occurred.";
-}
-
-function errorDetails(error: unknown): string {
-  if (error instanceof Error) {
-    return error.stack ?? error.message;
-  }
-
-  if (typeof error === "string") {
-    return error;
-  }
-
-  try {
-    return JSON.stringify(error, null, 2);
-  } catch {
-    return "No additional error details are available.";
-  }
+  return (
+    <Button
+      size="sm"
+      variant="ghost"
+      onClick={() => {
+        setCopyFailed(false);
+        copyToClipboard(report);
+      }}
+    >
+      {isCopied ? <CheckIcon className="text-success" /> : <CopyIcon />}
+      {isCopied ? "Copied" : copyFailed ? "Copy failed" : "Copy error"}
+    </Button>
+  );
 }
 
 function coalesceOrchestrationUiEvents(
@@ -183,6 +248,43 @@ function ServerStateBootstrap() {
   return null;
 }
 
+function ChatWidthSync() {
+  const chatWidth = useSettings((settings) => settings.chatWidth);
+
+  useEffect(() => {
+    document.documentElement.dataset.chatWidth = chatWidth;
+  }, [chatWidth]);
+
+  return null;
+}
+
+function DiffColorSchemeSync() {
+  const diffColorScheme = useSettings((settings) => settings.diffColorScheme);
+
+  useEffect(() => {
+    document.documentElement.dataset.diffColorScheme = diffColorScheme;
+  }, [diffColorScheme]);
+
+  return null;
+}
+
+function ContrastAppearanceSync() {
+  const appearanceContrast = useSettings((settings) => settings.appearanceContrast);
+
+  // A layout effect, so a stored contrast is in place before the first paint.
+  useLayoutEffect(() => {
+    applyAppearanceContrast(document.documentElement, appearanceContrast);
+  }, [appearanceContrast]);
+
+  return null;
+}
+
+function FontSizeAppearanceSync() {
+  useAppearanceFontSizeSync();
+  useCodeFontFamilySync();
+  return null;
+}
+
 function EventRouter() {
   const applyOrchestrationEvents = useStore((store) => store.applyOrchestrationEvents);
   const syncServerReadModel = useStore((store) => store.syncServerReadModel);
@@ -203,10 +305,13 @@ function EventRouter() {
   const disposedRef = useRef(false);
   const bootstrapFromSnapshotRef = useRef<() => Promise<void>>(async () => undefined);
   const serverConfig = useServerConfig();
+  useServerFreezeToast(serverConfig?.lastEventLoopStall);
+  useEffect(() => startLiveBackgroundTaskRefresh(), []);
 
   const handleWelcome = useEffectEvent((payload: ServerLifecycleWelcomePayload | null) => {
     if (!payload) return;
 
+    clearThreadTitleRegenerations();
     migrateLocalSettingsToServer();
     void (async () => {
       await bootstrapFromSnapshotRef.current();
@@ -298,6 +403,8 @@ function EventRouter() {
     disposedRef.current = false;
     const recovery = createOrchestrationRecoveryCoordinator();
     let needsProviderInvalidation = false;
+    const pendingGitInvalidationThreadIds = new Set<ThreadId>();
+    const pendingGitBranchInvalidationThreadIds = new Set<ThreadId>();
     const pendingDomainEvents: OrchestrationEvent[] = [];
     let flushPendingDomainEventsScheduled = false;
 
@@ -328,6 +435,32 @@ function EventRouter() {
 
     const queryInvalidationThrottler = new Throttler(
       () => {
+        if (
+          pendingGitInvalidationThreadIds.size > 0 ||
+          pendingGitBranchInvalidationThreadIds.size > 0
+        ) {
+          const { threads, projects } = useStore.getState();
+          // Scoped per cwd: a global git invalidate would refetch status for every sidebar project.
+          const branchCwds = resolveThreadGitCwds(
+            pendingGitBranchInvalidationThreadIds,
+            threads,
+            projects,
+          );
+          for (const cwd of branchCwds) {
+            void invalidateGitQueries(queryClient, { cwd });
+          }
+          for (const cwd of resolveThreadGitCwds(
+            pendingGitInvalidationThreadIds,
+            threads,
+            projects,
+          )) {
+            if (!branchCwds.includes(cwd)) {
+              void invalidateGitStatusQuery(queryClient, cwd);
+            }
+          }
+          pendingGitInvalidationThreadIds.clear();
+          pendingGitBranchInvalidationThreadIds.clear();
+        }
         if (!needsProviderInvalidation) {
           return;
         }
@@ -359,12 +492,25 @@ function EventRouter() {
           event.type === "project.deleted",
       );
 
+      for (const threadId of batchEffects.gitStatusInvalidationThreadIds) {
+        pendingGitInvalidationThreadIds.add(threadId);
+      }
+      for (const threadId of batchEffects.gitBranchInvalidationThreadIds) {
+        pendingGitBranchInvalidationThreadIds.add(threadId);
+      }
       if (batchEffects.needsProviderInvalidation) {
         needsProviderInvalidation = true;
+      }
+      if (
+        batchEffects.needsProviderInvalidation ||
+        batchEffects.gitStatusInvalidationThreadIds.length > 0 ||
+        batchEffects.gitBranchInvalidationThreadIds.length > 0
+      ) {
         void queryInvalidationThrottler.maybeExecute();
       }
 
       applyOrchestrationEvents(uiEvents);
+      applyThreadTitleRegenerationEvents(nextEvents);
       if (needsProjectUiSync) {
         const projects = useStore.getState().projects;
         syncProjects(projects.map((project) => ({ id: project.id, cwd: project.cwd })));
@@ -464,6 +610,8 @@ function EventRouter() {
         const snapshot = await api.orchestration.getSnapshot();
         if (!disposed) {
           syncServerReadModel(snapshot);
+          // The replay this replaces can carry a settled event, so no row can rely on seeing it.
+          clearThreadTitleRegenerations();
           reconcileSnapshotDerivedState();
           if (recovery.completeSnapshotRecovery(snapshot.snapshotSequence)) {
             void recoverFromSequenceGap();
@@ -495,33 +643,33 @@ function EventRouter() {
         void recoverFromSequenceGap();
       }
     });
-    const unsubTerminalEvent = api.terminal.onEvent((event) => {
-      const thread = useStore.getState().threads.find((entry) => entry.id === event.threadId);
-      if (thread && thread.archivedAt !== null) {
-        return;
-      }
-      useTerminalStateStore.getState().recordTerminalEvent(event);
-      const hasRunningSubprocess = terminalRunningSubprocessFromEvent(event);
-      if (hasRunningSubprocess === null) {
-        return;
-      }
-      useTerminalStateStore
-        .getState()
-        .setTerminalActivity(
-          ThreadId.makeUnsafe(event.threadId),
-          event.terminalId,
-          hasRunningSubprocess,
-        );
+    const unsubTerminalEvent = api.terminal.onEvent(
+      (event) => {
+        const thread = useStore.getState().threads.find((entry) => entry.id === event.threadId);
+        if (thread && thread.archivedAt !== null) {
+          return;
+        }
+        useTerminalStateStore.getState().recordTerminalEvent(event);
+        useTerminalTabStateStore.getState().applyEvent(event);
+      },
+      { onSubscribed: createTerminalStreamSubscribedHandler() },
+    );
+    const unsubTerminalMetadata = api.terminal.onMetadata((event) => {
+      useTerminalStateStore.getState().applyTerminalMetadataEvent(event);
+      useTerminalTabStateStore.getState().applyMetadata(event);
     });
     return () => {
       disposed = true;
       disposedRef.current = true;
       needsProviderInvalidation = false;
+      pendingGitInvalidationThreadIds.clear();
+      pendingGitBranchInvalidationThreadIds.clear();
       flushPendingDomainEventsScheduled = false;
       pendingDomainEvents.length = 0;
       queryInvalidationThrottler.cancel();
       unsubDomainEvent();
       unsubTerminalEvent();
+      unsubTerminalMetadata();
     };
   }, [
     applyOrchestrationEvents,

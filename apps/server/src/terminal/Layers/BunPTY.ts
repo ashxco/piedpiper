@@ -1,5 +1,12 @@
 import { Effect, Layer } from "effect";
-import { PtyAdapter, PtyAdapterShape, PtyExitEvent, PtyProcess } from "../Services/PTY";
+import {
+  PtyAdapter,
+  PtyAdapterShape,
+  PtyExitEvent,
+  PtyProcess,
+  PtySpawnError,
+  PtySpawnInput,
+} from "../Services/PTY";
 
 class BunPtyProcess implements PtyProcess {
   private readonly dataListeners = new Set<(data: string) => void>();
@@ -86,6 +93,36 @@ class BunPtyProcess implements PtyProcess {
   }
 }
 
+export const spawnBunPtyProcess = (
+  input: PtySpawnInput,
+  spawn: typeof Bun.spawn = Bun.spawn,
+): Effect.Effect<PtyProcess, PtySpawnError> =>
+  Effect.try({
+    try: () => {
+      let processHandle: BunPtyProcess | null = null;
+      const command = [input.shell, ...(input.args ?? [])];
+      const subprocess = spawn(command, {
+        cwd: input.cwd,
+        env: input.env,
+        terminal: {
+          cols: input.cols,
+          rows: input.rows,
+          data: (_terminal, data) => {
+            processHandle?.emitData(data);
+          },
+        },
+      });
+      processHandle = new BunPtyProcess(subprocess);
+      return processHandle;
+    },
+    catch: (cause) =>
+      new PtySpawnError({
+        adapter: "bun-pty",
+        message: cause instanceof Error ? cause.message : "Failed to spawn PTY process",
+        cause,
+      }),
+  });
+
 export const layer = Layer.effect(
   PtyAdapter,
   Effect.gen(function* () {
@@ -95,24 +132,7 @@ export const layer = Layer.effect(
       );
     }
     return {
-      spawn: (input) =>
-        Effect.sync(() => {
-          let processHandle: BunPtyProcess | null = null;
-          const command = [input.shell, ...(input.args ?? [])];
-          const subprocess = Bun.spawn(command, {
-            cwd: input.cwd,
-            env: input.env,
-            terminal: {
-              cols: input.cols,
-              rows: input.rows,
-              data: (_terminal, data) => {
-                processHandle?.emitData(data);
-              },
-            },
-          });
-          processHandle = new BunPtyProcess(subprocess);
-          return processHandle;
-        }),
+      spawn: (input) => spawnBunPtyProcess(input),
     } satisfies PtyAdapterShape;
   }),
 );

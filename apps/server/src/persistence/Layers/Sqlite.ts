@@ -26,10 +26,37 @@ const makeRuntimeSqliteLayer = Effect.fn("makeRuntimeSqliteLayer")(function* (
   return clientModule.layer(config);
 }, Layer.unwrap);
 
+// Size the -wal file is cut back to on the first commit after a WAL reset.
+export const WAL_SIZE_LIMIT_BYTES = 32 * 1024 * 1024;
+// How long a statement waits for another connection's lock before SQLITE_BUSY.
+export const BUSY_TIMEOUT_MS = 5000;
+
 const setup = Layer.effectDiscard(
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
+    // First so the pragmas below also wait instead of failing on a locked file.
+    yield* sql.unsafe(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS};`);
+    // Only an empty file can switch modes; existing databases keep theirs and reuse freed pages.
+    const tables = yield* sql<{ readonly count: number }>`
+      SELECT COUNT(*) AS count FROM sqlite_schema WHERE type = 'table'
+    `;
+    if (tables[0]?.count === 0) {
+      yield* sql`PRAGMA auto_vacuum = INCREMENTAL;`;
+      // The Bun driver opens in WAL, which already fixed the header; only VACUUM can still change it.
+      const mode = yield* sql<{ readonly auto_vacuum: number }>`PRAGMA auto_vacuum`;
+      if (mode[0]?.auto_vacuum !== 2) {
+        yield* sql.unsafe("VACUUM");
+      }
+    }
     yield* sql`PRAGMA journal_mode = WAL;`;
+    // In WAL mode NORMAL only fsyncs at checkpoints; FULL fsyncs every commit on the main thread.
+    yield* sql`PRAGMA synchronous = NORMAL;`;
+    // With NORMAL the checkpoint is the only fsync barrier; on macOS plain fsync stops at the drive cache.
+    yield* sql`PRAGMA checkpoint_fullfsync = ON;`;
+    // Statement journals and sort spills otherwise become synchronous temp-file writes on the event loop.
+    yield* sql`PRAGMA temp_store = MEMORY;`;
+    // PASSIVE checkpoints never shrink the -wal file, so it otherwise keeps its largest size.
+    yield* sql.unsafe(`PRAGMA journal_size_limit = ${WAL_SIZE_LIMIT_BYTES};`);
     yield* sql`PRAGMA foreign_keys = ON;`;
     yield* runMigrations();
   }),

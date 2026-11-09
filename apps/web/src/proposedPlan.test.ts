@@ -61,6 +61,21 @@ describe("stripDisplayedPlanMarkdown", () => {
       "## Scope\n\n- step 1",
     );
   });
+
+  it("keeps markdown without a title and skips leading blank lines", () => {
+    expect(stripDisplayedPlanMarkdown("\n\n- step 1\r\n- step 2")).toBe("- step 1\n- step 2");
+    expect(stripDisplayedPlanMarkdown("## Summary\n\n\n- step 1")).toBe("- step 1");
+    expect(stripDisplayedPlanMarkdown("# Only title")).toBe("");
+    expect(stripDisplayedPlanMarkdown("")).toBe("");
+  });
+
+  it("strips the prefix of a large plan in linear time", () => {
+    const body = Array.from({ length: 50_000 }, (_, index) => `- step ${index}`).join("\n");
+    const blank = "\n".repeat(50_000);
+    const started = performance.now();
+    expect(stripDisplayedPlanMarkdown(`# Title\n${blank}## Summary\n${blank}${body}`)).toBe(body);
+    expect(performance.now() - started).toBeLessThan(1_000);
+  });
 });
 
 describe("resolvePlanFollowUpSubmission", () => {

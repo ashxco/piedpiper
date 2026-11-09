@@ -21,6 +21,7 @@ const STATUS_COLORS_DARK: Record<string, string> = {
   Connecting: "#7dd3fc",
   "Plan Ready": "#c4b5fd",
   Completed: "#6ee7b7",
+  Failed: "#fca5a5",
 };
 
 const STATUS_COLORS_LIGHT: Record<string, string> = {
@@ -30,6 +31,7 @@ const STATUS_COLORS_LIGHT: Record<string, string> = {
   Connecting: "#0ea5e9",
   "Plan Ready": "#8b5cf6",
   Completed: "#10b981",
+  Failed: "#ef4444",
 };
 
 export function resolveStatusColor(

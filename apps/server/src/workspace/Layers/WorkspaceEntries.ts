@@ -45,8 +45,9 @@ interface RankedWorkspaceEntry {
   score: number;
 }
 
-function toPosixPath(input: string): string {
-  return input.replaceAll("\\", "/");
+// Only the platform separator: on POSIX a backslash is a legal file-name character.
+function toPosixPath(input: string, separator: string): string {
+  return separator === "/" ? input : input.replaceAll(separator, "/");
 }
 
 function parentPathOf(input: string): string | undefined {
@@ -259,7 +260,7 @@ export const makeWorkspaceEntries = Effect.gen(function* () {
       }
 
       const listedPaths = [...listedFiles.paths]
-        .map((entry) => toPosixPath(entry))
+        .map((entry) => toPosixPath(entry, path.sep))
         .filter((entry) => entry.length > 0 && !isPathInIgnoredDirectory(entry));
       const filePaths = yield* filterGitIgnoredPaths(cwd, listedPaths);
 
@@ -368,6 +369,7 @@ export const makeWorkspaceEntries = Effect.gen(function* () {
 
           const relativePath = toPosixPath(
             relativeDir ? path.join(relativeDir, dirent.name) : dirent.name,
+            path.sep,
           );
           if (isPathInIgnoredDirectory(relativePath)) {
             continue;

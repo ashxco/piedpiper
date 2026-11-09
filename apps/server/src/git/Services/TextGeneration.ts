@@ -8,7 +8,7 @@
  */
 import { ServiceMap } from "effect";
 import type { Effect } from "effect";
-import type { ChatAttachment, ModelSelection } from "@piedpiper/contracts";
+import type { BranchNamingOptions, ChatAttachment, ModelSelection } from "@piedpiper/contracts";
 
 import type { TextGenerationError } from "@piedpiper/contracts";
 
@@ -22,6 +22,8 @@ export interface CommitMessageGenerationInput {
   stagedPatch: string;
   /** When true, the model also returns a semantic branch name for the change. */
   includeBranch?: boolean;
+  /** Extra style rules from the commit message style setting. */
+  additionalInstructions?: string | undefined;
   /** What model and provider to use for generation. */
   modelSelection: ModelSelection;
 }
@@ -53,6 +55,8 @@ export interface BranchNameGenerationInput {
   cwd: string;
   message: string;
   attachments?: ReadonlyArray<ChatAttachment> | undefined;
+  /** The branch naming settings; they vary the prompt, and custom mode keeps the model's casing. */
+  naming?: BranchNamingOptions | undefined;
   /** What model and provider to use for generation. */
   modelSelection: ModelSelection;
 }
@@ -63,8 +67,15 @@ export interface BranchNameGenerationResult {
 
 export interface ThreadTitleGenerationInput {
   cwd: string;
+  /** The first user message, or the thread context (see formatThreadTitleRegenerationContext) when regenerating. */
   message: string;
   attachments?: ReadonlyArray<ChatAttachment> | undefined;
+  /** The current title; set to regenerate an existing thread's title from its conversation. */
+  previousTitle?: string | undefined;
+  /** The thread title instructions setting; added to the prompt as user preferences. */
+  additionalInstructions?: string | undefined;
+  /** Linked PR and issue subjects (see resolveThreadTitleLinkedContext); reference data only. */
+  linkedContext?: string | undefined;
   /** What model and provider to use for generation. */
   modelSelection: ModelSelection;
 }

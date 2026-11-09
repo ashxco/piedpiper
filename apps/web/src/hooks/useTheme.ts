@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useSyncExternalStore } from "react";
+import { useCallback, useSyncExternalStore } from "react";
 
 type Theme = "light" | "dark" | "system";
 type ThemeSnapshot = {
@@ -9,15 +9,18 @@ type ThemeSnapshot = {
 const STORAGE_KEY = "piedpiper:theme";
 const MEDIA_QUERY = "(prefers-color-scheme: dark)";
 
-let listeners: Array<() => void> = [];
+const listeners = new Set<() => void>();
 let lastSnapshot: ThemeSnapshot | null = null;
 let lastDesktopTheme: Theme | null = null;
+let lastAppliedTheme: ThemeSnapshot | null = null;
+let detachEnvironmentListeners: (() => void) | null = null;
+
 function emitChange() {
   for (const listener of listeners) listener();
 }
 
 function getSystemDark(): boolean {
-  return window.matchMedia(MEDIA_QUERY).matches;
+  return typeof window.matchMedia === "function" && window.matchMedia(MEDIA_QUERY).matches;
 }
 
 function getStored(): Theme {
@@ -27,11 +30,19 @@ function getStored(): Theme {
 }
 
 function applyTheme(theme: Theme, suppressTransitions = false) {
+  const systemDark = theme === "system" ? getSystemDark() : false;
+  // Skip the DOM write (and forced reflow) when the resolved theme is already applied.
+  if (lastAppliedTheme?.theme === theme && lastAppliedTheme.systemDark === systemDark) {
+    syncDesktopTheme(theme);
+    return;
+  }
+
   if (suppressTransitions) {
     document.documentElement.classList.add("no-transitions");
   }
-  const isDark = theme === "dark" || (theme === "system" && getSystemDark());
+  const isDark = theme === "dark" || (theme === "system" && systemDark);
   document.documentElement.classList.toggle("dark", isDark);
+  lastAppliedTheme = { theme, systemDark };
   syncDesktopTheme(theme);
   if (suppressTransitions) {
     // Force a reflow so the no-transitions class takes effect before removal
@@ -72,18 +83,15 @@ function getSnapshot(): ThemeSnapshot {
   return lastSnapshot;
 }
 
-function subscribe(listener: () => void): () => void {
-  listeners.push(listener);
-
-  // Listen for system preference changes
-  const mq = window.matchMedia(MEDIA_QUERY);
+// One matchMedia/storage listener pair shared by every useTheme() subscriber.
+function attachEnvironmentListeners(): () => void {
+  const mq = typeof window.matchMedia === "function" ? window.matchMedia(MEDIA_QUERY) : null;
   const handleChange = () => {
     if (getStored() === "system") applyTheme("system", true);
     emitChange();
   };
-  mq.addEventListener("change", handleChange);
+  mq?.addEventListener("change", handleChange);
 
-  // Listen for storage changes from other tabs
   const handleStorage = (e: StorageEvent) => {
     if (e.key === STORAGE_KEY) {
       applyTheme(getStored(), true);
@@ -93,14 +101,30 @@ function subscribe(listener: () => void): () => void {
   window.addEventListener("storage", handleStorage);
 
   return () => {
-    listeners = listeners.filter((l) => l !== listener);
-    mq.removeEventListener("change", handleChange);
+    mq?.removeEventListener("change", handleChange);
     window.removeEventListener("storage", handleStorage);
   };
 }
 
+export function subscribeToTheme(listener: () => void): () => void {
+  if (listeners.size === 0 && detachEnvironmentListeners === null) {
+    detachEnvironmentListeners = attachEnvironmentListeners();
+    // Catch up on OS/cross-tab changes missed while no subscriber had listeners attached.
+    applyTheme(getStored());
+  }
+  listeners.add(listener);
+
+  return () => {
+    listeners.delete(listener);
+    if (listeners.size === 0 && detachEnvironmentListeners !== null) {
+      detachEnvironmentListeners();
+      detachEnvironmentListeners = null;
+    }
+  };
+}
+
 export function useTheme() {
-  const snapshot = useSyncExternalStore(subscribe, getSnapshot);
+  const snapshot = useSyncExternalStore(subscribeToTheme, getSnapshot);
   const theme = snapshot.theme;
 
   const resolvedTheme: "light" | "dark" =
@@ -111,11 +135,6 @@ export function useTheme() {
     applyTheme(next, true);
     emitChange();
   }, []);
-
-  // Keep DOM in sync on mount/change
-  useEffect(() => {
-    applyTheme(theme);
-  }, [theme]);
 
   return { theme, setTheme, resolvedTheme } as const;
 }

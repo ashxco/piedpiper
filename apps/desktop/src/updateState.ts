@@ -1,4 +1,5 @@
 import type { DesktopUpdateState } from "@piedpiper/contracts";
+import type { MessageBoxOptions } from "electron";
 
 export function shouldBroadcastDownloadProgress(
   currentState: DesktopUpdateState,
@@ -34,6 +35,7 @@ export function getAutoUpdateDisabledReason(args: {
   platform: NodeJS.Platform;
   appImage?: string | undefined;
   disabledByEnv: boolean;
+  hasUpdateFeedConfig: boolean;
 }): string | null {
   if (args.isDevelopment || !args.isPackaged) {
     return "Automatic updates are only available in packaged production builds.";
@@ -43,6 +45,40 @@ export function getAutoUpdateDisabledReason(args: {
   }
   if (args.platform === "linux" && !args.appImage) {
     return "Automatic updates on Linux require running the AppImage build.";
+  }
+  if (!args.hasUpdateFeedConfig) {
+    return "Automatic updates are not available because no update feed is configured for this build.";
+  }
+  return null;
+}
+
+/** What a Check for Updates menu click reports once the check settled; the sidebar shows the rest. */
+export function resolveUpdateCheckMenuDialog(state: DesktopUpdateState): MessageBoxOptions | null {
+  if (state.status === "up-to-date") {
+    return {
+      type: "info",
+      title: "You're up to date!",
+      message: `Pied Piper ${state.currentVersion} is currently the newest version available.`,
+      buttons: ["OK"],
+    };
+  }
+  if (state.status === "downloaded") {
+    return {
+      type: "info",
+      title: "Update ready to install",
+      message: `Pied Piper ${state.downloadedVersion ?? "update"} has already been downloaded.`,
+      detail: "Use the update button in the sidebar to restart and install it.",
+      buttons: ["OK"],
+    };
+  }
+  if (state.status === "error") {
+    return {
+      type: "warning",
+      title: "Update check failed",
+      message: "Could not check for updates.",
+      detail: state.message ?? "An unknown error occurred. Please try again later.",
+      buttons: ["OK"],
+    };
   }
   return null;
 }

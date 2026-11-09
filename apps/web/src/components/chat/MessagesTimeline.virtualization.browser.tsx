@@ -8,6 +8,8 @@ import { render } from "vitest-browser-react";
 
 import { deriveTimelineEntries, type WorkLogEntry } from "../../session-logic";
 import { type ChatMessage, type ProposedPlan, type TurnDiffSummary } from "../../types";
+import { useUiStateStore } from "../../uiStateStore";
+import { shouldAutoExpandChangedFiles } from "./changedFilesPresentation";
 import { MessagesTimeline } from "./MessagesTimeline";
 import {
   deriveMessagesTimelineRows,
@@ -158,7 +160,6 @@ function createBaseTimelineProps(input: {
     completionDividerBeforeEntryId: input.completionDividerBeforeEntryId ?? null,
     completionSummary: null,
     turnDiffSummaryByAssistantMessageId: input.turnDiffSummaryByAssistantMessageId ?? new Map(),
-    nowIso: isoAt(10_000),
     expandedWorkGroups: input.expandedWorkGroups ?? {},
     onToggleWorkGroup: () => {},
     onOpenTurnDiff: () => {},
@@ -224,6 +225,7 @@ function createChangedFilesScenario(input: {
   rowId: string;
   files: TurnDiffSummary["files"];
   maxEstimateDeltaPx?: number;
+  latestTurnId?: TurnId | null;
 }): VirtualizationScenario {
   const beforeMessages = createFillerMessages({
     prefix: `${input.rowId}-before`,
@@ -245,13 +247,17 @@ function createChangedFilesScenario(input: {
   return {
     name: input.name,
     targetRowId: changedFilesMessage.id,
-    props: createBaseTimelineProps({
-      messages: [...beforeMessages, changedFilesMessage, ...afterMessages],
-      turnDiffSummaryByAssistantMessageId: createChangedFilesSummary(
-        changedFilesMessage.id,
-        input.files,
-      ),
-    }),
+    props: {
+      ...createBaseTimelineProps({
+        messages: [...beforeMessages, changedFilesMessage, ...afterMessages],
+        turnDiffSummaryByAssistantMessageId: createChangedFilesSummary(
+          changedFilesMessage.id,
+          input.files,
+        ),
+      }),
+      latestTurnId:
+        input.latestTurnId === undefined ? ("turn-changed-files" as TurnId) : input.latestTurnId,
+    },
     maxEstimateDeltaPx: input.maxEstimateDeltaPx ?? 72,
   };
 }
@@ -430,6 +436,18 @@ function buildStaticScenarios(): VirtualizationScenario[] {
         { path: "packages/shared/src/git.ts", additions: 8, deletions: 2 },
       ],
     }),
+    createChangedFilesScenario({
+      name: "assistant changed-files row collapsed to its summary",
+      rowId: "target-assistant-changed-files-collapsed",
+      latestTurnId: null,
+      maxEstimateDeltaPx: 24,
+      files: [
+        { path: "README.md", additions: 5, deletions: 1 },
+        { path: "packages/contracts/src/orchestration.ts", additions: 13, deletions: 3 },
+        { path: "packages/shared/src/git.ts", additions: 8, deletions: 2 },
+        { path: "apps/web/src/components/chat/MessagesTimeline.tsx", additions: 52, deletions: 7 },
+      ],
+    }),
   ];
 }
 
@@ -541,6 +559,8 @@ async function measureTimelineRow(input: {
       expandedWorkGroups: input.props.expandedWorkGroups,
       timelineWidthPx,
       turnDiffSummaryByAssistantMessageId: input.props.turnDiffSummaryByAssistantMessageId,
+      isChangedFilesExpanded: (summary) =>
+        shouldAutoExpandChangedFiles(summary.files, summary.turnId === input.props.latestTurnId),
     }),
     timelineWidthPx,
     virtualizerSizePx,
@@ -608,9 +628,19 @@ async function measureRenderedRowActualHeight(input: {
   return rowElement.getBoundingClientRect().height;
 }
 
+async function expandAllChangedFileDirectories(host: HTMLElement, rowId: string): Promise<void> {
+  const findButton = (label: string) =>
+    Array.from(
+      host.querySelectorAll<HTMLButtonElement>(`[data-timeline-row-id="${rowId}"] button`),
+    ).find((button) => button.textContent?.trim() === label) ?? null;
+  findButton("Expand all")?.click();
+  await waitForElement(() => findButton("Collapse all"), 'Unable to find "Collapse all" button.');
+}
+
 describe("MessagesTimeline virtualization harness", () => {
   beforeEach(async () => {
     document.body.innerHTML = "";
+    useUiStateStore.setState({ threadChangedFilesExpandedById: {} });
     await setViewport(DEFAULT_VIEWPORT);
   });
 
@@ -701,6 +731,25 @@ describe("MessagesTimeline virtualization harness", () => {
     });
 
     try {
+      // Twelve files is over the auto-expand limit, so open the card first.
+      const expandCardButton = await waitForElement(
+        () =>
+          mounted.host.querySelector<HTMLButtonElement>(
+            `[data-timeline-row-id="${targetMessage.id}"] [data-changed-files-header] button[aria-expanded="false"]`,
+          ),
+        "Unable to find the changed-files expand toggle.",
+      );
+      expandCardButton.click();
+      await waitForElement(
+        () =>
+          mounted.host.querySelector(
+            `[data-timeline-row-id="${targetMessage.id}"] [data-changed-files-state="expanded"]`,
+          ),
+        "Changed-files card did not expand.",
+      );
+      // A large card opened by hand starts with its folders collapsed.
+      await expandAllChangedFileDirectories(mounted.host, targetMessage.id);
+
       const beforeCollapse = await measureTimelineRow({
         host: mounted.host,
         props,
@@ -779,13 +828,12 @@ describe("MessagesTimeline virtualization harness", () => {
       );
       expect(targetRowElement, "Unable to locate target work-log row.").toBeTruthy();
 
-      const showMoreButton =
-        Array.from(targetRowElement!.querySelectorAll<HTMLButtonElement>("button")).find((button) =>
-          button.textContent?.includes("Show 4 more"),
-        ) ?? null;
-      expect(showMoreButton, 'Unable to find "Show more" button.').toBeTruthy();
+      const toggleButton = targetRowElement!.querySelector<HTMLButtonElement>(
+        "[data-tool-group-toggle]",
+      );
+      expect(toggleButton, "Unable to find the tool group toggle.").toBeTruthy();
 
-      showMoreButton!.click();
+      toggleButton!.click();
 
       await vi.waitFor(
         async () => {
@@ -808,6 +856,123 @@ describe("MessagesTimeline virtualization harness", () => {
         Math.abs(afterExpand.actualHeightPx - afterExpand.virtualizerSizePx),
       ).toBeLessThanOrEqual(8);
     } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("expands and re-collapses a long user message and keeps the virtualizer size in sync", async () => {
+    const beforeMessages = createFillerMessages({
+      prefix: "before-user-collapse",
+      startOffsetSeconds: 0,
+      pairCount: 2,
+    });
+    const afterMessages = createFillerMessages({
+      prefix: "after-user-collapse",
+      startOffsetSeconds: 40,
+      pairCount: 8,
+    });
+    const longUserMessage = createMessage({
+      id: "target-user-collapse",
+      role: "user",
+      text: Array.from({ length: 30 }, (_, index) => `log line ${index + 1}`).join("\n"),
+      offsetSeconds: 12,
+    });
+    const props = createBaseTimelineProps({
+      messages: [...beforeMessages, longUserMessage, ...afterMessages],
+    });
+    const mounted = await mountMessagesTimeline({ props });
+
+    try {
+      const collapsed = await measureTimelineRow({
+        host: mounted.host,
+        props,
+        targetRowId: longUserMessage.id,
+      });
+      expect(Math.abs(collapsed.actualHeightPx - collapsed.estimatedHeightPx)).toBeLessThanOrEqual(
+        56,
+      );
+      const rowElement = mounted.host.querySelector<HTMLElement>(
+        `[data-timeline-row-id="${longUserMessage.id}"]`,
+      );
+      const toggle = () =>
+        Array.from(rowElement!.querySelectorAll<HTMLButtonElement>("button")).find((button) =>
+          /Show full message|Show less/.test(button.textContent ?? ""),
+        ) ?? null;
+      expect(toggle()?.textContent).toBe("Show full message");
+      expect(toggle()?.getAttribute("aria-expanded")).toBe("false");
+
+      toggle()!.click();
+      await vi.waitFor(
+        async () => {
+          const expanded = await measureTimelineRow({
+            host: mounted.host,
+            props,
+            targetRowId: longUserMessage.id,
+          });
+          expect(expanded.actualHeightPx).toBeGreaterThan(collapsed.actualHeightPx + 200);
+          expect(
+            Math.abs(expanded.actualHeightPx - expanded.virtualizerSizePx),
+          ).toBeLessThanOrEqual(8);
+        },
+        { timeout: 8_000, interval: 16 },
+      );
+      expect(toggle()?.textContent).toBe("Show less");
+      expect(toggle()?.getAttribute("aria-expanded")).toBe("true");
+
+      toggle()!.click();
+      await vi.waitFor(
+        async () => {
+          const recollapsed = await measureTimelineRow({
+            host: mounted.host,
+            props,
+            targetRowId: longUserMessage.id,
+          });
+          expect(
+            Math.abs(recollapsed.actualHeightPx - collapsed.actualHeightPx),
+          ).toBeLessThanOrEqual(1);
+        },
+        { timeout: 8_000, interval: 16 },
+      );
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("does not collapse a long user message that fits under the cap on a wide timeline", async () => {
+    const wideUserMessage = createMessage({
+      id: "target-user-wide-fit",
+      role: "user",
+      text: "word ".repeat(121).trim(),
+      offsetSeconds: 12,
+    });
+    const props = createBaseTimelineProps({ messages: [wideUserMessage] });
+    // The "full" chat width setting lets the bubble grow wide enough for ~600 chars to fit in a few lines.
+    document.documentElement.dataset.chatWidth = "full";
+    const mounted = await mountMessagesTimeline({
+      props,
+      viewport: { width: 1_800, height: 900 },
+    });
+
+    try {
+      await vi.waitFor(
+        () => {
+          const body = mounted.host.querySelector<HTMLElement>(
+            `[data-timeline-row-id="${wideUserMessage.id}"] [data-user-message-body="true"]`,
+          );
+          expect(body).not.toBeNull();
+          expect(body!.dataset.userMessageCollapsed).toBe("false");
+          expect(body!.style.maskImage).toBe("");
+          const toggle = Array.from(
+            mounted.host.querySelectorAll<HTMLButtonElement>(
+              `[data-timeline-row-id="${wideUserMessage.id}"] button`,
+            ),
+          ).find((button) => /Show full message|Show less/.test(button.textContent ?? ""));
+          expect(toggle).toBeUndefined();
+        },
+        { timeout: 8_000, interval: 16 },
+      );
+    } finally {
+      delete document.documentElement.dataset.chatWidth;
       await mounted.cleanup();
     }
   });
@@ -1029,6 +1194,292 @@ describe("MessagesTimeline virtualization harness", () => {
         },
         { timeout: 8_000, interval: 16 },
       );
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("renders a lone attachment at its fixed height and own aspect ratio", async () => {
+    const imageMessage = createMessage({
+      id: "lone-image",
+      role: "user",
+      text: "A wide screenshot.",
+      offsetSeconds: 0,
+      attachments: [
+        {
+          type: "image",
+          id: "lone-image-file",
+          name: "wide.svg",
+          mimeType: "image/svg+xml",
+          sizeBytes: 512,
+          previewUrl:
+            "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='400' height='200'%3E%3Crect width='400' height='200' fill='%23dbeafe'/%3E%3C/svg%3E",
+        },
+      ],
+    });
+    const mounted = await mountMessagesTimeline({
+      props: createBaseTimelineProps({ messages: [imageMessage] }),
+    });
+
+    try {
+      await vi.waitFor(
+        () => {
+          const image = mounted.host.querySelector<HTMLImageElement>(
+            '[data-timeline-row-id="lone-image"] img',
+          );
+          expect(image?.naturalHeight ?? 0).toBeGreaterThan(0);
+          const rect = image!.getBoundingClientRect();
+          expect(rect.height).toBe(192);
+          expect(rect.width).toBe(384);
+        },
+        { timeout: 8_000, interval: 16 },
+      );
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("keeps a stuck changed-files header in view when the card collapses", async () => {
+    const targetMessage = createMessage({
+      id: "target-assistant-sticky-collapse",
+      role: "assistant",
+      text: "Validation passed on the merged tree.",
+      offsetSeconds: 12,
+    });
+    const files = Array.from({ length: 40 }, (_, index) => ({
+      path: `apps/web/src/feature-${index % 4}/file-${index}.ts`,
+      additions: index + 1,
+      deletions: index % 3,
+    }));
+    const props = {
+      ...createBaseTimelineProps({
+        messages: [
+          ...createFillerMessages({ prefix: "sticky-before", startOffsetSeconds: 0, pairCount: 2 }),
+          targetMessage,
+          ...createFillerMessages({ prefix: "sticky-after", startOffsetSeconds: 40, pairCount: 8 }),
+        ],
+        turnDiffSummaryByAssistantMessageId: createChangedFilesSummary(targetMessage.id, files),
+      }),
+      latestTurnId: null,
+    };
+    const mounted = await mountMessagesTimeline({ props, viewport: { width: 960, height: 500 } });
+
+    try {
+      const scrollContainer = mounted.host.querySelector<HTMLDivElement>(
+        '[data-testid="messages-timeline-scroll-container"]',
+      )!;
+      const headerSelector = `[data-timeline-row-id="${targetMessage.id}"] [data-changed-files-header]`;
+      const toggleSelector = `${headerSelector} button[aria-expanded]`;
+      (
+        await waitForElement(
+          () => mounted.host.querySelector<HTMLButtonElement>(toggleSelector),
+          "Unable to find the changed-files toggle.",
+        )
+      ).click();
+      const card = await waitForElement(
+        () =>
+          mounted.host.querySelector<HTMLElement>(
+            `[data-timeline-row-id="${targetMessage.id}"] [data-changed-files-state="expanded"]`,
+          ),
+        "Changed-files card did not expand.",
+      );
+      // A large card opened by hand starts with its folders collapsed.
+      await expandAllChangedFileDirectories(mounted.host, targetMessage.id);
+      await waitForLayout();
+      expect(card.getBoundingClientRect().height).toBeGreaterThan(700);
+
+      // Scroll into the middle of the list so the header sticks to the top.
+      scrollContainer.scrollTop +=
+        card.getBoundingClientRect().top - scrollContainer.getBoundingClientRect().top + 300;
+      await waitForLayout();
+      const header = mounted.host.querySelector<HTMLElement>(headerSelector)!;
+      const stuckTop = header.getBoundingClientRect().top;
+      expect(card.getBoundingClientRect().top).toBeLessThan(
+        scrollContainer.getBoundingClientRect().top,
+      );
+      expect(stuckTop - scrollContainer.getBoundingClientRect().top).toBeCloseTo(8, 0);
+
+      mounted.host.querySelector<HTMLButtonElement>(toggleSelector)!.click();
+      await waitForLayout();
+
+      expect(
+        mounted.host.querySelector(
+          `[data-timeline-row-id="${targetMessage.id}"] [data-changed-files-state="collapsed"]`,
+        ),
+      ).toBeTruthy();
+      expect(
+        Math.abs(
+          mounted.host.querySelector<HTMLElement>(headerSelector)!.getBoundingClientRect().top -
+            stuckTop,
+        ),
+      ).toBeLessThanOrEqual(1);
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("keeps the first message's heading mounted when scrolled to the bottom", async () => {
+    const props = createBaseTimelineProps({
+      messages: createFillerMessages({ prefix: "pinned", startOffsetSeconds: 0, pairCount: 60 }),
+    });
+    const mounted = await mountMessagesTimeline({ props, viewport: { width: 960, height: 400 } });
+
+    try {
+      const scrollContainer = mounted.host.querySelector<HTMLDivElement>(
+        '[data-testid="messages-timeline-scroll-container"]',
+      )!;
+      scrollContainer.scrollTop = scrollContainer.scrollHeight;
+      await vi.waitFor(
+        () => {
+          // A row around the middle has left the DOM, so the list really is virtualized.
+          expect(mounted.host.querySelector('[data-timeline-row-id="pinned-user-20"]')).toBeNull();
+          const firstHeading = mounted.host.querySelector("h3");
+          expect(
+            firstHeading?.closest("[data-timeline-row-id]")?.getAttribute("data-timeline-row-id"),
+          ).toBe("pinned-user-0");
+        },
+        { timeout: 8_000, interval: 16 },
+      );
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("jumps to virtualized and tail user messages from the minimap", async () => {
+    const onManualNavigation = vi.fn();
+    const pairCount = 30;
+    const props = {
+      ...createBaseTimelineProps({
+        messages: createFillerMessages({ prefix: "minimap", startOffsetSeconds: 0, pairCount }),
+      }),
+      onManualNavigation,
+    };
+    const mounted = await mountMessagesTimeline({ props, viewport: { width: 960, height: 400 } });
+
+    try {
+      const scrollContainer = mounted.host.querySelector<HTMLDivElement>(
+        '[data-testid="messages-timeline-scroll-container"]',
+      )!;
+      const rail = await waitForElement(
+        () =>
+          document.querySelector<HTMLButtonElement>(
+            '[data-testid="timeline-minimap"] button[aria-label^="Jump to message"]',
+          ),
+        "Minimap rail did not render.",
+      );
+      const clickTick = (index: number) => {
+        const rect = rail.getBoundingClientRect();
+        rail.dispatchEvent(
+          new MouseEvent("click", {
+            bubbles: true,
+            detail: 1,
+            clientX: rect.left + 4,
+            clientY: rect.top + (rect.height * index) / (pairCount - 1),
+          }),
+        );
+      };
+      const rowOffset = (rowId: string) => {
+        const row = mounted.host.querySelector<HTMLElement>(`[data-timeline-row-id="${rowId}"]`);
+        return row
+          ? row.getBoundingClientRect().top - scrollContainer.getBoundingClientRect().top
+          : null;
+      };
+
+      scrollContainer.scrollTop = scrollContainer.scrollHeight;
+      await waitForLayout();
+      clickTick(1);
+      await vi.waitFor(
+        () => {
+          const row = mounted.host.querySelector('[data-timeline-row-id="minimap-user-1"]');
+          expect(row?.closest("[data-index]"), "user-1 should be virtualized").toBeTruthy();
+          expect(Math.abs((rowOffset("minimap-user-1") ?? Number.NaN) - 16)).toBeLessThanOrEqual(1);
+        },
+        { timeout: 8_000, interval: 16 },
+      );
+
+      scrollContainer.scrollTop = 0;
+      await waitForLayout();
+      clickTick(26);
+      await vi.waitFor(
+        () => {
+          const row = mounted.host.querySelector('[data-timeline-row-id="minimap-user-26"]');
+          expect(row, "user-26 should be rendered").toBeTruthy();
+          expect(row?.closest("[data-index]"), "user-26 should be a tail row").toBeNull();
+          expect(Math.abs((rowOffset("minimap-user-26") ?? Number.NaN) - 16)).toBeLessThanOrEqual(
+            1,
+          );
+        },
+        { timeout: 8_000, interval: 16 },
+      );
+      expect(onManualNavigation).toHaveBeenCalledTimes(2);
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("releases follow-to-bottom for a rail wheel leaving the zone, not for a nudge inside it", async () => {
+    const onManualNavigation = vi.fn();
+    const props = {
+      ...createBaseTimelineProps({
+        messages: createFillerMessages({ prefix: "wheel", startOffsetSeconds: 0, pairCount: 30 }),
+      }),
+      onManualNavigation,
+    };
+    const mounted = await mountMessagesTimeline({ props, viewport: { width: 960, height: 400 } });
+
+    try {
+      const scrollContainer = mounted.host.querySelector<HTMLDivElement>(
+        '[data-testid="messages-timeline-scroll-container"]',
+      )!;
+      const rail = await waitForElement(
+        () =>
+          document.querySelector<HTMLButtonElement>(
+            '[data-testid="timeline-minimap"] button[aria-label^="Jump to message"]',
+          ),
+        "Minimap rail did not render.",
+      );
+      scrollContainer.scrollTop = scrollContainer.scrollHeight;
+      await waitForLayout();
+      const wheel = (deltaY: number, wheelDeltaY: number) =>
+        rail.dispatchEvent(
+          new WheelEvent("wheel", { bubbles: true, deltaY, wheelDeltaY } as WheelEventInit),
+        );
+
+      wheel(-10, 120);
+      expect(onManualNavigation).not.toHaveBeenCalled();
+
+      wheel(-200, 240);
+      expect(onManualNavigation).toHaveBeenCalledOnce();
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("does not stop following for a next-turn click that could not move", async () => {
+    const onManualNavigation = vi.fn();
+    const props = {
+      ...createBaseTimelineProps({
+        messages: createFillerMessages({ prefix: "end", startOffsetSeconds: 0, pairCount: 30 }),
+      }),
+      onManualNavigation,
+    };
+    const mounted = await mountMessagesTimeline({ props, viewport: { width: 960, height: 400 } });
+
+    try {
+      const scrollContainer = mounted.host.querySelector<HTMLDivElement>(
+        '[data-testid="messages-timeline-scroll-container"]',
+      )!;
+      const next = await waitForElement(
+        () => document.querySelector<HTMLButtonElement>('[data-minimap-turn-button="next"]'),
+        "Next turn button did not render.",
+      );
+      scrollContainer.scrollTop = scrollContainer.scrollHeight;
+      await vi.waitFor(() => expect(next.getAttribute("aria-disabled")).toBe("true"), {
+        timeout: 8_000,
+        interval: 16,
+      });
+      next.click();
+      expect(onManualNavigation).not.toHaveBeenCalled();
     } finally {
       await mounted.cleanup();
     }

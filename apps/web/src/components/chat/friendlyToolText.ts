@@ -1,4 +1,75 @@
+import { sliceSurrogateSafe } from "@piedpiper/shared/String";
+
 import { type WorkLogEntry } from "../../session-logic";
+
+/** What a tool does, for counting it in a one-line group summary. */
+export type ToolAction = "read" | "edit" | "command" | "code-search" | "web-search" | "other";
+
+function isReadToolName(tool: string): boolean {
+  return tool === "read" || tool.includes("read_file") || tool === "view";
+}
+
+function isWriteToolName(tool: string): boolean {
+  return tool === "write" || tool === "create_file" || tool === "createfile";
+}
+
+function isEditToolName(tool: string): boolean {
+  return (
+    tool === "edit" ||
+    tool === "multiedit" ||
+    tool === "str_replace" ||
+    tool === "str_replace_editor" ||
+    tool.includes("replace") ||
+    tool.includes("patch")
+  );
+}
+
+function isCommandToolName(tool: string): boolean {
+  return (
+    tool === "bash" || tool === "shell" || tool.includes("command") || tool.includes("terminal")
+  );
+}
+
+function isGrepToolName(tool: string): boolean {
+  return tool === "grep" || tool.includes("search_files");
+}
+
+function isWebSearchToolName(tool: string): boolean {
+  return tool === "websearch" || tool === "web_search";
+}
+
+function isNotebookEditToolName(tool: string): boolean {
+  return tool === "notebookedit" || tool === "notebook_edit";
+}
+
+/** TodoWrite maintains the plan and edits no file; older stored activities record it as a file change. */
+export function isTodoToolName(toolName: string): boolean {
+  return toolName.toLowerCase().includes("todo");
+}
+
+/** Classifies a raw provider tool name by the same rules as the friendly labels. */
+export function classifyToolName(toolName: string): ToolAction {
+  const tool = toolName.toLowerCase();
+  // MCP tools come first so names like mcp__shell__run_command are not matched as built-ins.
+  if (tool.startsWith("mcp__") || isTodoToolName(tool)) return "other";
+  if (isReadToolName(tool)) return "read";
+  if (isWriteToolName(tool) || isEditToolName(tool) || isNotebookEditToolName(tool)) return "edit";
+  if (isCommandToolName(tool)) return "command";
+  if (tool === "glob" || isGrepToolName(tool)) return "code-search";
+  if (isWebSearchToolName(tool)) return "web-search";
+  return "other";
+}
+
+/** The file a tool call names in its brief input, if any. */
+export function toolBriefFilePath(
+  briefInput: Readonly<Record<string, string | number | boolean>> | undefined,
+): string | undefined {
+  for (const key of ["file_path", "path", "notebook_path"]) {
+    const value = briefInput?.[key];
+    if (typeof value === "string") return value;
+  }
+  return undefined;
+}
 
 /**
  * Build a human-friendly action label for a work-log entry. Uses
@@ -18,36 +89,34 @@ export function buildFriendlyToolText(input: {
   const briefInput = workEntry.toolBriefInput ?? {};
   const stringField = (key: string): string | undefined =>
     typeof briefInput[key] === "string" ? (briefInput[key] as string) : undefined;
-  const filePath =
-    stringField("file_path") ?? stringField("path") ?? stringField("notebook_path") ?? undefined;
+  const filePath = toolBriefFilePath(briefInput);
   const displayPath = filePath ? makeDisplayPath(filePath, workspaceRoot) : undefined;
 
-  if (tool === "read" || tool.includes("read_file") || tool === "view") {
+  // MCP tools come first so names like mcp__shell__run_command are not matched as built-ins.
+  if (tool.startsWith("mcp__")) {
+    const parts = toolNameRaw.split("__");
+    const rawServer = parts[1] ?? "";
+    // Matches the server's parseClaudeMcpToolName: a bare "claude_ai_" keeps its name.
+    const server = rawServer.replace(/^claude_ai_/, "") || rawServer;
+    const method = parts.slice(2).join("__");
+    const label = method ? `${server}: ${method}` : server;
+    return isInProgress ? `Running ${label}` : `Ran ${label}`;
+  }
+
+  if (isReadToolName(tool)) {
     return verbWithPath(isInProgress ? "Reading" : "Read", displayPath, "file");
   }
-  if (tool === "write" || tool === "create_file" || tool === "createfile") {
+  if (isWriteToolName(tool)) {
     return verbWithPath(isInProgress ? "Creating" : "Created", displayPath, "file");
   }
-  if (
-    tool === "edit" ||
-    tool === "multiedit" ||
-    tool === "str_replace" ||
-    tool === "str_replace_editor" ||
-    tool.includes("replace") ||
-    tool.includes("patch")
-  ) {
+  if (isEditToolName(tool)) {
     return verbWithPath(isInProgress ? "Editing" : "Edited", displayPath, "file");
   }
-  if (
-    tool === "bash" ||
-    tool === "shell" ||
-    tool.includes("command") ||
-    tool.includes("terminal")
-  ) {
+  if (isCommandToolName(tool)) {
     const command = stringField("command");
     if (command) {
       const oneLine = command.split("\n")[0]?.trim() ?? command;
-      const trimmed = oneLine.length > 80 ? `${oneLine.slice(0, 80)}…` : oneLine;
+      const trimmed = oneLine.length > 80 ? `${sliceSurrogateSafe(oneLine, 80)}…` : oneLine;
       return `${isInProgress ? "Running" : "Ran"} \`${trimmed}\``;
     }
     return isInProgress ? "Running command" : "Ran command";
@@ -60,7 +129,7 @@ export function buildFriendlyToolText(input: {
         ? "Searching files"
         : "Searched files";
   }
-  if (tool === "grep" || tool.includes("search_files")) {
+  if (isGrepToolName(tool)) {
     const pattern = stringField("pattern") ?? stringField("query");
     return pattern
       ? `${isInProgress ? "Searching for" : "Searched for"} "${pattern}"`
@@ -68,7 +137,7 @@ export function buildFriendlyToolText(input: {
         ? "Searching content"
         : "Searched content";
   }
-  if (tool === "websearch" || tool === "web_search") {
+  if (isWebSearchToolName(tool)) {
     const query = stringField("query");
     return query
       ? `${isInProgress ? "Searching the web for" : "Searched the web for"} "${query}"`
@@ -91,7 +160,7 @@ export function buildFriendlyToolText(input: {
     const description = stringField("description") ?? stringField("prompt");
     if (description) {
       const oneLine = description.split("\n")[0]?.trim() ?? description;
-      const trimmed = oneLine.length > 80 ? `${oneLine.slice(0, 80)}…` : oneLine;
+      const trimmed = oneLine.length > 80 ? `${sliceSurrogateSafe(oneLine, 80)}…` : oneLine;
       return `${isInProgress ? "Running subagent:" : "Subagent:"} ${trimmed}`;
     }
     return isInProgress ? "Running subagent" : "Subagent finished";
@@ -104,7 +173,7 @@ export function buildFriendlyToolText(input: {
         ? "Looking up tools"
         : "Looked up tools";
   }
-  if (tool === "notebookedit" || tool === "notebook_edit") {
+  if (isNotebookEditToolName(tool)) {
     return verbWithPath(isInProgress ? "Editing notebook" : "Edited notebook", displayPath, "cell");
   }
   if (tool === "skill") {
@@ -142,13 +211,6 @@ export function buildFriendlyToolText(input: {
         : isInProgress
           ? "Deleting schedule"
           : "Deleted schedule";
-  }
-  if (tool.startsWith("mcp__")) {
-    const parts = toolNameRaw.split("__");
-    const server = parts[1] ?? "";
-    const method = parts[2] ?? "";
-    const label = method ? `${server}: ${method}` : server;
-    return isInProgress ? `Running ${label}` : `Ran ${label}`;
   }
   // Generic fallback — capitalize the tool name as a verb-ish label.
   const capitalized = `${toolNameRaw.charAt(0).toUpperCase()}${toolNameRaw.slice(1)}`;

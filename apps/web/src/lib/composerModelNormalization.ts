@@ -17,6 +17,13 @@ export const LegacyCodexFields = Schema.Struct({
 });
 export type LegacyCodexFields = typeof LegacyCodexFields.Type;
 
+function isCodexReasoningEffort(value: unknown): value is CodexReasoningEffort {
+  return (
+    typeof value === "string" &&
+    (CODEX_REASONING_EFFORT_OPTIONS as readonly string[]).includes(value)
+  );
+}
+
 export function normalizeProviderKind(value: unknown): ProviderKind | null {
   return value === "codex" || value === "claudeAgent" ? value : null;
 }
@@ -36,19 +43,13 @@ export function normalizeProviderModelOptions(
       ? (candidate.claudeAgent as Record<string, unknown>)
       : null;
 
-  const codexReasoningEffort: CodexReasoningEffort | undefined =
-    codexCandidate?.reasoningEffort === "low" ||
-    codexCandidate?.reasoningEffort === "medium" ||
-    codexCandidate?.reasoningEffort === "high" ||
-    codexCandidate?.reasoningEffort === "xhigh"
-      ? codexCandidate.reasoningEffort
-      : provider === "codex" &&
-          (legacy?.effort === "low" ||
-            legacy?.effort === "medium" ||
-            legacy?.effort === "high" ||
-            legacy?.effort === "xhigh")
-        ? legacy.effort
-        : undefined;
+  const codexReasoningEffort: CodexReasoningEffort | undefined = isCodexReasoningEffort(
+    codexCandidate?.reasoningEffort,
+  )
+    ? codexCandidate.reasoningEffort
+    : provider === "codex" && isCodexReasoningEffort(legacy?.effort)
+      ? legacy.effort
+      : undefined;
   const codexFastMode =
     codexCandidate?.fastMode === true
       ? true
@@ -58,11 +59,21 @@ export function normalizeProviderModelOptions(
             (typeof legacy?.serviceTier === "string" && legacy.serviceTier === "fast")
           ? true
           : undefined;
+  // null is an explicit Standard, so it must survive where a missing tier would not.
+  const codexServiceTier =
+    codexCandidate?.serviceTier === null
+      ? null
+      : typeof codexCandidate?.serviceTier === "string" && codexCandidate.serviceTier.trim()
+        ? codexCandidate.serviceTier.trim()
+        : undefined;
   const codex =
-    codexReasoningEffort !== undefined || codexFastMode !== undefined
+    codexReasoningEffort !== undefined ||
+    codexFastMode !== undefined ||
+    codexServiceTier !== undefined
       ? {
           ...(codexReasoningEffort !== undefined ? { reasoningEffort: codexReasoningEffort } : {}),
           ...(codexFastMode !== undefined ? { fastMode: codexFastMode } : {}),
+          ...(codexServiceTier !== undefined ? { serviceTier: codexServiceTier } : {}),
         }
       : undefined;
 
@@ -90,16 +101,24 @@ export function normalizeProviderModelOptions(
     typeof claudeCandidate?.contextWindow === "string" && claudeCandidate.contextWindow.length > 0
       ? claudeCandidate.contextWindow
       : undefined;
+  const claudeUltracode =
+    claudeCandidate?.ultracode === true
+      ? true
+      : claudeCandidate?.ultracode === false
+        ? false
+        : undefined;
   const claude =
     claudeThinking !== undefined ||
     claudeEffort !== undefined ||
     claudeFastMode !== undefined ||
-    claudeContextWindow !== undefined
+    claudeContextWindow !== undefined ||
+    claudeUltracode !== undefined
       ? {
           ...(claudeThinking !== undefined ? { thinking: claudeThinking } : {}),
           ...(claudeEffort !== undefined ? { effort: claudeEffort } : {}),
           ...(claudeFastMode !== undefined ? { fastMode: claudeFastMode } : {}),
           ...(claudeContextWindow !== undefined ? { contextWindow: claudeContextWindow } : {}),
+          ...(claudeUltracode !== undefined ? { ultracode: claudeUltracode } : {}),
         }
       : undefined;
 

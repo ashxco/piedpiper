@@ -24,10 +24,16 @@ interface BrowserWsRpcHarnessOptions {
 
 const STREAM_METHODS = new Set<string>([
   WS_METHODS.gitRunStackedAction,
+  WS_METHODS.gitCreateWorktreeWithProgress,
   WS_METHODS.subscribeOrchestrationDomainEvents,
   WS_METHODS.subscribeTerminalEvents,
+  WS_METHODS.subscribeTerminalMetadata,
   WS_METHODS.subscribeServerConfig,
   WS_METHODS.subscribeServerLifecycle,
+  // Every stream RPC must be listed: answering one as a unary makes the server emit a
+  // Defect, and the Effect RpcClient then tears down every in-flight request, which
+  // silently kills the other subscriptions a test later pushes values into.
+  WS_METHODS.subscribeToolInputPreview,
 ]);
 
 const ALL_RPC_METHODS = Array.from(WsRpcGroup.requests.keys());
@@ -162,8 +168,17 @@ export class BrowserWsRpcHarness {
     if (!pubsub) {
       throw new Error(`No stream registered for ${method}`);
     }
-    return Stream.fromIterable(this.getInitialStreamValues(request) ?? []).pipe(
-      Stream.concat(Stream.fromPubSub(pubsub)),
+    // Subscribe before replaying the initial values: `Stream.fromPubSub` would only
+    // subscribe once the initial values drain, so a value emitted by a test in that
+    // window would be published to a PubSub with no subscribers and silently dropped.
+    return Stream.unwrap(
+      PubSub.subscribe(pubsub).pipe(
+        Effect.map((subscription) =>
+          Stream.fromIterable(this.getInitialStreamValues(request) ?? []).pipe(
+            Stream.concat(Stream.fromSubscription(subscription)),
+          ),
+        ),
+      ),
     );
   }
 }

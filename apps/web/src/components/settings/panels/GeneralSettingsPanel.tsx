@@ -2,21 +2,30 @@ import {
   ChevronDownIcon,
   InfoIcon,
   LoaderIcon,
+  PencilIcon,
   PlusIcon,
   RefreshCwIcon,
   XIcon,
 } from "lucide-react";
-import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
+import { useNavigate } from "@tanstack/react-router";
+import { type ReactNode, useCallback, useRef, useState } from "react";
 import {
   PROVIDER_DISPLAY_NAMES,
   type ProviderKind,
   type ServerProvider,
   type ServerProviderModel,
 } from "@piedpiper/contracts";
-import { DEFAULT_UNIFIED_SETTINGS } from "@piedpiper/contracts/settings";
+import {
+  CLAUDE_AUTO_COMPACT_WINDOW_PATTERN,
+  DEFAULT_UNIFIED_SETTINGS,
+  type QuitConfirmationMode,
+} from "@piedpiper/contracts/settings";
+import { type RuntimeMode } from "@piedpiper/contracts";
 import { normalizeModelSlug } from "@piedpiper/shared/model";
+import { readCustomModelEntries } from "@piedpiper/shared/serverSettings";
 import { Equal } from "effect";
 import { ProviderModelPicker } from "../../chat/ProviderModelPicker";
+import { ProviderUsageLimitRows } from "../../chat/ProviderUsageLimits";
 import { TraitsPicker } from "../../chat/TraitsPicker";
 import { resolveAndPersistPreferredEditor } from "../../../editorPreferences";
 import { isElectron } from "../../../env";
@@ -28,8 +37,10 @@ import {
   resolveAppModelSelectionState,
 } from "../../../modelSelection";
 import { ensureNativeApi } from "../../../nativeApi";
-import { formatRelativeTime } from "../../../timestampFormat";
-import { cn } from "../../../lib/utils";
+import { getSmoothScrollBehavior } from "../../../chat-scroll";
+import { isImeComposingKeyboardEvent } from "../../../lib/imeComposition";
+import { useRelativeTimeState } from "../../../hooks/useRelativeTimeState";
+import { cn, isWindowsPlatform } from "../../../lib/utils";
 import { Button } from "../../ui/button";
 import { Collapsible, CollapsibleContent } from "../../ui/collapsible";
 import { Input } from "../../ui/input";
@@ -43,11 +54,26 @@ import {
   useServerProviders,
 } from "../../../rpc/serverState";
 import { AboutVersionSection, AboutVersionTitle } from "./AboutVersionSection";
+import { AppearanceSettingsSection } from "./AppearanceSettingsSection";
+import { ChatSettingsSection } from "./ChatSettingsSection";
+import { CustomModelDetailsDialog } from "./CustomModelDetailsDialog";
+import { removeCustomModelEntry, saveCustomModelEntry } from "./customModelDetailsLogic";
+import { DiffSettingsSection } from "./DiffSettingsSection";
+import { GitSettingsSection } from "./GitSettingsSection";
+import { describeModelCapabilities, shouldFlagMissingReasoning } from "./modelCapabilityLabels";
+import { ProviderChecksSettingsRows } from "./ProviderChecksSettingsRows";
+import { ProviderVersionUpdateNotice } from "./ProviderVersionUpdateNotice";
+import { getProviderVersionUpdate, getUpdatesWithoutCard } from "./providerVersionUpdate.logic";
+import { validateAbsoluteOrHomePath } from "./settingValueHelpers";
 import {
+  SettingDefaultResetButton,
   SettingResetButton,
+  SettingsDraftInput,
   SettingsPageContainer,
   SettingsRow,
   SettingsSection,
+  SettingsSelect,
+  type SettingsSelectOption,
 } from "./SettingsPrimitives";
 
 const THEME_OPTIONS = [
@@ -70,6 +96,24 @@ const TIMESTAMP_FORMAT_LABELS = {
   "12-hour": "12-hour",
   "24-hour": "24-hour",
 } as const;
+
+const RUNTIME_MODE_OPTIONS: ReadonlyArray<SettingsSelectOption<RuntimeMode>> = [
+  { value: "full-access", label: "Full access" },
+  { value: "auto", label: "Auto" },
+  { value: "approval-required", label: "Supervised" },
+];
+
+const QUIT_CONFIRMATION_MODE_OPTIONS: ReadonlyArray<SettingsSelectOption<QuitConfirmationMode>> = [
+  { value: "direct", label: "Quit immediately" },
+  { value: "hold", label: "Hold to quit" },
+  { value: "double-click", label: "Press twice" },
+];
+
+export function validateClaudeAutoCompactWindow(value: string): string | null {
+  return CLAUDE_AUTO_COMPACT_WINDOW_PATTERN.test(value)
+    ? null
+    : "Enter a whole number from 100000 to 1000000, or leave empty.";
+}
 
 type InstallProviderSettings = {
   provider: ProviderKind;
@@ -160,22 +204,9 @@ function getProviderVersionLabel(version: string | null | undefined) {
   return version.startsWith("v") ? version : `v${version}`;
 }
 
-function useRelativeTimeTick(intervalMs = 1_000) {
-  const [tick, setTick] = useState(() => Date.now());
-  useEffect(() => {
-    const id = setInterval(() => setTick(Date.now()), intervalMs);
-    return () => clearInterval(id);
-  }, [intervalMs]);
-  return tick;
-}
-
 function ProviderLastChecked({ lastCheckedAt }: { lastCheckedAt: string | null }) {
-  useRelativeTimeTick();
-  const lastCheckedRelative = lastCheckedAt ? formatRelativeTime(lastCheckedAt) : null;
-
-  if (!lastCheckedRelative) {
-    return null;
-  }
+  const lastCheckedRelative = useRelativeTimeState(lastCheckedAt);
+  if (lastCheckedRelative.status !== "relative") return null;
 
   return (
     <span className="text-[11px] text-muted-foreground/60">
@@ -192,6 +223,7 @@ function ProviderLastChecked({ lastCheckedAt }: { lastCheckedAt: string | null }
 }
 
 export function GeneralSettingsPanel() {
+  const navigate = useNavigate();
   const { theme, setTheme } = useTheme();
   const settings = useSettings();
   const { updateSettings } = useUpdateSettings();
@@ -211,7 +243,13 @@ export function GeneralSettingsPanel() {
     claudeAgent: Boolean(
       settings.providers.claudeAgent.binaryPath !==
         DEFAULT_UNIFIED_SETTINGS.providers.claudeAgent.binaryPath ||
-      settings.providers.claudeAgent.customModels.length > 0,
+      settings.providers.claudeAgent.homePath !==
+        DEFAULT_UNIFIED_SETTINGS.providers.claudeAgent.homePath ||
+      settings.providers.claudeAgent.customModels.length > 0 ||
+      settings.providers.claudeAgent.launchArgs !==
+        DEFAULT_UNIFIED_SETTINGS.providers.claudeAgent.launchArgs ||
+      settings.providers.claudeAgent.autoCompactWindow !==
+        DEFAULT_UNIFIED_SETTINGS.providers.claudeAgent.autoCompactWindow,
     ),
   });
   const [customModelInputByProvider, setCustomModelInputByProvider] = useState<
@@ -223,6 +261,10 @@ export function GeneralSettingsPanel() {
   const [customModelErrorByProvider, setCustomModelErrorByProvider] = useState<
     Partial<Record<ProviderKind, string | null>>
   >({});
+  const [editingCustomModel, setEditingCustomModel] = useState<{
+    readonly provider: ProviderKind;
+    readonly slug: string;
+  } | null>(null);
   const [isRefreshingProviders, setIsRefreshingProviders] = useState(false);
   const refreshingRef = useRef(false);
   const modelListRefs = useRef<Partial<Record<ProviderKind, HTMLDivElement | null>>>({});
@@ -245,6 +287,7 @@ export function GeneralSettingsPanel() {
   const availableEditors = useServerAvailableEditors();
   const observability = useServerObservability();
   const serverProviders = useServerProviders();
+  const liveCodexProvider = serverProviders.find((provider) => provider.provider === "codex");
   const logsDirectoryPath = observability?.logsDirectoryPath ?? null;
   const diagnosticsDescription = (() => {
     const exports: string[] = [];
@@ -254,8 +297,15 @@ export function GeneralSettingsPanel() {
     if (observability?.otlpMetricsEnabled && observability.otlpMetricsUrl) {
       exports.push(`metrics to ${observability.otlpMetricsUrl}`);
     }
+    if (observability?.otlpLogsEnabled && observability.otlpLogsUrl) {
+      exports.push(`logs to ${observability.otlpLogsUrl}`);
+    }
     const mode = observability?.localTracingEnabled ? "Local trace file" : "Terminal logs only";
-    return exports.length > 0 ? `${mode}. OTLP exporting ${exports.join(" and ")}.` : `${mode}.`;
+    const exportList =
+      exports.length > 2
+        ? `${exports.slice(0, -1).join(", ")} and ${exports.at(-1)}`
+        : exports.join(" and ");
+    return exports.length > 0 ? `${mode}. OTLP exporting ${exportList}.` : `${mode}.`;
   })();
 
   const textGenerationModelSelection = resolveAppModelSelectionState(settings, serverProviders);
@@ -375,7 +425,8 @@ export function GeneralSettingsPanel() {
 
       const el = modelListRefs.current[provider];
       if (!el) return;
-      const scrollToEnd = () => el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+      const scrollToEnd = () =>
+        el.scrollTo({ top: el.scrollHeight, behavior: getSmoothScrollBehavior() });
       requestAnimationFrame(scrollToEnd);
       const observer = new MutationObserver(() => {
         scrollToEnd();
@@ -394,9 +445,7 @@ export function GeneralSettingsPanel() {
           ...settings.providers,
           [provider]: {
             ...settings.providers[provider],
-            customModels: settings.providers[provider].customModels.filter(
-              (model) => model !== slug,
-            ),
+            ...removeCustomModelEntry(settings.providers[provider], slug),
           },
         },
       });
@@ -428,6 +477,7 @@ export function GeneralSettingsPanel() {
     return {
       provider: providerSettings.provider,
       title: providerSettings.title,
+      flagMissingReasoning: shouldFlagMissingReasoning(models),
       binaryPlaceholder: providerSettings.binaryPlaceholder,
       binaryDescription: providerSettings.binaryDescription,
       binaryPathValue: providerConfig.binaryPath,
@@ -438,8 +488,14 @@ export function GeneralSettingsPanel() {
       statusStyle: PROVIDER_STATUS_STYLES[statusKey],
       summary,
       versionLabel: getProviderVersionLabel(liveProvider?.version),
+      versionUpdate: getProviderVersionUpdate(liveProvider),
     };
   });
+
+  const updatesWithoutCard = getUpdatesWithoutCard(
+    serverProviders,
+    PROVIDER_SETTINGS.map((providerSettings) => providerSettings.provider),
+  );
 
   const lastCheckedAt =
     serverProviders.length > 0
@@ -450,8 +506,9 @@ export function GeneralSettingsPanel() {
       : null;
   return (
     <SettingsPageContainer>
-      <SettingsSection title="General">
+      <SettingsSection id="setting-section-general" title="General">
         <SettingsRow
+          id="setting-theme"
           title="Theme"
           description="Choose how Pied Piper looks across the app."
           resetAction={
@@ -485,6 +542,7 @@ export function GeneralSettingsPanel() {
         />
 
         <SettingsRow
+          id="setting-time-format"
           title="Time format"
           description="System default follows your browser or OS clock preference."
           resetAction={
@@ -527,32 +585,9 @@ export function GeneralSettingsPanel() {
         />
 
         <SettingsRow
-          title="Diff line wrapping"
-          description="Set the default wrap state when the diff panel opens."
-          resetAction={
-            settings.diffWordWrap !== DEFAULT_UNIFIED_SETTINGS.diffWordWrap ? (
-              <SettingResetButton
-                label="diff line wrapping"
-                onClick={() =>
-                  updateSettings({
-                    diffWordWrap: DEFAULT_UNIFIED_SETTINGS.diffWordWrap,
-                  })
-                }
-              />
-            ) : null
-          }
-          control={
-            <Switch
-              checked={settings.diffWordWrap}
-              onCheckedChange={(checked) => updateSettings({ diffWordWrap: Boolean(checked) })}
-              aria-label="Wrap diff lines by default"
-            />
-          }
-        />
-
-        <SettingsRow
+          id="setting-assistant-output"
           title="Assistant output"
-          description="Show token-by-token output while a response is in progress."
+          description="Show token-by-token output while a response is in progress. When off, finished paragraphs appear as they complete."
           resetAction={
             settings.enableAssistantStreaming !==
             DEFAULT_UNIFIED_SETTINGS.enableAssistantStreaming ? (
@@ -578,6 +613,7 @@ export function GeneralSettingsPanel() {
         />
 
         <SettingsRow
+          id="setting-new-threads"
           title="New threads"
           description="Pick the default workspace mode for newly created draft threads."
           resetAction={
@@ -619,8 +655,29 @@ export function GeneralSettingsPanel() {
         />
 
         <SettingsRow
+          id="setting-new-thread-permissions"
+          title="New thread permissions"
+          description="Pick the permission mode new threads start in."
+          resetAction={
+            <SettingDefaultResetButton
+              setting="defaultRuntimeMode"
+              label="new thread permissions"
+            />
+          }
+          control={
+            <SettingsSelect
+              value={settings.defaultRuntimeMode}
+              options={RUNTIME_MODE_OPTIONS}
+              onValueChange={(defaultRuntimeMode) => updateSettings({ defaultRuntimeMode })}
+              ariaLabel="Default permission mode"
+            />
+          }
+        />
+
+        <SettingsRow
+          id="setting-archive-confirmation"
           title="Archive confirmation"
-          description="Require a second click on the inline archive action before a thread is archived."
+          description="Ask before archiving a thread."
           resetAction={
             settings.confirmThreadArchive !== DEFAULT_UNIFIED_SETTINGS.confirmThreadArchive ? (
               <SettingResetButton
@@ -645,6 +702,7 @@ export function GeneralSettingsPanel() {
         />
 
         <SettingsRow
+          id="setting-delete-confirmation"
           title="Delete confirmation"
           description="Ask before deleting a thread and its chat history."
           resetAction={
@@ -670,7 +728,67 @@ export function GeneralSettingsPanel() {
           }
         />
 
+        {/* The quit-shortcut guard does nothing on Windows. */}
+        {isElectron && !isWindowsPlatform(navigator.platform) ? (
+          <SettingsRow
+            title="Quit shortcut"
+            description="Guard the quit shortcut against stray presses. Hold mode also quits on two quick presses."
+            resetAction={<SettingDefaultResetButton setting="confirmQuit" label="quit shortcut" />}
+            control={
+              <SettingsSelect
+                value={settings.confirmQuit}
+                options={QUIT_CONFIRMATION_MODE_OPTIONS}
+                onValueChange={(confirmQuit) => updateSettings({ confirmQuit })}
+                ariaLabel="Quit shortcut behavior"
+              />
+            }
+          />
+        ) : null}
+
         <SettingsRow
+          id="setting-continue-after-restart"
+          title="Continue after restart"
+          description="Resume threads that were running when the app closed or updated. A normal quit counts too."
+          resetAction={
+            <SettingDefaultResetButton
+              setting="continueThreadsAfterRestart"
+              label="continue after restart"
+            />
+          }
+          control={
+            <Switch
+              checked={settings.continueThreadsAfterRestart}
+              onCheckedChange={(checked) =>
+                updateSettings({ continueThreadsAfterRestart: Boolean(checked) })
+              }
+              aria-label="Continue running threads after a restart"
+            />
+          }
+        />
+
+        <SettingsRow
+          id="setting-resume-after-usage-limit"
+          title="Resume after usage limit"
+          description="Resume a thread automatically when its usage limit resets. You can cancel it in the thread."
+          resetAction={
+            <SettingDefaultResetButton
+              setting="autoResumeLimitedThreads"
+              label="resume after usage limit"
+            />
+          }
+          control={
+            <Switch
+              checked={settings.autoResumeLimitedThreads}
+              onCheckedChange={(checked) =>
+                updateSettings({ autoResumeLimitedThreads: Boolean(checked) })
+              }
+              aria-label="Resume threads after usage limits reset"
+            />
+          }
+        />
+
+        <SettingsRow
+          id="setting-text-generation-model"
           title="Text generation model"
           description="Configure the model used for generated commit messages, PR titles, and similar Git text."
           resetAction={
@@ -719,6 +837,7 @@ export function GeneralSettingsPanel() {
                 onPromptChange={() => {}}
                 modelOptions={textGenModelOptions}
                 allowPromptInjectedEffort={false}
+                allowUltracode={false}
                 triggerVariant="outline"
                 triggerClassName="min-w-0 max-w-none shrink-0 text-foreground/90 hover:text-foreground"
                 onModelOptionsChange={(nextOptions) => {
@@ -740,9 +859,39 @@ export function GeneralSettingsPanel() {
             </div>
           }
         />
+
+        <SettingsRow
+          id="setting-thread-title-instructions"
+          title="Thread title instructions"
+          description="Extra rules for generated thread titles. Leave empty for the default style."
+          resetAction={
+            <SettingDefaultResetButton
+              setting="threadTitleInstructions"
+              label="thread title instructions"
+            />
+          }
+        >
+          <SettingsDraftInput
+            multiline
+            className="mt-3"
+            value={settings.threadTitleInstructions}
+            onCommit={(threadTitleInstructions) => updateSettings({ threadTitleInstructions })}
+            ariaLabel="Thread title instructions"
+            placeholder="For example: Use sentence case. Mention the ticket number when there is one."
+          />
+        </SettingsRow>
       </SettingsSection>
 
+      <ChatSettingsSection />
+
+      <AppearanceSettingsSection />
+
+      <DiffSettingsSection />
+
+      <GitSettingsSection />
+
       <SettingsSection
+        id="setting-section-providers"
         title="Providers"
         headerAction={
           <div className="flex items-center gap-1.5">
@@ -817,6 +966,12 @@ export function GeneralSettingsPanel() {
                       {providerCard.summary.headline}
                       {providerCard.summary.detail ? ` - ${providerCard.summary.detail}` : null}
                     </p>
+                    {providerCard.versionUpdate ? (
+                      <ProviderVersionUpdateNotice
+                        providerName={providerDisplayName}
+                        update={providerCard.versionUpdate}
+                      />
+                    ) : null}
                   </div>
                   <div className="flex w-full shrink-0 items-center gap-2 sm:w-auto sm:justify-end">
                     <Button
@@ -878,36 +1033,131 @@ export function GeneralSettingsPanel() {
                 <CollapsibleContent>
                   <div className="space-y-0">
                     <div className="border-t border-border/60 px-4 py-3 sm:px-5">
-                      <label
-                        htmlFor={`provider-install-${providerCard.provider}-binary-path`}
-                        className="block"
-                      >
-                        <span className="text-xs font-medium text-foreground">
-                          {providerDisplayName} binary path
-                        </span>
-                        <Input
-                          id={`provider-install-${providerCard.provider}-binary-path`}
-                          className="mt-1.5"
-                          value={providerCard.binaryPathValue}
-                          onChange={(event) =>
-                            updateSettings({
-                              providers: {
-                                ...settings.providers,
-                                [providerCard.provider]: {
-                                  ...settings.providers[providerCard.provider],
-                                  binaryPath: event.target.value,
-                                },
+                      <span className="text-xs font-medium text-foreground">
+                        {providerDisplayName} binary path
+                      </span>
+                      <SettingsDraftInput
+                        className="mt-1.5"
+                        value={providerCard.binaryPathValue}
+                        normalize={(binaryPath) =>
+                          binaryPath ||
+                          DEFAULT_UNIFIED_SETTINGS.providers[providerCard.provider].binaryPath
+                        }
+                        onCommit={(binaryPath) =>
+                          updateSettings({
+                            providers: {
+                              ...settings.providers,
+                              [providerCard.provider]: {
+                                ...settings.providers[providerCard.provider],
+                                binaryPath,
                               },
-                            })
-                          }
-                          placeholder={providerCard.binaryPlaceholder}
-                          spellCheck={false}
-                        />
-                        <span className="mt-1 block text-xs text-muted-foreground">
-                          {providerCard.binaryDescription}
-                        </span>
-                      </label>
+                            },
+                          })
+                        }
+                        ariaLabel={`${providerDisplayName} binary path`}
+                        placeholder={providerCard.binaryPlaceholder}
+                      />
+                      <span className="mt-1 block text-xs text-muted-foreground">
+                        {providerCard.binaryDescription}
+                      </span>
                     </div>
+
+                    {providerCard.provider === "claudeAgent" ? (
+                      <>
+                        <div className="border-t border-border/60 px-4 py-3 sm:px-5">
+                          <span className="text-xs font-medium text-foreground">
+                            Config directory
+                          </span>
+                          <SettingsDraftInput
+                            className="mt-1.5"
+                            value={settings.providers.claudeAgent.homePath}
+                            validate={validateAbsoluteOrHomePath}
+                            onCommit={(homePath) =>
+                              updateSettings({
+                                providers: {
+                                  ...settings.providers,
+                                  claudeAgent: { ...settings.providers.claudeAgent, homePath },
+                                },
+                              })
+                            }
+                            ariaLabel="Claude config directory"
+                            placeholder="~/.claude"
+                          />
+                          <span className="mt-1 block text-xs text-muted-foreground">
+                            Use a separate Claude account, which needs its own login: run{" "}
+                            <code>claude auth login</code> with <code>CLAUDE_CONFIG_DIR</code> set
+                            to this directory. Leave empty for Claude's default. Threads with a
+                            running session keep the old directory until that session restarts, then
+                            start fresh because their transcripts stay in the old directory.
+                          </span>
+                        </div>
+
+                        <div className="border-t border-border/60 px-4 py-3 sm:px-5">
+                          <span className="text-xs font-medium text-foreground">
+                            Launch arguments
+                          </span>
+                          <SettingsDraftInput
+                            className="mt-1.5"
+                            value={settings.providers.claudeAgent.launchArgs}
+                            onCommit={(launchArgs) =>
+                              updateSettings({
+                                providers: {
+                                  ...settings.providers,
+                                  claudeAgent: { ...settings.providers.claudeAgent, launchArgs },
+                                },
+                              })
+                            }
+                            ariaLabel="Claude launch arguments"
+                            placeholder="--add-dir ../shared"
+                          />
+                          <span className="mt-1 block text-xs text-muted-foreground">
+                            Extra --flags passed to every Claude session. Quote values with spaces.
+                            --add-dir can repeat, and --settings takes inline JSON or a file path,
+                            merged beneath what Pied Piper sets. Flags Pied Piper sets itself (like
+                            --model or --resume) and anything after -- are ignored. Applies to new
+                            sessions.
+                          </span>
+                        </div>
+
+                        <div className="border-t border-border/60 px-4 py-3 sm:px-5">
+                          <span className="text-xs font-medium text-foreground">
+                            Auto-compact window
+                          </span>
+                          <SettingsDraftInput
+                            className="mt-1.5"
+                            value={settings.providers.claudeAgent.autoCompactWindow}
+                            validate={validateClaudeAutoCompactWindow}
+                            onCommit={(autoCompactWindow) =>
+                              updateSettings({
+                                providers: {
+                                  ...settings.providers,
+                                  claudeAgent: {
+                                    ...settings.providers.claudeAgent,
+                                    autoCompactWindow,
+                                  },
+                                },
+                              })
+                            }
+                            ariaLabel="Claude auto-compact window"
+                            placeholder="Claude default"
+                          />
+                          <span className="mt-1 block text-xs text-muted-foreground">
+                            Tokens of context before Claude compacts the conversation, from 100000
+                            to 1000000.
+                          </span>
+                        </div>
+                      </>
+                    ) : null}
+
+                    {providerCard.liveProvider?.enabled && providerCard.liveProvider.installed ? (
+                      <div className="border-t border-border/60 px-4 py-3 sm:px-5">
+                        <div className="text-xs font-medium text-foreground">Usage limits</div>
+                        <ProviderUsageLimitRows
+                          className="mt-2"
+                          provider={providerCard.liveProvider}
+                        />
+                      </div>
+                    ) : null}
 
                     <div className="border-t border-border/60 px-4 py-3 sm:px-5">
                       <div className="text-xs font-medium text-foreground">Models</div>
@@ -922,16 +1172,10 @@ export function GeneralSettingsPanel() {
                         className="mt-2 max-h-40 overflow-y-auto pb-1"
                       >
                         {providerCard.models.map((model) => {
-                          const caps = model.capabilities;
-                          const capLabels: string[] = [];
-                          if (caps?.supportsFastMode) capLabels.push("Fast mode");
-                          if (caps?.supportsThinkingToggle) capLabels.push("Thinking");
-                          if (
-                            caps?.reasoningEffortLevels &&
-                            caps.reasoningEffortLevels.length > 0
-                          ) {
-                            capLabels.push("Reasoning");
-                          }
+                          const capLabels = describeModelCapabilities(
+                            model,
+                            providerCard.flagMissingReasoning,
+                          );
                           const hasDetails = capLabels.length > 0 || model.name !== model.slug;
 
                           return (
@@ -982,6 +1226,19 @@ export function GeneralSettingsPanel() {
                                   <button
                                     type="button"
                                     className="text-muted-foreground transition-colors hover:text-foreground"
+                                    aria-label={`Edit ${model.slug}`}
+                                    onClick={() =>
+                                      setEditingCustomModel({
+                                        provider: providerCard.provider,
+                                        slug: model.slug,
+                                      })
+                                    }
+                                  >
+                                    <PencilIcon className="size-3" />
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="text-muted-foreground transition-colors hover:text-foreground"
                                     aria-label={`Remove ${model.slug}`}
                                     onClick={() =>
                                       removeCustomModel(providerCard.provider, model.slug)
@@ -1014,7 +1271,11 @@ export function GeneralSettingsPanel() {
                             }
                           }}
                           onKeyDown={(event) => {
-                            if (event.key !== "Enter") return;
+                            if (
+                              event.key !== "Enter" ||
+                              isImeComposingKeyboardEvent(event.nativeEvent)
+                            )
+                              return;
                             event.preventDefault();
                             addCustomModel(providerCard.provider);
                           }}
@@ -1038,13 +1299,64 @@ export function GeneralSettingsPanel() {
                   </div>
                 </CollapsibleContent>
               </Collapsible>
+
+              {editingCustomModel?.provider === providerCard.provider ? (
+                <CustomModelDetailsDialog
+                  key={editingCustomModel.slug}
+                  open
+                  entry={
+                    readCustomModelEntries(providerCard.providerConfig).find(
+                      (entry) => entry.slug === editingCustomModel.slug,
+                    ) ?? { slug: editingCustomModel.slug }
+                  }
+                  models={providerCard.models}
+                  provider={providerCard.provider}
+                  onOpenChange={(open) => {
+                    if (!open) setEditingCustomModel(null);
+                  }}
+                  onSave={(entry) =>
+                    updateSettings({
+                      providers: {
+                        ...settings.providers,
+                        [providerCard.provider]: {
+                          ...settings.providers[providerCard.provider],
+                          ...saveCustomModelEntry(settings.providers[providerCard.provider], entry),
+                        },
+                      },
+                    })
+                  }
+                />
+              ) : null}
             </div>
           );
         })}
+
+        {updatesWithoutCard.map(({ provider, update }) => (
+          <div key={provider} className="border-t border-border px-4 py-4 first:border-t-0 sm:px-5">
+            <h3 className="text-sm font-medium text-foreground">
+              {PROVIDER_DISPLAY_NAMES[provider]}
+            </h3>
+            <ProviderVersionUpdateNotice
+              providerName={PROVIDER_DISPLAY_NAMES[provider]}
+              update={update}
+            />
+          </div>
+        ))}
+
+        <ProviderChecksSettingsRows />
+        {liveCodexProvider?.enabled && liveCodexProvider.installed ? (
+          <SettingsRow
+            id="setting-codex-usage-limits"
+            title="Codex usage"
+            description="Session and weekly limits reported by Codex."
+            status={<ProviderUsageLimitRows className="mt-2" provider={liveCodexProvider} />}
+          />
+        ) : null}
       </SettingsSection>
 
-      <SettingsSection title="Advanced">
+      <SettingsSection id="setting-section-advanced" title="Advanced">
         <SettingsRow
+          id="setting-keybindings-file"
           title="Keybindings"
           description="Open the persisted `keybindings.json` file to edit advanced bindings directly."
           status={
@@ -1072,7 +1384,7 @@ export function GeneralSettingsPanel() {
         />
       </SettingsSection>
 
-      <SettingsSection title="About">
+      <SettingsSection id="setting-section-about" title="About">
         {isElectron ? (
           <AboutVersionSection />
         ) : (
@@ -1082,6 +1394,7 @@ export function GeneralSettingsPanel() {
           />
         )}
         <SettingsRow
+          id="setting-diagnostics"
           title="Diagnostics"
           description={diagnosticsDescription}
           status={
@@ -1095,15 +1408,29 @@ export function GeneralSettingsPanel() {
             </>
           }
           control={
-            <Button
-              size="xs"
-              variant="outline"
-              disabled={!logsDirectoryPath || isOpeningLogsDirectory}
-              onClick={openLogsDirectory}
-            >
-              {isOpeningLogsDirectory ? "Opening..." : "Open logs folder"}
-            </Button>
+            <>
+              <Button
+                size="xs"
+                variant="outline"
+                onClick={() => void navigate({ to: "/settings/diagnostics" })}
+              >
+                View diagnostics
+              </Button>
+              <Button
+                size="xs"
+                variant="outline"
+                disabled={!logsDirectoryPath || isOpeningLogsDirectory}
+                onClick={openLogsDirectory}
+              >
+                {isOpeningLogsDirectory ? "Opening..." : "Open logs folder"}
+              </Button>
+            </>
           }
+        />
+        <SettingsRow
+          id="setting-usage-data"
+          title="Usage data"
+          description="Usage data is off unless PIEDPIPER_POSTHOG_KEY is set in the server environment. With a key set, the server sends product events to PostHog, such as sessions started and turns sent, with provider, model, mode and counts, plus your OS and WSL distro name, architecture, app version and client type, but never prompts or code. Events are tagged with a hashed identifier. To opt out, set PIEDPIPER_TELEMETRY_ENABLED=false in the server environment."
         />
       </SettingsSection>
     </SettingsPageContainer>

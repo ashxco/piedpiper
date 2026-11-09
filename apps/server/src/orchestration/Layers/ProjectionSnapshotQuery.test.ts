@@ -7,7 +7,7 @@ import {
   TurnId,
 } from "@piedpiper/contracts";
 import { assert, it } from "@effect/vitest";
-import { Effect, Layer } from "effect";
+import { Effect, Layer, Option } from "effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
@@ -256,6 +256,8 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           ],
           createdAt: "2026-02-24T00:00:00.000Z",
           updatedAt: "2026-02-24T00:00:01.000Z",
+          archivedAt: null,
+          faviconPath: null,
           deletedAt: null,
         },
       ]);
@@ -480,6 +482,53 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
       }),
   );
 
+  it.effect("finds a project by workspace root the way the decider compares paths", () =>
+    Effect.gen(function* () {
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+
+      yield* sql`DELETE FROM projection_projects`;
+      const insertProject = (projectId: string, workspaceRoot: string, deletedAt: string | null) =>
+        sql`
+          INSERT INTO projection_projects (
+            project_id,
+            title,
+            workspace_root,
+            default_model_selection_json,
+            scripts_json,
+            created_at,
+            updated_at,
+            deleted_at
+          )
+          VALUES (
+            ${projectId},
+            ${projectId},
+            ${workspaceRoot},
+            NULL,
+            '[]',
+            '2026-03-01T00:00:00.000Z',
+            '2026-03-01T00:00:00.000Z',
+            ${deletedAt}
+          )
+        `;
+      yield* insertProject("project-deleted", "C:\\Code\\App", "2026-03-01T00:00:01.000Z");
+      yield* insertProject("project-windows", "C:\\Code\\App", null);
+      yield* insertProject("project-posix", "/tmp/workspace", null);
+
+      const lookup = (workspaceRoot: string) =>
+        snapshotQuery
+          .getActiveProjectByWorkspaceRoot(workspaceRoot)
+          .pipe(Effect.map((project) => Option.getOrUndefined(project)?.id));
+
+      assert.equal(yield* lookup("C:\\Code\\App"), asProjectId("project-windows"));
+      assert.equal(yield* lookup("c:\\code\\app"), asProjectId("project-windows"));
+      assert.equal(yield* lookup("c:/code/app/"), asProjectId("project-windows"));
+      assert.equal(yield* lookup("/tmp/workspace/"), asProjectId("project-posix"));
+      assert.equal(yield* lookup("/TMP/workspace"), undefined);
+      assert.equal(yield* lookup("c:\\code\\other"), undefined);
+    }),
+  );
+
   it.effect("reads single-thread checkpoint context without hydrating unrelated threads", () =>
     Effect.gen(function* () {
       const snapshotQuery = yield* ProjectionSnapshotQuery;
@@ -597,6 +646,20 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           )
       `;
 
+      // The image route only needs the folders, so it must not load the checkpoint rows.
+      const workspaceContext = yield* snapshotQuery.getThreadWorkspaceContext(
+        ThreadId.makeUnsafe("thread-context"),
+      );
+      assert.deepEqual(workspaceContext._tag === "Some" ? workspaceContext.value : null, {
+        workspaceRoot: "/tmp/context-workspace",
+        worktreePath: "/tmp/context-worktree",
+      });
+      assert.equal(
+        (yield* snapshotQuery.getThreadWorkspaceContext(ThreadId.makeUnsafe("thread-missing")))
+          ._tag,
+        "None",
+      );
+
       const context = yield* snapshotQuery.getThreadCheckpointContext(
         ThreadId.makeUnsafe("thread-context"),
       );
@@ -629,6 +692,261 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           ],
         });
       }
+    }),
+  );
+});
+
+projectionSnapshotLayer("ProjectionSnapshotQuery retention window", (it) => {
+  const seedWindowThreads = Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    yield* sql`DELETE FROM projection_projects`;
+    yield* sql`DELETE FROM projection_threads`;
+    yield* sql`DELETE FROM projection_thread_messages`;
+    yield* sql`DELETE FROM projection_thread_activities`;
+    yield* sql`DELETE FROM projection_pending_approvals`;
+    yield* sql`
+      INSERT INTO projection_projects (
+        project_id, title, workspace_root, default_model_selection_json, scripts_json,
+        created_at, updated_at, deleted_at
+      )
+      VALUES (
+        'project-window', 'Window', '/tmp/window', NULL, '[]',
+        '2026-03-01T00:00:00.000Z', '2026-03-01T00:00:00.000Z', NULL
+      )
+    `;
+    yield* sql`
+      INSERT INTO projection_threads (
+        thread_id, project_id, title, model_selection_json, branch, worktree_path,
+        latest_turn_id, created_at, updated_at, deleted_at
+      )
+      VALUES
+        (
+          'thread-window', 'project-window', 'Window', '{"provider":"codex","model":"gpt-5-codex"}',
+          NULL, NULL, NULL, '2026-03-01T00:00:00.000Z', '2026-03-01T00:00:00.000Z', NULL
+        ),
+        (
+          'thread-window-deleted', 'project-window', 'Deleted',
+          '{"provider":"codex","model":"gpt-5-codex"}', NULL, NULL, NULL,
+          '2026-03-01T00:00:00.000Z', '2026-03-01T00:00:00.000Z', '2026-03-01T00:00:01.000Z'
+        )
+    `;
+    for (const threadId of ["thread-window", "thread-window-deleted"]) {
+      yield* sql`
+        WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 501)
+        INSERT INTO projection_thread_activities (
+          activity_id, thread_id, turn_id, tone, kind, summary, payload_json, sequence, created_at
+        )
+        SELECT
+          printf('%s-activity-%04d', ${threadId}, i), ${threadId}, NULL, 'tool', 'tool.completed',
+          'ran tool', '{}', i, '2026-03-01T00:04:00.000Z'
+        FROM n
+      `;
+      yield* sql`
+        WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 2001)
+        INSERT INTO projection_thread_messages (
+          message_id, thread_id, turn_id, role, text, is_streaming, created_at, updated_at
+        )
+        SELECT
+          printf('%s-message-%04d', ${threadId}, i), ${threadId}, NULL, 'assistant', 'hi', 0,
+          printf('2026-03-01T%02d:%02d:%02d.000Z', i / 3600, i / 60 % 60, i % 60),
+          '2026-03-01T00:00:00.000Z'
+        FROM n
+      `;
+    }
+  });
+
+  it.effect(
+    "keeps only each thread's newest activities and messages and skips deleted threads",
+    () =>
+      Effect.gen(function* () {
+        yield* seedWindowThreads;
+        const snapshotQuery = yield* ProjectionSnapshotQuery;
+        const snapshot = yield* snapshotQuery.getSnapshot();
+
+        assert.deepEqual(
+          snapshot.threads.map((thread) => thread.id),
+          [ThreadId.makeUnsafe("thread-window")],
+        );
+        const thread = snapshot.threads[0]!;
+        assert.equal(thread.activities.length, 500);
+        assert.equal(thread.activities[0]?.id, asEventId("thread-window-activity-0002"));
+        assert.equal(thread.activities.at(-1)?.id, asEventId("thread-window-activity-0501"));
+        assert.equal(thread.messages.length, 2_000);
+        assert.equal(thread.messages[0]?.id, asMessageId("thread-window-message-0002"));
+        assert.equal(thread.messages.at(-1)?.id, asMessageId("thread-window-message-2001"));
+      }),
+  );
+
+  it.effect("keeps unresolved approval and user-input requests outside the window", () =>
+    Effect.gen(function* () {
+      yield* seedWindowThreads;
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`
+        INSERT INTO projection_thread_activities (
+          activity_id, thread_id, turn_id, tone, kind, summary, payload_json, sequence, created_at
+        )
+        VALUES
+          ('approval-open', 'thread-window', NULL, 'approval', 'approval.requested',
+            'Approve', '{"requestId":"approval-1"}', NULL, '2026-03-01T00:00:01.000Z'),
+          ('approval-done', 'thread-window', NULL, 'approval', 'approval.requested',
+            'Approve', '{"requestId":"approval-2"}', NULL, '2026-03-01T00:00:02.000Z'),
+          ('input-open', 'thread-window', NULL, 'info', 'user-input.requested',
+            'Ask', '{"requestId":"input-1"}', NULL, '2026-03-01T00:00:03.000Z'),
+          ('input-closed', 'thread-window', NULL, 'info', 'user-input.requested',
+            'Ask', '{"requestId":"input-2"}', NULL, '2026-03-01T00:00:04.000Z'),
+          ('input-closed-resolution', 'thread-window', NULL, 'info', 'user-input.resolved',
+            'Answered', '{"requestId":"input-2"}', NULL, '2026-03-01T00:00:05.000Z'),
+          ('input-stale', 'thread-window', NULL, 'info', 'user-input.requested',
+            'Ask', '{"requestId":"input-3"}', NULL, '2026-03-01T00:00:06.000Z'),
+          ('input-stale-failure', 'thread-window', NULL, 'error',
+            'provider.user-input.respond.failed', 'Failed',
+            '{"requestId":"input-3","detail":"Stale pending user-input request: input-3"}',
+            NULL, '2026-03-01T00:00:07.000Z')
+      `;
+      yield* sql`
+        INSERT INTO projection_pending_approvals (
+          request_id, thread_id, turn_id, status, decision, created_at, resolved_at
+        )
+        VALUES
+          ('approval-1', 'thread-window', NULL, 'pending', NULL, '2026-03-01T00:00:01.000Z', NULL),
+          ('approval-2', 'thread-window', NULL, 'resolved', 'accept',
+            '2026-03-01T00:00:02.000Z', '2026-03-01T00:00:02.500Z')
+      `;
+
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+      const snapshot = yield* snapshotQuery.getSnapshot();
+      const thread = snapshot.threads.find((entry) => entry.id === "thread-window");
+      assert.isDefined(thread);
+      const ids = thread!.activities.map((activity) => activity.id);
+      assert.equal(ids.length, 502);
+      assert.deepEqual(ids.slice(0, 2), [asEventId("approval-open"), asEventId("input-open")]);
+      assert.equal(ids.includes(asEventId("approval-done")), false);
+      assert.equal(ids.includes(asEventId("input-closed")), false);
+      assert.equal(ids.includes(asEventId("input-stale")), false);
+    }),
+  );
+
+  it.effect("keeps a held question answer outside the window", () =>
+    Effect.gen(function* () {
+      yield* seedWindowThreads;
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`
+        INSERT INTO projection_thread_activities (
+          activity_id, thread_id, turn_id, tone, kind, summary, payload_json, sequence, created_at
+        )
+        VALUES
+          ('answer-held', 'thread-window', NULL, 'info', 'user-input.resolved',
+            'Answered', '{"requestId":"input-1","held":true,"replyText":"reply"}', NULL,
+            '2026-03-01T00:00:01.000Z'),
+          ('answer-plain', 'thread-window', NULL, 'info', 'user-input.resolved',
+            'Answered', '{"requestId":"input-2"}', NULL, '2026-03-01T00:00:02.000Z')
+      `;
+
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+      const snapshot = yield* snapshotQuery.getSnapshot();
+      const thread = snapshot.threads.find((entry) => entry.id === "thread-window");
+      const ids = new Set(thread!.activities.map((activity) => activity.id));
+      assert.equal(ids.has(asEventId("answer-held")), true);
+      assert.equal(ids.has(asEventId("answer-plain")), false);
+    }),
+  );
+
+  it.effect("keeps the start of a task still running outside the window", () =>
+    Effect.gen(function* () {
+      yield* seedWindowThreads;
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`
+        INSERT INTO projection_thread_activities (
+          activity_id, thread_id, turn_id, tone, kind, summary, payload_json, sequence, created_at
+        )
+        VALUES
+          ('task-open', 'thread-window', NULL, 'info', 'task.started',
+            'Task started', '{"taskId":"open"}', NULL, '2026-03-01T00:00:01.000Z'),
+          ('task-closed', 'thread-window', NULL, 'info', 'task.started',
+            'Task started', '{"taskId":"closed"}', NULL, '2026-03-01T00:00:02.000Z'),
+          ('task-closed-done', 'thread-window', NULL, 'info', 'task.completed',
+            'Task completed', '{"taskId":"closed"}', NULL, '2026-03-01T00:00:03.000Z'),
+          ('task-restarted-first', 'thread-window', NULL, 'info', 'task.started',
+            'Task started', '{"taskId":"restarted"}', NULL, '2026-03-01T00:00:04.000Z'),
+          ('task-restarted-done', 'thread-window', NULL, 'info', 'task.completed',
+            'Task completed', '{"taskId":"restarted"}', NULL, '2026-03-01T00:00:05.000Z'),
+          ('task-restarted-again', 'thread-window', NULL, 'info', 'task.started',
+            'Task started', '{"taskId":"restarted"}', NULL, '2026-03-01T00:00:06.000Z')
+      `;
+
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+      const snapshot = yield* snapshotQuery.getSnapshot();
+      const thread = snapshot.threads.find((entry) => entry.id === "thread-window");
+      const ids = new Set(thread!.activities.map((activity) => activity.id));
+      assert.equal(ids.has(asEventId("task-open")), true);
+      assert.equal(ids.has(asEventId("task-restarted-again")), true);
+      assert.equal(ids.has(asEventId("task-closed")), false);
+      assert.equal(ids.has(asEventId("task-restarted-first")), false);
+    }),
+  );
+
+  it.effect("pins only the newest row of a re-emitted request and keeps old model switches", () =>
+    Effect.gen(function* () {
+      yield* seedWindowThreads;
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`
+        INSERT INTO projection_thread_activities (
+          activity_id, thread_id, turn_id, tone, kind, summary, payload_json, sequence, created_at
+        )
+        VALUES
+          ('approval-first', 'thread-window', NULL, 'approval', 'approval.requested',
+            'Approve', '{"requestId":"approval-1"}', NULL, '2026-03-01T00:00:01.000Z'),
+          ('approval-reemitted', 'thread-window', NULL, 'approval', 'approval.requested',
+            'Approve', '{"requestId":"approval-1"}', NULL, '2026-03-01T00:00:02.000Z'),
+          ('model-switch-old', 'thread-window', NULL, 'info', 'turn.model-switched',
+            'Model changed', '{"messageId":"m-1"}', NULL, '2026-03-01T00:00:03.000Z')
+      `;
+      yield* sql`
+        INSERT INTO projection_pending_approvals (
+          request_id, thread_id, turn_id, status, decision, created_at, resolved_at
+        )
+        VALUES
+          ('approval-1', 'thread-window', NULL, 'pending', NULL, '2026-03-01T00:00:01.000Z', NULL)
+      `;
+
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+      const snapshot = yield* snapshotQuery.getSnapshot();
+      const thread = snapshot.threads.find((entry) => entry.id === "thread-window");
+      assert.isDefined(thread);
+      const ids = thread!.activities.map((activity) => activity.id);
+      assert.equal(ids.length, 502);
+      assert.deepEqual(ids.slice(0, 2), [
+        asEventId("approval-reemitted"),
+        asEventId("model-switch-old"),
+      ]);
+      assert.equal(ids.includes(asEventId("approval-first")), false);
+    }),
+  );
+
+  it.effect("gives thinking blocks their own window beside the 500 newest activities", () =>
+    Effect.gen(function* () {
+      yield* seedWindowThreads;
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`
+        INSERT INTO projection_thread_activities (
+          activity_id, thread_id, turn_id, tone, kind, summary, payload_json, sequence, created_at
+        )
+        WITH RECURSIVE counter(n) AS (
+          SELECT 1 UNION ALL SELECT n + 1 FROM counter WHERE n < 205
+        )
+        SELECT
+          'thought-' || n, 'thread-window', NULL, 'thinking', 'reasoning.block', 'Thought',
+          '{"detail":"x"}', NULL, '2026-03-01T00:00:03.000Z'
+        FROM counter
+      `;
+
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+      const snapshot = yield* snapshotQuery.getSnapshot();
+      const thread = snapshot.threads.find((entry) => entry.id === "thread-window");
+      assert.isDefined(thread);
+      const kinds = thread!.activities.map((activity) => activity.kind);
+      assert.equal(kinds.filter((kind) => kind === "reasoning.block").length, 200);
+      assert.equal(kinds.filter((kind) => kind !== "reasoning.block").length, 500);
     }),
   );
 });

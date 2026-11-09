@@ -6,14 +6,208 @@
  * spawn processes, or read Effect services — they take strings (or
  * arrays of strings) and return parsed branch/path/error structures.
  */
+import { createHash } from "node:crypto";
+
 import { GitCommandError, type GitBranch } from "@piedpiper/contracts";
+import { sanitizeBranchFragment } from "@piedpiper/shared/git";
 import { Schema } from "effect";
 
+import { gitConfigEnv } from "../gitConfigEnv.ts";
 import { parseRemoteRefWithRemoteNames } from "../remoteRefs.ts";
 import { type ExecuteGitInput } from "../Services/GitCore";
 
 const GIT_CHECK_IGNORE_MAX_STDIN_BYTES = 256 * 1024;
 const GIT_LIST_BRANCHES_DEFAULT_LIMIT = 100;
+
+// Repo-level core.fsmonitor / core.untrackedCache can point at arbitrary executables; never honour them when
+// indexing, staging or restoring. Status polling (statusDetails) keeps them for speed on large repos.
+export const WORKSPACE_GIT_HARDENED_CONFIG_ARGS = [
+  "-c",
+  "core.fsmonitor=false",
+  "-c",
+  "core.untrackedCache=false",
+] as const;
+
+// Repo-level diff.external / textconv drivers run commands, and color.diff=always injects ANSI codes.
+export const GIT_PLAIN_DIFF_ARGS = ["--no-ext-diff", "--no-textconv", "--no-color"] as const;
+
+const WORKTREE_DIRECTORY_NAME_MAX_LENGTH = 40;
+
+/** Folder name for a generated worktree, capped so long branch names stay within path limits. */
+export function worktreeDirectoryName(branch: string): string {
+  const directoryName = branch.replace(/\//g, "-");
+  if (directoryName.length <= WORKTREE_DIRECTORY_NAME_MAX_LENGTH) {
+    return directoryName;
+  }
+  const digest = createHash("sha256").update(branch, "utf8").digest("hex").slice(0, 16);
+  // Avoid splitting a surrogate pair, which Git would list back as a different path.
+  const prefix = directoryName.slice(0, 23).replace(/[\uD800-\uDBFF]$/, "");
+  return `${prefix}-${digest}`;
+}
+
+/** True when a git command failed because its working directory no longer exists. */
+export function isMissingGitCwdError(error: GitCommandError): boolean {
+  // Detail only: the message also embeds the cwd and command, which could match these terms.
+  const normalized = error.detail.toLowerCase();
+  return (
+    normalized.includes("no such file or directory") ||
+    normalized.includes("notfound: filesystem.access") ||
+    normalized.includes("enoent") ||
+    normalized.includes("not a directory")
+  );
+}
+
+/** True when git refused the folder, either outright or as a bare repository it may not open. */
+export function isNotGitRepositoryStderr(stderr: string): boolean {
+  const normalized = stderr.toLowerCase();
+  return (
+    normalized.includes("not a git repository") || normalized.includes("cannot use bare repository")
+  );
+}
+
+/** True when git failed because HEAD has no commits yet (unborn branch). */
+export function isUnbornHeadStderr(stderr: string): boolean {
+  const normalized = stderr.toLowerCase();
+  return (
+    normalized.includes("bad revision 'head'") ||
+    (normalized.includes("unknown revision") && normalized.includes("path not in the working tree"))
+  );
+}
+
+/**
+ * True when another git process held `.git/config.lock`. Git never waits for that lock; the same
+ * prefix also reports permission errors, which retrying cannot fix, so only "File exists" matches.
+ */
+export function isConfigLockFailure(stderr: string): boolean {
+  return /could not lock config file .+: File exists/i.test(stderr);
+}
+
+/**
+ * True when a fetch lost a ref update to another git process (such as the background status
+ * fetch). Git 2.53+ says "fetching ref <ref> failed: ..."; older git says "cannot lock ref".
+ */
+export function isRefLockFailure(stderr: string): boolean {
+  return stderr
+    .split(/\r?\n/)
+    .some((line) =>
+      /^(?:(?:error|fatal): cannot lock ref\b|fatal: Unable to create ['"].+\.lock['"]:|error: fetching ref \S+ failed: (?:incorrect old value provided|reference already exists)$)/i.test(
+        line.trim(),
+      ),
+    );
+}
+
+/**
+ * True when `git worktree remove` failed because git no longer tracks the path: "is not a working
+ * tree" once the registration is gone, "cannot remove working tree" from older gits that fail
+ * validation on a registered but deleted folder.
+ */
+export function isMissingWorktreeStderr(stderr: string): boolean {
+  const normalized = stderr.toLowerCase();
+  return (
+    normalized.includes("is not a working tree") ||
+    normalized.includes("cannot remove working tree")
+  );
+}
+
+/**
+ * True for a ref name git would read as an option. Git refuses such branch names itself, and
+ * `--end-of-options` cannot guard checkout or `worktree add` (Git before 2.44 reads it like `--`).
+ * A lone "-" is the previous checkout, which both commands read as a ref.
+ */
+export function isOptionLikeRefName(refName: string): boolean {
+  return refName !== "-" && refName.startsWith("-");
+}
+
+const GIT_GLOBAL_OPTIONS_WITH_VALUE = new Set([
+  "-c",
+  "-C",
+  "--git-dir",
+  "--work-tree",
+  "--namespace",
+  "--config-env",
+]);
+
+const GIT_CONFIG_READ_ARGS = new Set([
+  "--get",
+  "--get-all",
+  "--get-regexp",
+  "--list",
+  "-l",
+  "get",
+  "list",
+]);
+
+/** Index of the git subcommand in `args`, skipping global options such as `-c key=value`. */
+function gitSubcommandIndex(args: ReadonlyArray<string>): number {
+  let index = 0;
+  while (index < args.length) {
+    const arg = args[index]!;
+    if (GIT_GLOBAL_OPTIONS_WITH_VALUE.has(arg)) {
+      index += 2;
+      continue;
+    }
+    if (!arg.startsWith("-")) return index;
+    index += 1;
+  }
+  return -1;
+}
+
+/**
+ * Git on Windows cannot create or delete paths over MAX_PATH unless `core.longpaths` is set (the OS
+ * LongPathsEnabled setting does not cover git).
+ */
+export function windowsLongPathConfigEnv(
+  platform: NodeJS.Platform,
+  env: NodeJS.ProcessEnv,
+): NodeJS.ProcessEnv {
+  return platform === "win32" ? gitConfigEnv(env, "core.longpaths", "true", platform) : {};
+}
+
+/** Global cap on concurrent short git processes, so status bursts cannot flood the machine. */
+export const GIT_PROCESS_CONCURRENCY_LIMIT = 8;
+// Commands that can run for minutes (transfers, commit hooks) must never hold up status reads.
+const LONG_RUNNING_GIT_SUBCOMMANDS = new Set(["push", "pull", "clone", "commit"]);
+
+/** Whether a git command skips the concurrency cap: long-running or explicitly unbounded. */
+export function bypassesGitProcessLimit(
+  args: ReadonlyArray<string>,
+  timeoutMs: number | null | undefined,
+  defaultTimeoutMs: number,
+): boolean {
+  if (timeoutMs === null || (timeoutMs ?? defaultTimeoutMs) > defaultTimeoutMs) return true;
+  const index = gitSubcommandIndex(args);
+  return index >= 0 && LONG_RUNNING_GIT_SUBCOMMANDS.has(args[index]!);
+}
+
+/**
+ * True when a git command can change what status caches per repository: the remotes (origin and its
+ * default branch), the repository itself, or its worktree registrations.
+ */
+export function gitCommandMutatesRepositoryLayout(args: ReadonlyArray<string>): boolean {
+  const index = gitSubcommandIndex(args);
+  if (index < 0) return false;
+  const subcommand = args[index];
+  const action = args[index + 1];
+  switch (subcommand) {
+    case "init":
+    case "clone":
+      return true;
+    case "remote":
+      return (
+        action !== undefined &&
+        ["add", "remove", "rm", "rename", "set-url", "set-head"].includes(action)
+      );
+    case "worktree":
+      return action !== undefined && ["add", "remove", "move", "prune"].includes(action);
+    case "config": {
+      const configArgs = args.slice(index + 1);
+      const isRead = configArgs.some((arg) => GIT_CONFIG_READ_ARGS.has(arg));
+      return !isRead && configArgs.some((arg) => arg.toLowerCase().startsWith("remote."));
+    }
+    default:
+      return false;
+  }
+}
 
 export function parseBranchAb(value: string): { ahead: number; behind: number } {
   const match = value.match(/^\+(\d+)\s+-(\d+)$/);
@@ -22,30 +216,6 @@ export function parseBranchAb(value: string): { ahead: number; behind: number } 
     ahead: Number(match[1] ?? "0"),
     behind: Number(match[2] ?? "0"),
   };
-}
-
-export function parseNumstatEntries(
-  stdout: string,
-): Array<{ path: string; insertions: number; deletions: number }> {
-  const entries: Array<{ path: string; insertions: number; deletions: number }> = [];
-  for (const line of stdout.split(/\r?\n/g)) {
-    if (line.trim().length === 0) continue;
-    const [addedRaw, deletedRaw, ...pathParts] = line.split("\t");
-    const rawPath =
-      pathParts.length > 1 ? (pathParts.at(-1) ?? "").trim() : pathParts.join("\t").trim();
-    if (rawPath.length === 0) continue;
-    const added = Number.parseInt(addedRaw ?? "0", 10);
-    const deleted = Number.parseInt(deletedRaw ?? "0", 10);
-    const renameArrowIndex = rawPath.indexOf(" => ");
-    const normalizedPath =
-      renameArrowIndex >= 0 ? rawPath.slice(renameArrowIndex + " => ".length).trim() : rawPath;
-    entries.push({
-      path: normalizedPath.length > 0 ? normalizedPath : rawPath,
-      insertions: Number.isFinite(added) ? added : 0,
-      deletions: Number.isFinite(deleted) ? deleted : 0,
-    });
-  }
-  return entries;
 }
 
 export function splitNullSeparatedPaths(input: string, truncated: boolean): string[] {
@@ -89,25 +259,32 @@ export function chunkPathsForGitCheckIgnore(relativePaths: readonly string[]): s
   return chunks;
 }
 
-export function parsePorcelainPath(line: string): string | null {
+/** Path of one `git status --porcelain=2 -z` record; a rename's origPath is the next record. */
+export function parsePorcelainRecordPath(line: string): string | null {
   if (line.startsWith("? ") || line.startsWith("! ")) {
-    const simple = line.slice(2).trim();
+    const simple = line.slice(2);
     return simple.length > 0 ? simple : null;
   }
 
-  if (!(line.startsWith("1 ") || line.startsWith("2 ") || line.startsWith("u "))) {
+  // Fields before the path: 8 for ordinary, 9 for renamed/copied, 10 for unmerged entries.
+  const fieldCount = line.startsWith("1 ")
+    ? 8
+    : line.startsWith("2 ")
+      ? 9
+      : line.startsWith("u ")
+        ? 10
+        : 0;
+  if (fieldCount === 0) {
     return null;
   }
 
-  const tabIndex = line.indexOf("\t");
-  if (tabIndex >= 0) {
-    const fromTab = line.slice(tabIndex + 1);
-    const [filePath] = fromTab.split("\t");
-    return filePath?.trim().length ? filePath.trim() : null;
+  let pathStart = 0;
+  for (let field = 0; field < fieldCount; field += 1) {
+    const spaceIndex = line.indexOf(" ", pathStart);
+    if (spaceIndex < 0) return null;
+    pathStart = spaceIndex + 1;
   }
-
-  const parts = line.trim().split(/\s+/g);
-  const filePath = parts.at(-1) ?? "";
+  const filePath = line.slice(pathStart);
   return filePath.length > 0 ? filePath : null;
 }
 
@@ -168,20 +345,13 @@ export function sanitizeRemoteName(value: string): string {
   return sanitized.length > 0 ? sanitized : "fork";
 }
 
-export function normalizeRemoteUrl(value: string): string {
-  return value
-    .trim()
-    .replace(/\/+$/g, "")
-    .replace(/\.git$/i, "")
-    .toLowerCase();
-}
-
 export function parseRemoteFetchUrls(stdout: string): Map<string, string> {
   const remotes = new Map<string, string>();
   for (const line of stdout.split("\n")) {
     const trimmed = line.trim();
     if (trimmed.length === 0) continue;
-    const match = /^(\S+)\s+(\S+)\s+\((fetch|push)\)$/.exec(trimmed);
+    // Partial clones append the filter, e.g. `(fetch) [blob:none]`.
+    const match = /^(\S+)\s+(\S+)\s+\((fetch|push)\)(?:\s+\[[^\]]+\])?$/.exec(trimmed);
     if (!match) continue;
     const [, remoteName = "", remoteUrl = "", direction = ""] = match;
     if (direction !== "fetch" || remoteName.length === 0 || remoteUrl.length === 0) {
@@ -227,6 +397,32 @@ export function parseUpstreamRefByFirstSeparator(
     remoteName,
     upstreamBranch,
   };
+}
+
+// Cross-repository PR checkouts (`piedpiper/pr-<n>/<head>`) deliberately track the PR head branch.
+const PULL_REQUEST_CHECKOUT_BRANCH_PATTERN = /^piedpiper\/pr-\d+\/(.+)$/;
+
+function isPullRequestCheckoutOf(branch: string, upstreamBranch: string): boolean {
+  const suffix = PULL_REQUEST_CHECKOUT_BRANCH_PATTERN.exec(branch)?.[1];
+  return suffix !== undefined && suffix === sanitizeBranchFragment(upstreamBranch);
+}
+
+/**
+ * Whether pushing a branch should write to its tracked upstream. A differently named upstream is
+ * the base the branch was cut from (`checkout -b feature origin/dev`), except for a git-mangled
+ * alias (local `upstream/effect-atom` tracking `my-org/upstream/effect-atom`) or a PR checkout.
+ */
+export function isUpstreamPushTarget(
+  branch: string,
+  upstream: { readonly upstreamRef: string; readonly upstreamBranch: string },
+): boolean {
+  return (
+    branch === upstream.upstreamBranch ||
+    // `gh pr checkout` of a fork's default branch names the local branch after its tracking ref (`alice/main`).
+    (branch.endsWith(`/${upstream.upstreamBranch}`) &&
+      (upstream.upstreamRef === branch || upstream.upstreamRef.endsWith(`/${branch}`))) ||
+    isPullRequestCheckoutOf(branch, upstream.upstreamBranch)
+  );
 }
 
 export function parseTrackingBranchByUpstreamRef(

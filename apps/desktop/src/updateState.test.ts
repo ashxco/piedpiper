@@ -5,6 +5,7 @@ import {
   getCanRetryAfterDownloadFailure,
   getAutoUpdateDisabledReason,
   nextStatusAfterDownloadFailure,
+  resolveUpdateCheckMenuDialog,
   shouldBroadcastDownloadProgress,
 } from "./updateState";
 
@@ -71,8 +72,35 @@ describe("getAutoUpdateDisabledReason", () => {
         platform: "darwin",
         appImage: undefined,
         disabledByEnv: false,
+        hasUpdateFeedConfig: true,
       }),
     ).toContain("packaged production builds");
+  });
+
+  it("reports packaged builds without an update feed as disabled", () => {
+    expect(
+      getAutoUpdateDisabledReason({
+        isDevelopment: false,
+        isPackaged: true,
+        platform: "darwin",
+        appImage: undefined,
+        disabledByEnv: false,
+        hasUpdateFeedConfig: false,
+      }),
+    ).toContain("no update feed");
+  });
+
+  it("allows packaged builds with an update feed", () => {
+    expect(
+      getAutoUpdateDisabledReason({
+        isDevelopment: false,
+        isPackaged: true,
+        platform: "darwin",
+        appImage: undefined,
+        disabledByEnv: false,
+        hasUpdateFeedConfig: true,
+      }),
+    ).toBeNull();
   });
 
   it("reports env-disabled auto updates", () => {
@@ -83,6 +111,7 @@ describe("getAutoUpdateDisabledReason", () => {
         platform: "darwin",
         appImage: undefined,
         disabledByEnv: true,
+        hasUpdateFeedConfig: true,
       }),
     ).toContain("PIEDPIPER_DISABLE_AUTO_UPDATE");
   });
@@ -95,6 +124,7 @@ describe("getAutoUpdateDisabledReason", () => {
         platform: "linux",
         appImage: undefined,
         disabledByEnv: false,
+        hasUpdateFeedConfig: true,
       }),
     ).toContain("AppImage");
   });
@@ -142,4 +172,40 @@ describe("getCanRetryAfterDownloadFailure", () => {
       }),
     ).toBe(false);
   });
+});
+
+describe("resolveUpdateCheckMenuDialog", () => {
+  it("reports the running version when up to date", () => {
+    expect(resolveUpdateCheckMenuDialog({ ...baseState, status: "up-to-date" })).toMatchObject({
+      type: "info",
+      message: "Pied Piper 1.0.0 is currently the newest version available.",
+    });
+  });
+
+  it("points at the queued update when one is already downloaded", () => {
+    expect(
+      resolveUpdateCheckMenuDialog({
+        ...baseState,
+        status: "downloaded",
+        downloadedVersion: "1.1.0",
+      }),
+    ).toMatchObject({
+      type: "info",
+      title: "Update ready to install",
+      message: "Pied Piper 1.1.0 has already been downloaded.",
+    });
+  });
+
+  it("reports the failure message when the check failed", () => {
+    expect(
+      resolveUpdateCheckMenuDialog({ ...baseState, status: "error", message: "offline" }),
+    ).toMatchObject({ type: "warning", detail: "offline" });
+  });
+
+  it.each(["available", "checking", "downloading", "idle"] as const)(
+    "stays silent for %s",
+    (status) => {
+      expect(resolveUpdateCheckMenuDialog({ ...baseState, status })).toBeNull();
+    },
+  );
 });

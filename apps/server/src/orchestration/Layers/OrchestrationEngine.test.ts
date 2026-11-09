@@ -1,3 +1,8 @@
+import * as NodeFSP from "node:fs/promises";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
+import * as NodeSqlite from "node:sqlite";
+
 import {
   CheckpointRef,
   CommandId,
@@ -8,13 +13,16 @@ import {
   TurnId,
   type OrchestrationEvent,
 } from "@piedpiper/contracts";
-import { Effect, Layer, ManagedRuntime, Metric, Option, Queue, Stream } from "effect";
+import { Effect, Layer, ManagedRuntime, Metric, Option, PubSub, Queue, Stream } from "effect";
 import { describe, expect, it } from "vitest";
 
 import { PersistenceSqlError } from "../../persistence/Errors.ts";
 import { OrchestrationCommandReceiptRepositoryLive } from "../../persistence/Layers/OrchestrationCommandReceipts.ts";
 import { OrchestrationEventStoreLive } from "../../persistence/Layers/OrchestrationEventStore.ts";
-import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
+import {
+  SqlitePersistenceMemory,
+  makeSqlitePersistenceLive,
+} from "../../persistence/Layers/Sqlite.ts";
 import {
   OrchestrationEventStore,
   type OrchestrationEventStoreShape,
@@ -36,7 +44,7 @@ const asMessageId = (value: string): MessageId => MessageId.makeUnsafe(value);
 const asTurnId = (value: string): TurnId => TurnId.makeUnsafe(value);
 const asCheckpointRef = (value: string): CheckpointRef => CheckpointRef.makeUnsafe(value);
 
-async function createOrchestrationSystem() {
+async function createOrchestrationSystem(databasePath?: string) {
   const ServerConfigLayer = ServerConfig.layerTest(process.cwd(), {
     prefix: "piedpiper-orchestration-engine-test-",
   });
@@ -45,7 +53,11 @@ async function createOrchestrationSystem() {
     Layer.provide(OrchestrationProjectionPipelineLive),
     Layer.provide(OrchestrationEventStoreLive),
     Layer.provide(OrchestrationCommandReceiptRepositoryLive),
-    Layer.provide(SqlitePersistenceMemory),
+    Layer.provide(
+      databasePath === undefined
+        ? SqlitePersistenceMemory
+        : makeSqlitePersistenceLive(databasePath),
+    ),
     Layer.provideMerge(ServerConfigLayer),
     Layer.provideMerge(NodeServices.layer),
   );
@@ -146,12 +158,14 @@ describe("OrchestrationEngine", () => {
           getActiveProjectByWorkspaceRoot: () => Effect.succeed(Option.none()),
           getFirstActiveThreadIdByProjectId: () => Effect.succeed(Option.none()),
           getThreadCheckpointContext: () => Effect.succeed(Option.none()),
+          getThreadWorkspaceContext: () => Effect.succeed(Option.none()),
         }),
       ),
       Layer.provide(
         Layer.succeed(OrchestrationProjectionPipeline, {
           bootstrap: Effect.void,
           projectEvent: () => Effect.void,
+          projectEventDeferred: () => Effect.succeed(Effect.void),
         } satisfies OrchestrationProjectionPipelineShape),
       ),
       Layer.provide(Layer.succeed(OrchestrationEventStore, failOnHistoricalReplayStore)),
@@ -354,6 +368,59 @@ describe("OrchestrationEngine", () => {
       "thread.deleted",
     ]);
     await system.dispose();
+  });
+
+  it("refuses a replay that pruning has made incomplete", async () => {
+    const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "piedpiper-replay-"));
+    const databasePath = NodePath.join(directory, "state.sqlite");
+    const system = await createOrchestrationSystem(databasePath);
+    const { engine } = system;
+    const other = new NodeSqlite.DatabaseSync(databasePath);
+    const setBoundary = (sequence: number) =>
+      other
+        .prepare("UPDATE orchestration_event_maintenance SET pruned_through_sequence = ?")
+        .run(sequence);
+    const replayFrom = (sequence: number) =>
+      system.run(
+        Stream.runCollect(engine.readEvents(sequence)).pipe(
+          Effect.map((chunk) => Array.from(chunk, (event) => event.sequence)),
+        ),
+      );
+    try {
+      for (const name of ["a", "b", "c"]) {
+        await system.run(
+          engine.dispatch({
+            type: "project.create",
+            commandId: CommandId.makeUnsafe(`cmd-pruned-replay-${name}`),
+            projectId: asProjectId(`project-pruned-replay-${name}`),
+            title: name,
+            workspaceRoot: `/tmp/project-pruned-replay-${name}`,
+            defaultModelSelection: { provider: "codex", model: "gpt-5-codex" },
+            createdAt: now(),
+          }),
+        );
+      }
+      expect(await replayFrom(0)).toEqual([1, 2, 3]);
+
+      setBoundary(2);
+      await expect(replayFrom(1)).rejects.toThrow("through sequence 2");
+      expect(await replayFrom(2)).toEqual([3]);
+
+      // A prune that starts while the replay is reading fails it rather than leaving a gap.
+      setBoundary(0);
+      await expect(
+        system.run(
+          engine.readEvents(0).pipe(
+            Stream.tap(() => Effect.sync(() => setBoundary(2))),
+            Stream.runDrain,
+          ),
+        ),
+      ).rejects.toThrow("through sequence 2");
+    } finally {
+      other.close();
+      await system.dispose();
+      await NodeFSP.rm(directory, { recursive: true, force: true });
+    }
   });
 
   it("streams persisted domain events in order", async () => {
@@ -693,7 +760,8 @@ describe("OrchestrationEngine", () => {
     let shouldFailRequestedProjection = true;
     const flakyProjectionPipeline: OrchestrationProjectionPipelineShape = {
       bootstrap: Effect.void,
-      projectEvent: (event) => {
+      projectEvent: () => Effect.void,
+      projectEventDeferred: (event) => {
         if (
           shouldFailRequestedProjection &&
           event.commandId === CommandId.makeUnsafe("cmd-turn-start-atomic") &&
@@ -707,7 +775,7 @@ describe("OrchestrationEngine", () => {
             }),
           );
         }
-        return Effect.void;
+        return Effect.succeed(Effect.void);
       },
     };
 
@@ -836,7 +904,8 @@ describe("OrchestrationEngine", () => {
     let shouldFailProjection = true;
     const flakyProjectionPipeline: OrchestrationProjectionPipelineShape = {
       bootstrap: Effect.void,
-      projectEvent: (event) => {
+      projectEvent: () => Effect.void,
+      projectEventDeferred: (event) => {
         if (
           shouldFailProjection &&
           event.commandId === CommandId.makeUnsafe("cmd-thread-meta-sync-fail")
@@ -849,7 +918,7 @@ describe("OrchestrationEngine", () => {
             }),
           );
         }
-        return Effect.void;
+        return Effect.succeed(Effect.void);
       },
     };
 
@@ -943,6 +1012,31 @@ describe("OrchestrationEngine", () => {
     await system.dispose();
   });
 
+  it("rejects a second project on the same root by naming that root", async () => {
+    const system = await createOrchestrationSystem();
+    const { engine } = system;
+    const createProject = (id: string) =>
+      engine.dispatch({
+        type: "project.create",
+        commandId: CommandId.makeUnsafe(`cmd-${id}`),
+        projectId: asProjectId(id),
+        title: "Same Root",
+        workspaceRoot: "/tmp/project-same-root",
+        defaultModelSelection: null,
+        createdAt: now(),
+      });
+
+    await system.run(createProject("project-same-root-1"));
+    await expect(system.run(createProject("project-same-root-2"))).rejects.toThrow(
+      "A project already exists at '/tmp/project-same-root'.",
+    );
+
+    const readModel = await system.run(engine.getReadModel());
+    expect([...readModel.projects.keys()]).toEqual([asProjectId("project-same-root-1")]);
+
+    await system.dispose();
+  });
+
   it("rejects duplicate thread creation", async () => {
     const system = await createOrchestrationSystem();
     const { engine } = system;
@@ -1004,5 +1098,239 @@ describe("OrchestrationEngine", () => {
     ).rejects.toThrow("already exists");
 
     await system.dispose();
+  });
+
+  const createProjectWithThreads = async (
+    system: Awaited<ReturnType<typeof createOrchestrationSystem>>,
+    prefix: string,
+    threadIds: ReadonlyArray<string>,
+  ) => {
+    const createdAt = now();
+    await system.run(
+      system.engine.dispatch({
+        type: "project.create",
+        commandId: CommandId.makeUnsafe(`cmd-${prefix}-project-create`),
+        projectId: asProjectId(`project-${prefix}`),
+        title: `Project ${prefix}`,
+        workspaceRoot: `/tmp/project-${prefix}`,
+        defaultModelSelection: { provider: "codex", model: "gpt-5-codex" },
+        createdAt,
+      }),
+    );
+    for (const threadId of threadIds) {
+      await system.run(
+        system.engine.dispatch({
+          type: "thread.create",
+          commandId: CommandId.makeUnsafe(`cmd-${threadId}-create`),
+          threadId: ThreadId.makeUnsafe(threadId),
+          projectId: asProjectId(`project-${prefix}`),
+          title: threadId,
+          modelSelection: { provider: "codex", model: "gpt-5-codex" },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          branch: null,
+          worktreePath: null,
+          createdAt,
+        }),
+      );
+    }
+  };
+
+  const turnStartCommand = (commandId: string, threadId: string, messageId: string) =>
+    ({
+      type: "thread.turn.start",
+      commandId: CommandId.makeUnsafe(commandId),
+      threadId: ThreadId.makeUnsafe(threadId),
+      message: {
+        messageId: asMessageId(messageId),
+        role: "user",
+        text: "hello",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: now(),
+    }) as const;
+
+  const createBranchThread = async (
+    system: Awaited<ReturnType<typeof createOrchestrationSystem>>,
+    prefix: string,
+    branch: string,
+    worktreePath: string | null,
+  ) => {
+    const createdAt = now();
+    await system.run(
+      system.engine.dispatch({
+        type: "project.create",
+        commandId: CommandId.makeUnsafe(`cmd-${prefix}-project-create`),
+        projectId: asProjectId(`project-${prefix}`),
+        title: prefix,
+        workspaceRoot: `/tmp/project-${prefix}`,
+        defaultModelSelection: { provider: "codex", model: "gpt-5-codex" },
+        createdAt,
+      }),
+    );
+    await system.run(
+      system.engine.dispatch({
+        type: "thread.create",
+        commandId: CommandId.makeUnsafe(`cmd-${prefix}-thread-create`),
+        threadId: ThreadId.makeUnsafe(`thread-${prefix}`),
+        projectId: asProjectId(`project-${prefix}`),
+        title: prefix,
+        modelSelection: { provider: "codex", model: "gpt-5-codex" },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        branch,
+        worktreePath,
+        createdAt,
+      }),
+    );
+  };
+
+  it("does not regress a renamed branch to a stale temporary worktree branch", async () => {
+    const system = await createOrchestrationSystem();
+    await createBranchThread(
+      system,
+      "branch-race",
+      "piedpiper/generated-branch-name",
+      "/tmp/project-branch-race-worktree",
+    );
+
+    await system.run(
+      system.engine.dispatch({
+        type: "thread.meta.update",
+        commandId: CommandId.makeUnsafe("cmd-stale-temporary-branch-sync"),
+        threadId: ThreadId.makeUnsafe("thread-branch-race"),
+        branch: "piedpiper/1234abcd",
+        expectedBranch: "piedpiper/1234abcd",
+        worktreePath: "/tmp/stale-worktree",
+      }),
+    );
+
+    const readModel = await system.run(system.engine.getReadModel());
+    const thread = readModel.threads.get(ThreadId.makeUnsafe("thread-branch-race"));
+    expect(thread?.branch).toBe("piedpiper/generated-branch-name");
+    expect(thread?.worktreePath).toBe("/tmp/project-branch-race-worktree");
+    await system.dispose();
+  });
+
+  it("applies a branch sync whose expected branch matches, and unguarded updates", async () => {
+    const system = await createOrchestrationSystem();
+    await createBranchThread(system, "branch-sync", "main", null);
+
+    await system.run(
+      system.engine.dispatch({
+        type: "thread.meta.update",
+        commandId: CommandId.makeUnsafe("cmd-branch-sync-guarded"),
+        threadId: ThreadId.makeUnsafe("thread-branch-sync"),
+        branch: "feature/a",
+        expectedBranch: "main",
+      }),
+    );
+    let readModel = await system.run(system.engine.getReadModel());
+    expect(readModel.threads.get(ThreadId.makeUnsafe("thread-branch-sync"))?.branch).toBe(
+      "feature/a",
+    );
+
+    await system.run(
+      system.engine.dispatch({
+        type: "thread.meta.update",
+        commandId: CommandId.makeUnsafe("cmd-branch-sync-authoritative"),
+        threadId: ThreadId.makeUnsafe("thread-branch-sync"),
+        branch: "piedpiper/1234abcd",
+        worktreePath: "/tmp/project-branch-sync-worktree",
+      }),
+    );
+    readModel = await system.run(system.engine.getReadModel());
+    const thread = readModel.threads.get(ThreadId.makeUnsafe("thread-branch-sync"));
+    expect(thread?.branch).toBe("piedpiper/1234abcd");
+    expect(thread?.worktreePath).toBe("/tmp/project-branch-sync-worktree");
+    await system.dispose();
+  });
+
+  it("replays the accepted receipt for a genuine retry of the same command", async () => {
+    const system = await createOrchestrationSystem();
+    await createProjectWithThreads(system, "retry", ["thread-retry"]);
+
+    const turnStart = turnStartCommand("cmd-retry-turn-start", "thread-retry", "msg-retry");
+    const first = await system.run(system.engine.dispatch(turnStart));
+    const second = await system.run(system.engine.dispatch(turnStart));
+    expect(second.sequence).toBe(first.sequence);
+
+    const readModel = await system.run(system.engine.getReadModel());
+    const thread = readModel.threads.get(ThreadId.makeUnsafe("thread-retry"));
+    expect(thread?.messages.filter((message) => message.role === "user")).toHaveLength(1);
+
+    await system.dispose();
+  });
+
+  it("rejects reusing an accepted command id for a different aggregate", async () => {
+    const system = await createOrchestrationSystem();
+    await createProjectWithThreads(system, "conflict", ["thread-conflict-a", "thread-conflict-b"]);
+
+    await system.run(
+      system.engine.dispatch(
+        turnStartCommand("cmd-conflict-turn-start", "thread-conflict-a", "msg-conflict-a"),
+      ),
+    );
+    await expect(
+      system.run(
+        system.engine.dispatch(
+          turnStartCommand("cmd-conflict-turn-start", "thread-conflict-b", "msg-conflict-b"),
+        ),
+      ),
+    ).rejects.toThrow("already used for thread 'thread-conflict-a'");
+
+    const readModel = await system.run(system.engine.getReadModel());
+    const targetThread = readModel.threads.get(ThreadId.makeUnsafe("thread-conflict-b"));
+    expect(targetThread?.messages.filter((message) => message.role === "user")).toHaveLength(0);
+
+    await system.dispose();
+  });
+
+  it("does not republish another server's events when a local dispatch fails", async () => {
+    const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "piedpiper-shared-db-"));
+    const databasePath = NodePath.join(directory, "state.sqlite");
+    const serverA = await createOrchestrationSystem(databasePath);
+    const serverB = await createOrchestrationSystem(databasePath);
+    const threadId = ThreadId.makeUnsafe("thread-shared");
+    const sentinelCommandId = CommandId.makeUnsafe("cmd-shared-rename");
+    try {
+      await createProjectWithThreads(serverA, "shared", ["thread-shared"]);
+      await serverA.run(
+        serverA.engine.dispatch(turnStartCommand("cmd-shared-turn-start", threadId, "msg-shared")),
+      );
+
+      const published = await serverB.run(
+        Effect.gen(function* () {
+          const subscription = yield* serverB.engine.subscribeDomainEvents();
+          // B's read model predates A's writes, so this fails and reconciles from the store.
+          yield* serverB.engine
+            .dispatch({
+              type: "thread.meta.update",
+              commandId: CommandId.makeUnsafe("cmd-shared-stale-rename"),
+              threadId,
+              title: "stale",
+            })
+            .pipe(Effect.flip);
+          yield* serverB.engine.dispatch({
+            type: "thread.meta.update",
+            commandId: sentinelCommandId,
+            threadId,
+            title: "renamed on B",
+          });
+          return yield* PubSub.takeAll(subscription);
+        }).pipe(Effect.scoped),
+      );
+
+      expect(published.map((event) => event.type)).toEqual(["thread.meta-updated"]);
+      expect(published[0]?.commandId).toBe(sentinelCommandId);
+      const readModel = await serverB.run(serverB.engine.getReadModel());
+      expect(readModel.threads.get(threadId)?.title).toBe("renamed on B");
+    } finally {
+      await serverA.dispose();
+      await serverB.dispose();
+      await NodeFSP.rm(directory, { recursive: true, force: true });
+    }
   });
 });

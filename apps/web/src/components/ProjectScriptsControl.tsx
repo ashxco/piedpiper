@@ -1,4 +1,5 @@
 import type {
+  ProjectConfigFileScript,
   ProjectScript,
   ProjectScriptIcon,
   ResolvedKeybindingsConfig,
@@ -14,17 +15,22 @@ import {
   SettingsIcon,
   WrenchIcon,
 } from "lucide-react";
-import React, { type FormEvent, type KeyboardEvent, useCallback, useMemo, useState } from "react";
+import React, { type FormEvent, type KeyboardEvent, useMemo, useState } from "react";
 
 import {
   keybindingValueForCommand,
   decodeProjectScriptKeybindingRule,
+  PROJECT_SCRIPT_KEYBINDING_INVALID_MESSAGE,
 } from "~/lib/projectScriptKeybindings";
 import {
-  commandForProjectScript,
+  commandForProjectScriptSafe,
   nextProjectScriptId,
   primaryProjectScript,
 } from "~/projectScripts";
+import {
+  importableProjectConfigScripts,
+  newProjectScriptInputFromConfigScript,
+} from "~/projectConfigFileScripts";
 import { shortcutLabelForCommand } from "~/keybindings";
 import { isMacPlatform } from "~/lib/utils";
 import {
@@ -49,7 +55,16 @@ import {
 import { Group, GroupSeparator } from "./ui/group";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
-import { Menu, MenuItem, MenuPopup, MenuShortcut, MenuTrigger } from "./ui/menu";
+import {
+  Menu,
+  MenuGroup,
+  MenuGroupLabel,
+  MenuItem,
+  MenuPopup,
+  MenuSeparator,
+  MenuShortcut,
+  MenuTrigger,
+} from "./ui/menu";
 import { Popover, PopoverPopup, PopoverTrigger } from "./ui/popover";
 import { Switch } from "./ui/switch";
 import { Textarea } from "./ui/textarea";
@@ -94,6 +109,8 @@ interface ProjectScriptsControlProps {
   onAddScript: (input: NewProjectScriptInput) => Promise<void> | void;
   onUpdateScript: (scriptId: string, input: NewProjectScriptInput) => Promise<void> | void;
   onDeleteScript: (scriptId: string) => Promise<void> | void;
+  /** Scripts declared in the project's piedpiper.json; unconfigured ones are offered for import. */
+  fileScripts?: ReadonlyArray<ProjectConfigFileScript>;
 }
 
 function normalizeShortcutKeyToken(key: string): string | null {
@@ -155,9 +172,11 @@ export default function ProjectScriptsControl({
   onAddScript,
   onUpdateScript,
   onDeleteScript,
+  fileScripts = [],
 }: ProjectScriptsControlProps) {
   const addScriptFormId = React.useId();
   const [editingScriptId, setEditingScriptId] = useState<string | null>(null);
+  const [actionsMenuOpen, setActionsMenuOpen] = useState(false);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [name, setName] = useState("");
   const [command, setCommand] = useState("");
@@ -175,6 +194,7 @@ export default function ProjectScriptsControl({
     }
     return primaryProjectScript(scripts);
   }, [preferredScriptId, scripts]);
+  const importableScripts = importableProjectConfigScripts(fileScripts, scripts);
   const isEditing = editingScriptId !== null;
   const dropdownItemClassName =
     "data-highlighted:bg-transparent data-highlighted:text-foreground hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground data-highlighted:hover:bg-accent data-highlighted:hover:text-accent-foreground data-highlighted:focus-visible:bg-accent data-highlighted:focus-visible:text-accent-foreground";
@@ -205,17 +225,22 @@ export default function ProjectScriptsControl({
     }
 
     setValidationError(null);
-    try {
+    // Kept out of the try block: the React Compiler cannot compile conditionals inside try/catch.
+    const saveScript = async () => {
       const scriptIdForValidation =
         editingScriptId ??
         nextProjectScriptId(
           trimmedName,
           scripts.map((script) => script.id),
         );
-      const keybindingRule = decodeProjectScriptKeybindingRule({
-        keybinding,
-        command: commandForProjectScript(scriptIdForValidation),
-      });
+      const scriptCommand = commandForProjectScriptSafe(scriptIdForValidation);
+      if (!scriptCommand && keybinding.trim().length > 0) {
+        setValidationError(PROJECT_SCRIPT_KEYBINDING_INVALID_MESSAGE);
+        return;
+      }
+      const keybindingRule = scriptCommand
+        ? decodeProjectScriptKeybindingRule({ keybinding, command: scriptCommand })
+        : null;
       const payload = {
         name: trimmedName,
         command: trimmedCommand,
@@ -230,6 +255,9 @@ export default function ProjectScriptsControl({
       }
       setDialogOpen(false);
       setIconPickerOpen(false);
+    };
+    try {
+      await saveScript();
     } catch (error) {
       setValidationError(error instanceof Error ? error.message : "Failed to save action.");
     }
@@ -248,23 +276,69 @@ export default function ProjectScriptsControl({
   };
 
   const openEditDialog = (script: ProjectScript) => {
+    setActionsMenuOpen(false);
     setEditingScriptId(script.id);
     setName(script.name);
     setCommand(script.command);
     setIcon(script.icon);
     setIconPickerOpen(false);
     setRunOnWorktreeCreate(script.runOnWorktreeCreate);
-    setKeybinding(keybindingValueForCommand(keybindings, commandForProjectScript(script.id)) ?? "");
+    const scriptCommand = commandForProjectScriptSafe(script.id);
+    setKeybinding(
+      scriptCommand ? (keybindingValueForCommand(keybindings, scriptCommand) ?? "") : "",
+    );
     setValidationError(null);
     setDialogOpen(true);
   };
 
-  const confirmDeleteScript = useCallback(() => {
+  // Opens the add dialog prefilled, so the user reviews the untrusted command and the
+  // setup-script toggle before anything is saved.
+  const importConfigScript = (fileScript: ProjectConfigFileScript) => {
+    setActionsMenuOpen(false);
+    const input = newProjectScriptInputFromConfigScript(fileScript);
+    setEditingScriptId(null);
+    setName(input.name);
+    setCommand(input.command);
+    setIcon(input.icon);
+    setIconPickerOpen(false);
+    setRunOnWorktreeCreate(input.runOnWorktreeCreate);
+    setKeybinding("");
+    setValidationError(null);
+    setDialogOpen(true);
+  };
+
+  const importableScriptsGroup =
+    importableScripts.length > 0 ? (
+      <>
+        <MenuGroup>
+          <MenuGroupLabel>From piedpiper.json</MenuGroupLabel>
+          {importableScripts.map((fileScript) => (
+            <MenuItem
+              key={fileScript.name}
+              className={dropdownItemClassName}
+              onClick={() => importConfigScript(fileScript)}
+              title={fileScript.command}
+            >
+              <ScriptIcon icon={fileScript.icon ?? "play"} className="size-4" />
+              <span className="flex min-w-0 flex-col">
+                <span className="truncate">{fileScript.name}</span>
+                <span className="truncate font-mono text-muted-foreground text-xs">
+                  {fileScript.command}
+                </span>
+              </span>
+            </MenuItem>
+          ))}
+        </MenuGroup>
+        <MenuSeparator />
+      </>
+    ) : null;
+
+  const confirmDeleteScript = () => {
     if (!editingScriptId) return;
     setDeleteConfirmOpen(false);
     setDialogOpen(false);
     void onDeleteScript(editingScriptId);
-  }, [editingScriptId, onDeleteScript]);
+  };
 
   return (
     <>
@@ -282,7 +356,11 @@ export default function ProjectScriptsControl({
             </span>
           </Button>
           <GroupSeparator className="hidden @3xl/header-actions:block" />
-          <Menu highlightItemOnHover={false}>
+          <Menu
+            highlightItemOnHover={false}
+            open={actionsMenuOpen}
+            onOpenChange={setActionsMenuOpen}
+          >
             <MenuTrigger
               render={<Button size="icon-xs" variant="outline" aria-label="Script actions" />}
             >
@@ -290,10 +368,10 @@ export default function ProjectScriptsControl({
             </MenuTrigger>
             <MenuPopup align="end">
               {scripts.map((script) => {
-                const shortcutLabel = shortcutLabelForCommand(
-                  keybindings,
-                  commandForProjectScript(script.id),
-                );
+                const scriptCommand = commandForProjectScriptSafe(script.id);
+                const shortcutLabel = scriptCommand
+                  ? shortcutLabelForCommand(keybindings, scriptCommand)
+                  : null;
                 return (
                   <MenuItem
                     key={script.id}
@@ -332,6 +410,7 @@ export default function ProjectScriptsControl({
                   </MenuItem>
                 );
               })}
+              {importableScriptsGroup}
               <MenuItem className={dropdownItemClassName} onClick={openAddDialog}>
                 <PlusIcon className="size-4" />
                 Add action
@@ -339,6 +418,22 @@ export default function ProjectScriptsControl({
             </MenuPopup>
           </Menu>
         </Group>
+      ) : importableScriptsGroup ? (
+        <Menu highlightItemOnHover={false} open={actionsMenuOpen} onOpenChange={setActionsMenuOpen}>
+          <MenuTrigger render={<Button size="xs" variant="outline" title="Add action" />}>
+            <PlusIcon className="size-3.5" />
+            <span className="sr-only @3xl/header-actions:not-sr-only @3xl/header-actions:ml-0.5">
+              Add action
+            </span>
+          </MenuTrigger>
+          <MenuPopup align="end">
+            {importableScriptsGroup}
+            <MenuItem className={dropdownItemClassName} onClick={openAddDialog}>
+              <PlusIcon className="size-4" />
+              Add action
+            </MenuItem>
+          </MenuPopup>
+        </Menu>
       ) : (
         <Button size="xs" variant="outline" onClick={openAddDialog} title="Add action">
           <PlusIcon className="size-3.5" />
@@ -431,6 +526,7 @@ export default function ProjectScriptsControl({
                 <Label htmlFor="script-keybinding">Keybinding</Label>
                 <Input
                   id="script-keybinding"
+                  data-keybinding-capture=""
                   placeholder="Press shortcut"
                   value={keybinding}
                   readOnly

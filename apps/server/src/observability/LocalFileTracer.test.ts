@@ -32,6 +32,71 @@ const readTraceRecords = (tracePath: string): Array<TraceRecord> =>
     .map((line) => JSON.parse(line) as TraceRecord);
 
 describe("LocalFileTracer", () => {
+  it.effect("clamps long attributes in the file records but not on the live span", () =>
+    Effect.gen(function* () {
+      const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "piedpiper-local-tracer-"));
+      const tracePath = path.join(tempDir, "server.trace.ndjson");
+      const long = "l".repeat(2_000);
+      const clamped = `${"l".repeat(500)}…[truncated]`;
+
+      try {
+        const liveValue = yield* Effect.gen(function* () {
+          yield* Effect.annotateCurrentSpan({ long });
+          yield* Effect.logInfo("with annotation").pipe(Effect.annotateLogs({ long }));
+          const span = yield* Effect.currentSpan;
+          return span.attributes.get("long");
+        }).pipe(
+          Effect.withSpan("clamped-span"),
+          Effect.provide(makeTestLayer(tracePath)),
+          Effect.scoped,
+        );
+
+        assert.strictEqual(liveValue, long);
+        const [record] = readTraceRecords(tracePath);
+        assert.strictEqual(record?.attributes["long"], clamped);
+        assert.strictEqual(record?.events[0]?.attributes["long"], clamped);
+      } finally {
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      }
+    }),
+  );
+
+  it.effect("writes through a provided sink instead of opening its own file", () =>
+    Effect.gen(function* () {
+      const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "piedpiper-local-tracer-"));
+      const tracePath = path.join(tempDir, "server.trace.ndjson");
+      const pushed: Array<TraceRecord> = [];
+
+      try {
+        const tracer = yield* makeLocalFileTracer({
+          filePath: tracePath,
+          maxBytes: 1024 * 1024,
+          maxFiles: 2,
+          batchWindowMs: 10_000,
+          sink: {
+            filePath: tracePath,
+            push: (record) => void pushed.push(record),
+            flush: Effect.void,
+            close: () => Effect.void,
+          },
+        });
+
+        yield* Effect.void.pipe(
+          Effect.withSpan("shared-sink-span"),
+          Effect.provideService(Tracer.Tracer, tracer),
+        );
+
+        assert.deepEqual(
+          pushed.map((record) => record.name),
+          ["shared-sink-span"],
+        );
+        assert.equal(fs.existsSync(tracePath), false);
+      } finally {
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      }
+    }).pipe(Effect.scoped),
+  );
+
   it.effect("writes nested spans to disk and captures log messages as span events", () =>
     Effect.gen(function* () {
       const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "piedpiper-local-tracer-"));

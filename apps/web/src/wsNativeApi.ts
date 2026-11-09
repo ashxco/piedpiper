@@ -1,5 +1,6 @@
 import { type ContextMenuItem, type NativeApi } from "@piedpiper/contracts";
 
+import { requestConfirmDialog } from "./confirmDialog";
 import { showContextMenuFallback } from "./contextMenuFallback";
 import { resetServerStateForTests } from "./rpc/serverState";
 import { __resetWsRpcClientForTests, getWsRpcClient } from "./wsRpcClient";
@@ -18,6 +19,7 @@ export function createWsNativeApi(): NativeApi {
   }
 
   const rpcClient = getWsRpcClient();
+  const pickProjectFavicon = window.desktopBridge?.pickProjectFavicon;
 
   const api: NativeApi = {
     dialogs: {
@@ -25,7 +27,11 @@ export function createWsNativeApi(): NativeApi {
         if (!window.desktopBridge) return null;
         return window.desktopBridge.pickFolder();
       },
+      // Stays absent outside the desktop shell: Sidebar hides its menu item on that basis.
+      ...(pickProjectFavicon ? { pickProjectFavicon } : {}),
       confirm: async (message) => {
+        const themed = requestConfirmDialog(message);
+        if (themed) return themed;
         if (window.desktopBridge) {
           return window.desktopBridge.confirm(message);
         }
@@ -48,14 +54,19 @@ export function createWsNativeApi(): NativeApi {
       // @ts-expect-error — `.Encoded` vs `.Type` mismatch on terminalId default
       restart: (input) => rpcClient.terminal.restart(input),
       close: (input) => rpcClient.terminal.close(input),
-      onEvent: (callback) => rpcClient.terminal.onEvent(callback),
+      onEvent: (callback, options?: { readonly onSubscribed?: () => void }) =>
+        rpcClient.terminal.onEvent(callback, options),
+      onMetadata: (callback) => rpcClient.terminal.onMetadata(callback),
     },
     projects: {
       searchEntries: rpcClient.projects.searchEntries,
       writeFile: rpcClient.projects.writeFile,
+      readConfigFile: rpcClient.projects.readConfigFile,
+      scanAgentSessions: rpcClient.projects.scanAgentSessions,
     },
     shell: {
-      openInEditor: (cwd, editor) => rpcClient.shell.openInEditor({ cwd, editor }),
+      openInEditor: (cwd, editor, options?: { readonly reveal?: boolean }) =>
+        rpcClient.shell.openInEditor({ cwd, editor, ...(options?.reveal ? { reveal: true } : {}) }),
       openExternal: async (url) => {
         if (window.desktopBridge) {
           const opened = await window.desktopBridge.openExternal(url);
@@ -71,12 +82,15 @@ export function createWsNativeApi(): NativeApi {
     git: {
       pull: rpcClient.git.pull,
       status: rpcClient.git.status,
+      diffPreview: rpcClient.git.diffPreview,
       listBranches: rpcClient.git.listBranches,
       createWorktree: rpcClient.git.createWorktree,
+      createWorktreeWithProgress: rpcClient.git.createWorktreeWithProgress,
       removeWorktree: rpcClient.git.removeWorktree,
       createBranch: rpcClient.git.createBranch,
       checkout: rpcClient.git.checkout,
       init: rpcClient.git.init,
+      cloneRepository: rpcClient.git.cloneRepository,
       addRemote: rpcClient.git.addRemote,
       gitHubCliStatus: rpcClient.git.gitHubCliStatus,
       gitHubCreateRepo: rpcClient.git.gitHubCreateRepo,
@@ -97,15 +111,22 @@ export function createWsNativeApi(): NativeApi {
     server: {
       getConfig: rpcClient.server.getConfig,
       refreshProviders: rpcClient.server.refreshProviders,
+      listProviderSlashCommands: rpcClient.server.listProviderSlashCommands,
       upsertKeybinding: rpcClient.server.upsertKeybinding,
+      removeKeybinding: rpcClient.server.removeKeybinding,
       getSettings: rpcClient.server.getSettings,
       updateSettings: rpcClient.server.updateSettings,
+      getTraceDiagnostics: rpcClient.server.getTraceDiagnostics,
+      getProcessDiagnostics: rpcClient.server.getProcessDiagnostics,
+      signalProcess: rpcClient.server.signalProcess,
+      checkOtlpEndpoint: rpcClient.server.checkOtlpEndpoint,
     },
     orchestration: {
       getSnapshot: rpcClient.orchestration.getSnapshot,
       dispatchCommand: rpcClient.orchestration.dispatchCommand,
       getTurnDiff: rpcClient.orchestration.getTurnDiff,
       getFullThreadDiff: rpcClient.orchestration.getFullThreadDiff,
+      getTurnDiffFileContents: rpcClient.orchestration.getTurnDiffFileContents,
       replayEvents: (fromSequenceExclusive) =>
         rpcClient.orchestration
           .replayEvents({ fromSequenceExclusive })

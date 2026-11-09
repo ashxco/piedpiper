@@ -1,7 +1,14 @@
-import { Duration, Effect, Exit, Metric, Stream } from "effect";
+import { Effect, Exit, Metric, Stream } from "effect";
 
 import { outcomeFromExit } from "./Attributes.ts";
-import { metricAttributes, rpcRequestDuration, rpcRequestsTotal, withMetrics } from "./Metrics.ts";
+import {
+  elapsedSince,
+  metricAttributes,
+  monotonicTimeNanos,
+  rpcRequestDuration,
+  rpcRequestsTotal,
+  withMetrics,
+} from "./Metrics.ts";
 
 const annotateRpcSpan = (
   method: string,
@@ -14,13 +21,13 @@ const annotateRpcSpan = (
 
 const recordRpcStreamMetrics = <E>(
   method: string,
-  startedAt: number,
+  startedAt: bigint,
   exit: Exit.Exit<unknown, E>,
 ): Effect.Effect<void, never, never> =>
   Effect.gen(function* () {
     yield* Metric.update(
       Metric.withAttributes(rpcRequestDuration, metricAttributes({ method })),
-      Duration.millis(Math.max(0, Date.now() - startedAt)),
+      yield* elapsedSince(startedAt),
     );
     yield* Metric.update(
       Metric.withAttributes(
@@ -61,7 +68,7 @@ export const observeRpcStream = <A, E, R>(
   Stream.unwrap(
     Effect.gen(function* () {
       yield* annotateRpcSpan(method, traceAttributes);
-      const startedAt = Date.now();
+      const startedAt = yield* monotonicTimeNanos;
       return stream.pipe(Stream.onExit((exit) => recordRpcStreamMetrics(method, startedAt, exit)));
     }),
   );
@@ -74,15 +81,12 @@ export const observeRpcStreamEffect = <A, StreamError, StreamContext, EffectErro
   Stream.unwrap(
     Effect.gen(function* () {
       yield* annotateRpcSpan(method, traceAttributes);
-      const startedAt = Date.now();
-      const exit = yield* Effect.exit(effect);
-
-      if (Exit.isFailure(exit)) {
-        yield* recordRpcStreamMetrics(method, startedAt, exit);
-        return yield* Effect.failCause(exit.cause);
-      }
-
-      return exit.value.pipe(
+      const startedAt = yield* monotonicTimeNanos;
+      // onError also runs when the stream is interrupted before it is produced.
+      const stream = yield* effect.pipe(
+        Effect.onError((cause) => recordRpcStreamMetrics(method, startedAt, Exit.failCause(cause))),
+      );
+      return stream.pipe(
         Stream.onExit((streamExit) => recordRpcStreamMetrics(method, startedAt, streamExit)),
       );
     }),

@@ -10,6 +10,8 @@ const OfficeMode = lazy(() =>
   import("../components/office-mode/OfficeMode").then((mod) => ({ default: mod.OfficeMode })),
 );
 import { SidebarInset } from "../components/ui/sidebar";
+import { isProjectVisibleWhenArchiveAware } from "../lib/projectArchive";
+import { workspaceAreaProps } from "../lib/workspaceFocus";
 import { useStore } from "../store";
 import { useUserProjects } from "../storeSelectors";
 
@@ -19,7 +21,7 @@ function VirtualOfficePage() {
   const threadIdsByProjectId = useStore((store) => store.threadIdsByProjectId);
 
   const projectThreads = useMemo(() => {
-    return projects.map((project) => {
+    return projects.flatMap((project) => {
       const threadIds = threadIdsByProjectId[project.id] ?? [];
       const threads = threadIds
         .map((id: ThreadId) => sidebarThreadsById[id])
@@ -30,12 +32,16 @@ function VirtualOfficePage() {
           const bTime = b.updatedAt ?? b.createdAt;
           return bTime.localeCompare(aTime);
         });
-      return { project, threads };
+      return isProjectVisibleWhenArchiveAware(project, threads) ? [{ project, threads }] : [];
     });
   }, [projects, sidebarThreadsById, threadIdsByProjectId]);
 
   return (
-    <SidebarInset className="overflow-hidden bg-transparent flex flex-col h-full relative">
+    <SidebarInset
+      {...workspaceAreaProps("office", 1, "Virtual office")}
+      role="main"
+      className="overflow-hidden bg-transparent flex flex-col h-full relative"
+    >
       <div className="drag-region absolute top-0 left-0 right-0 z-[999999] h-[52px]" />
       <Suspense fallback={null}>
         <OfficeMode projectThreads={projectThreads} />

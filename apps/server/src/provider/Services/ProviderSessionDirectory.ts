@@ -49,6 +49,12 @@ export interface ProviderSessionDirectoryShape {
     ReadonlyArray<ThreadId>,
     ProviderSessionDirectoryPersistenceError
   >;
+
+  /** Every persisted binding in one read; rows with an unknown provider are skipped. */
+  readonly listBindings?: () => Effect.Effect<
+    ReadonlyArray<ProviderRuntimeBinding>,
+    ProviderSessionDirectoryPersistenceError
+  >;
 }
 
 export class ProviderSessionDirectory extends ServiceMap.Service<

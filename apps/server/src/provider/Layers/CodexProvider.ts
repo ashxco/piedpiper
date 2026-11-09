@@ -20,19 +20,23 @@ import {
   Stream,
 } from "effect";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
+import { readCustomModelEntries } from "@piedpiper/shared/serverSettings";
 
+import { applyCustomModelDetails, customModelDetailsBySlug } from "../customModelDetails";
 import {
+  AUTH_PROBE_TIMEOUT_MS,
   buildServerProvider,
+  collectStreamAsString,
   DEFAULT_TIMEOUT_MS,
   detailFromResult,
   extractAuthBoolean,
   isCommandMissingCause,
   parseGenericCliVersion,
   providerModelsFromSettings,
-  spawnAndCollect,
   type CommandResult,
 } from "../providerSnapshot";
 import { makeManagedServerProvider } from "../makeManagedServerProvider";
+import { CODEX_CLI_MAINTENANCE, makeProviderWithVersionAdvisory } from "../providerMaintenance";
 import {
   formatCodexCliUpgradeMessage,
   isCodexCliVersionSupported,
@@ -40,18 +44,62 @@ import {
 } from "../codexCliVersion";
 import {
   adjustCodexModelsForAccount,
+  applyConfiguredCodexServiceTier,
   codexAuthSubLabel,
   codexAuthSubType,
   type CodexAccountSnapshot,
 } from "../codexAccount";
-import { probeCodexAccount } from "../codexAppServer";
+import {
+  CODEX_ACCOUNT_PROBE_TIMEOUT_MS,
+  CodexAppServerEarlyExitError,
+  probeCodexAccount,
+} from "../codexAppServer";
+import { codexHomeEnv, expandCodexHomePath } from "../../codex/homePath";
+import { resolveSpawnCommand, WindowsCommandLineError } from "@piedpiper/shared/windowsCommand";
 import { CodexProvider } from "../Services/CodexProvider";
 import { ServerSettingsService } from "../../serverSettings";
 import { ServerSettingsError } from "@piedpiper/contracts";
+import { isWindowsCommandNotFound } from "../../processRunner";
+import { formatMissingCodexCliMessage } from "../providerMissingCliMessage";
+import { PIEDPIPER_CODEX_LAUNCH_ARGS_ENV, resolveCodexLaunchArgs } from "../codexLaunchArgs";
+import { withProviderUsageLimits } from "../providerUsageLimits";
+import { codexAccountUsageLimits } from "./CodexUsageLimits";
 
 const PROVIDER = "codex" as const;
 const OPENAI_AUTH_PROVIDERS = new Set(["openai"]);
+const CURRENT_CODEX_CAPABILITIES: ModelCapabilities = {
+  reasoningEffortLevels: [
+    { value: "xhigh", label: "Extra High" },
+    { value: "high", label: "High" },
+    { value: "medium", label: "Medium", isDefault: true },
+    { value: "low", label: "Low" },
+  ],
+  supportsFastMode: true,
+  supportsThinkingToggle: false,
+  contextWindowOptions: [],
+  promptInjectedEffortLevels: [],
+};
+
+/** Fallback when `codex app-server` cannot list its models. */
 const BUILT_IN_MODELS: ReadonlyArray<ServerProviderModel> = [
+  {
+    slug: "gpt-6-astra",
+    name: "GPT-6 Astra",
+    isCustom: false,
+    capabilities: CURRENT_CODEX_CAPABILITIES,
+  },
+  {
+    slug: "gpt-6.1-sol",
+    name: "GPT-6.1 Sol",
+    isCustom: false,
+    capabilities: CURRENT_CODEX_CAPABILITIES,
+  },
+  {
+    slug: "gpt-6-luna",
+    name: "GPT-6 Luna",
+    isCustom: false,
+    capabilities: CURRENT_CODEX_CAPABILITIES,
+  },
   {
     slug: "gpt-5.4",
     name: "GPT-5.4",
@@ -156,16 +204,40 @@ const BUILT_IN_MODELS: ReadonlyArray<ServerProviderModel> = [
   },
 ];
 
+/** Capabilities set on custom models in settings; they beat the default for an unknown slug. */
+const customModelCapabilities = new Map<string, ModelCapabilities>();
+
 export function getCodexModelCapabilities(model: string | null | undefined): ModelCapabilities {
   const slug = model?.trim();
   return (
-    BUILT_IN_MODELS.find((candidate) => candidate.slug === slug)?.capabilities ?? {
-      reasoningEffortLevels: [],
-      supportsFastMode: false,
-      supportsThinkingToggle: false,
-      contextWindowOptions: [],
-      promptInjectedEffortLevels: [],
-    }
+    BUILT_IN_MODELS.find((candidate) => candidate.slug === slug)?.capabilities ??
+    (slug ? customModelCapabilities.get(slug) : undefined) ??
+    CURRENT_CODEX_CAPABILITIES
+  );
+}
+
+const readCodexCustomModelDetails = (codexSettings: CodexSettings) =>
+  customModelDetailsBySlug(PROVIDER, readCustomModelEntries(codexSettings));
+
+function registerCodexCustomModelCapabilities(codexSettings: CodexSettings) {
+  customModelCapabilities.clear();
+  for (const [slug, entry] of readCodexCustomModelDetails(codexSettings)) {
+    if (entry.capabilities) customModelCapabilities.set(slug, entry.capabilities);
+  }
+}
+
+function codexModelsFromSettings(
+  baseModels: ReadonlyArray<ServerProviderModel>,
+  codexSettings: CodexSettings,
+): ReadonlyArray<ServerProviderModel> {
+  return applyCustomModelDetails(
+    providerModelsFromSettings(
+      baseModels,
+      PROVIDER,
+      codexSettings.customModels,
+      CURRENT_CODEX_CAPABILITIES,
+    ),
+    readCodexCustomModelDetails(codexSettings),
   );
 }
 
@@ -254,11 +326,12 @@ export const readCodexConfigModelProvider = Effect.fn("readCodexConfigModelProvi
   const path = yield* Path.Path;
   const settingsService = yield* ServerSettingsService;
   const codexHome = yield* settingsService.getSettings.pipe(
-    Effect.map(
-      (settings) =>
+    Effect.map((settings) =>
+      expandCodexHomePath(
         settings.providers.codex.homePath ||
-        process.env.CODEX_HOME ||
-        path.join(OS.homedir(), ".codex"),
+          process.env.CODEX_HOME ||
+          path.join(OS.homedir(), ".codex"),
+      ),
     ),
   );
   const configPath = path.join(codexHome, "config.toml");
@@ -291,41 +364,127 @@ export const hasCustomModelProvider = readCodexConfigModelProvider().pipe(
   Effect.orElseSucceed(() => false),
 );
 
-const CAPABILITIES_PROBE_TIMEOUT_MS = 8_000;
+const CAPABILITIES_PROBE_TIMEOUT_MS = CODEX_ACCOUNT_PROBE_TIMEOUT_MS;
+// `codex login status` can exceed the 4 s default on slow machines and show a bogus auth warning.
+export const CODEX_AUTH_PROBE_TIMEOUT_MS = AUTH_PROBE_TIMEOUT_MS;
+const CODEX_PROBE_FORCE_KILL_AFTER = "1 second";
+
+/** The account probe's app-server exited at startup; `detail` is its exit reason. */
+export interface CodexAppServerStartupFailure {
+  readonly _tag: "CodexAppServerStartupFailure";
+  readonly detail: string;
+}
+
+const isCodexAppServerStartupFailure = (
+  value: CodexAccountSnapshot | CodexAppServerStartupFailure | undefined,
+): value is CodexAppServerStartupFailure =>
+  (value as { _tag?: unknown } | undefined)?._tag === "CodexAppServerStartupFailure";
 
 const probeCodexCapabilities = (input: {
   readonly binaryPath: string;
   readonly homePath?: string;
+  readonly launchArgs?: string;
 }) =>
-  Effect.tryPromise((signal) => probeCodexAccount({ ...input, signal })).pipe(
+  Effect.tryPromise({
+    try: (signal) =>
+      probeCodexAccount({ ...input, signal, probeTimeoutMs: CAPABILITIES_PROBE_TIMEOUT_MS }),
+    catch: (cause) => ({
+      earlyExit: cause instanceof CodexAppServerEarlyExitError,
+      detail: cause instanceof Error ? cause.message : String(cause),
+    }),
+  }).pipe(
     Effect.timeoutOption(CAPABILITIES_PROBE_TIMEOUT_MS),
     Effect.result,
-    Effect.map((result) => {
-      if (Result.isFailure(result)) return undefined;
-      return Option.isSome(result.success) ? result.success.value : undefined;
-    }),
+    Effect.flatMap(
+      (result): Effect.Effect<CodexAccountSnapshot | CodexAppServerStartupFailure | undefined> => {
+        if (Result.isFailure(result)) {
+          const { earlyExit, detail } = result.failure;
+          return Effect.logWarning("codex app-server account probe failed", {
+            detail,
+            ...(input.launchArgs ? { launchArgs: input.launchArgs } : {}),
+          }).pipe(
+            Effect.as(
+              earlyExit ? ({ _tag: "CodexAppServerStartupFailure", detail } as const) : undefined,
+            ),
+          );
+        }
+        return Effect.succeed(Option.isSome(result.success) ? result.success.value : undefined);
+      },
+    ),
   );
+
+/** Like `spawnAndCollect`, but a probe interrupted by its timeout escalates to SIGKILL after 1 s. */
+export const spawnAndCollectWithForceKill = (binaryPath: string, command: ChildProcess.Command) =>
+  Effect.gen(function* () {
+    const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+    // Node's spawn throws synchronously for some errors (e.g. ENOTDIR), which surfaces as a defect.
+    const child = yield* spawner
+      .spawn(command)
+      .pipe(
+        Effect.catchDefect((defect) =>
+          Effect.fail(defect instanceof Error ? defect : new Error(String(defect))),
+        ),
+      );
+    // The spawner's forceKillAfter only bounds sending SIGTERM, not the exit wait, so escalate here.
+    yield* Effect.addFinalizer(() =>
+      child.isRunning.pipe(
+        Effect.flatMap((running) =>
+          running
+            ? child.kill().pipe(
+                Effect.timeoutOrElse({
+                  duration: CODEX_PROBE_FORCE_KILL_AFTER,
+                  orElse: () => child.kill({ killSignal: "SIGKILL" }),
+                }),
+              )
+            : Effect.void,
+        ),
+        Effect.ignore,
+      ),
+    );
+    const [stdout, stderr, exitCode] = yield* Effect.all(
+      [
+        collectStreamAsString(child.stdout),
+        collectStreamAsString(child.stderr),
+        child.exitCode.pipe(Effect.map(Number)),
+      ],
+      { concurrency: "unbounded" },
+    );
+    const result: CommandResult = { stdout, stderr, code: exitCode };
+    if (isWindowsCommandNotFound(exitCode, stderr)) {
+      return yield* Effect.fail(new Error(`spawn ${binaryPath} ENOENT`));
+    }
+    return result;
+  }).pipe(Effect.scoped);
 
 const runCodexCommand = Effect.fn("runCodexCommand")(function* (args: ReadonlyArray<string>) {
   const settingsService = yield* ServerSettingsService;
   const codexSettings = yield* settingsService.getSettings.pipe(
     Effect.map((settings) => settings.providers.codex),
   );
-  const command = ChildProcess.make(codexSettings.binaryPath, [...args], {
-    shell: process.platform === "win32",
-    env: {
-      ...process.env,
-      ...(codexSettings.homePath ? { CODEX_HOME: codexSettings.homePath } : {}),
-    },
+  const env = {
+    ...process.env,
+    ...codexHomeEnv(codexSettings.homePath),
+  };
+  // Windows: a real codex.exe spawns directly; a .cmd shim gets one escaped cmd.exe line.
+  const spawnCommand = yield* Effect.try({
+    try: () => resolveSpawnCommand(codexSettings.binaryPath, args, { env }),
+    catch: (cause) =>
+      cause instanceof WindowsCommandLineError ? cause : new WindowsCommandLineError(String(cause)),
   });
-  return yield* spawnAndCollect(codexSettings.binaryPath, command);
+  const command = ChildProcess.make(spawnCommand.command, [...spawnCommand.args], {
+    shell: spawnCommand.shell,
+    env,
+    forceKillAfter: CODEX_PROBE_FORCE_KILL_AFTER,
+  });
+  return yield* spawnAndCollectWithForceKill(codexSettings.binaryPath, command);
 });
 
 export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(function* (
   resolveAccount?: (input: {
     readonly binaryPath: string;
     readonly homePath?: string;
-  }) => Effect.Effect<CodexAccountSnapshot | undefined>,
+    readonly launchArgs?: string;
+  }) => Effect.Effect<CodexAccountSnapshot | CodexAppServerStartupFailure | undefined>,
 ): Effect.fn.Return<
   ServerProvider,
   ServerSettingsError,
@@ -339,7 +498,8 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
     Effect.map((settings) => settings.providers.codex),
   );
   const checkedAt = new Date().toISOString();
-  const models = providerModelsFromSettings(BUILT_IN_MODELS, PROVIDER, codexSettings.customModels);
+  registerCodexCustomModelCapabilities(codexSettings);
+  const models = codexModelsFromSettings(BUILT_IN_MODELS, codexSettings);
 
   if (!codexSettings.enabled) {
     return buildServerProvider({
@@ -375,7 +535,7 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
         status: "error",
         auth: { status: "unknown" },
         message: isCommandMissingCause(error)
-          ? "Codex CLI (`codex`) is not installed or not on PATH."
+          ? formatMissingCodexCliMessage(codexSettings.binaryPath)
           : `Failed to execute Codex CLI health check: ${error instanceof Error ? error.message : String(error)}.`,
       },
     });
@@ -436,7 +596,27 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
     });
   }
 
+  const launchArgs = resolveCodexLaunchArgs(codexSettings.launchArgs);
+  const probeAccount = resolveAccount
+    ? resolveAccount({
+        binaryPath: codexSettings.binaryPath,
+        homePath: codexSettings.homePath,
+        ...(launchArgs ? { launchArgs } : {}),
+      })
+    : Effect.succeed(undefined);
+  // Bad launch arguments make app-server exit at startup, which fails every session.
+  const launchArgsWarningFor = (
+    probed: CodexAccountSnapshot | CodexAppServerStartupFailure | undefined,
+  ) =>
+    launchArgs && isCodexAppServerStartupFailure(probed)
+      ? `Codex app-server did not start with the launch arguments \`${launchArgs}\` (${probed.detail.replace(/\.$/, "")}). Check \`providers.codex.launchArgs\` in settings.json or ${PIEDPIPER_CODEX_LAUNCH_ARGS_ENV}.`
+      : undefined;
+
   if (yield* hasCustomModelProvider) {
+    // The login check is skipped here, but launch arguments are still worth validating.
+    const customProviderWarning = launchArgs
+      ? launchArgsWarningFor(yield* probeAccount)
+      : undefined;
     return buildServerProvider({
       provider: PROVIDER,
       enabled: codexSettings.enabled,
@@ -445,24 +625,37 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
       probe: {
         installed: true,
         version: parsedVersion,
-        status: "ready",
+        status: customProviderWarning ? "warning" : "ready",
         auth: { status: "unknown" },
-        message: "Using a custom Codex model provider; OpenAI login check skipped.",
+        message:
+          customProviderWarning ??
+          "Using a custom Codex model provider; OpenAI login check skipped.",
       },
     });
   }
 
   const authProbe = yield* runCodexCommand(["login", "status"]).pipe(
-    Effect.timeoutOption(DEFAULT_TIMEOUT_MS),
+    Effect.timeoutOption(CODEX_AUTH_PROBE_TIMEOUT_MS),
     Effect.result,
   );
-  const account = resolveAccount
-    ? yield* resolveAccount({
-        binaryPath: codexSettings.binaryPath,
-        homePath: codexSettings.homePath,
-      })
-    : undefined;
-  const resolvedModels = adjustCodexModelsForAccount(models, account);
+  const probed = yield* probeAccount;
+  const account = isCodexAppServerStartupFailure(probed) ? undefined : probed;
+  const launchArgsWarning = launchArgsWarningFor(probed);
+  function withLaunchArgsWarning(message: string): string;
+  function withLaunchArgsWarning(message: string | undefined): string | undefined;
+  function withLaunchArgsWarning(message: string | undefined) {
+    if (!launchArgsWarning) return message;
+    return message ? `${message} ${launchArgsWarning}` : launchArgsWarning;
+  }
+  const resolvedModels = applyConfiguredCodexServiceTier(
+    adjustCodexModelsForAccount(
+      account?.listedModels && account.listedModels.length > 0
+        ? codexModelsFromSettings(account.listedModels, codexSettings)
+        : models,
+      account,
+    ),
+    account?.configuredServiceTier,
+  );
 
   if (Result.isFailure(authProbe)) {
     const error = authProbe.failure;
@@ -476,10 +669,11 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
         version: parsedVersion,
         status: "warning",
         auth: { status: "unknown" },
-        message:
+        message: withLaunchArgsWarning(
           error instanceof Error
             ? `Could not verify Codex authentication status: ${error.message}.`
             : "Could not verify Codex authentication status.",
+        ),
       },
     });
   }
@@ -495,7 +689,9 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
         version: parsedVersion,
         status: "warning",
         auth: { status: "unknown" },
-        message: "Could not verify Codex authentication status. Timed out while running command.",
+        message: withLaunchArgsWarning(
+          "Could not verify Codex authentication status. Timed out while running command.",
+        ),
       },
     });
   }
@@ -503,63 +699,111 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
   const parsed = parseAuthStatusFromOutput(authProbe.success.value);
   const authType = codexAuthSubType(account);
   const authLabel = codexAuthSubLabel(account);
+  const status = launchArgsWarning && parsed.status === "ready" ? "warning" : parsed.status;
+  const message = withLaunchArgsWarning(parsed.message);
+  return withProviderUsageLimits(
+    buildServerProvider({
+      provider: PROVIDER,
+      enabled: codexSettings.enabled,
+      checkedAt,
+      models: resolvedModels,
+      probe: {
+        installed: true,
+        version: parsedVersion,
+        status,
+        auth: {
+          ...parsed.auth,
+          ...(authType ? { type: authType } : {}),
+          ...(authLabel ? { label: authLabel } : {}),
+        },
+        ...(message ? { message } : {}),
+      },
+    }),
+    codexAccountUsageLimits(account, checkedAt),
+  );
+});
+
+/**
+ * Placeholder shown until the first live Codex check completes in the background. Registers
+ * nothing: text generation calls this with `customModels: []` to list the built-in slugs.
+ */
+export const makePendingCodexProvider = (codexSettings: CodexSettings): ServerProvider => {
+  const checkedAt = new Date().toISOString();
+  const models = codexModelsFromSettings(BUILT_IN_MODELS, codexSettings);
   return buildServerProvider({
     provider: PROVIDER,
     enabled: codexSettings.enabled,
     checkedAt,
-    models: resolvedModels,
+    models,
     probe: {
-      installed: true,
-      version: parsedVersion,
-      status: parsed.status,
-      auth: {
-        ...parsed.auth,
-        ...(authType ? { type: authType } : {}),
-        ...(authLabel ? { label: authLabel } : {}),
-      },
-      ...(parsed.message ? { message: parsed.message } : {}),
+      installed: false,
+      version: null,
+      status: "warning",
+      auth: { status: "unknown" },
+      message: codexSettings.enabled
+        ? "Checking Codex provider status…"
+        : "Codex is disabled in Pied Piper settings.",
     },
   });
-});
+};
 
-export const CodexProviderLive = Layer.effect(
-  CodexProvider,
-  Effect.gen(function* () {
-    const serverSettings = yield* ServerSettingsService;
-    const fileSystem = yield* FileSystem.FileSystem;
-    const path = yield* Path.Path;
-    const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-    const accountProbeCache = yield* Cache.make({
-      capacity: 4,
-      timeToLive: Duration.minutes(5),
-      lookup: (key: string) => {
-        const [binaryPath, homePath] = JSON.parse(key) as [string, string | undefined];
-        return probeCodexCapabilities({
-          binaryPath,
-          ...(homePath ? { homePath } : {}),
-        });
-      },
-    });
+export const makeCodexProviderLive = (probeAccount = probeCodexCapabilities) =>
+  Layer.effect(
+    CodexProvider,
+    Effect.gen(function* () {
+      const serverSettings = yield* ServerSettingsService;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const accountProbeCache = yield* Cache.make({
+        capacity: 4,
+        timeToLive: Duration.minutes(5),
+        lookup: (key: string) => {
+          const [binaryPath, homePath, launchArgs] = JSON.parse(key) as [
+            string,
+            string | undefined,
+            string | undefined,
+          ];
+          return probeAccount({
+            binaryPath,
+            ...(homePath ? { homePath } : {}),
+            ...(launchArgs ? { launchArgs } : {}),
+          });
+        },
+      });
 
-    const checkProvider = checkCodexProviderStatus((input) =>
-      Cache.get(accountProbeCache, JSON.stringify([input.binaryPath, input.homePath])),
-    ).pipe(
-      Effect.provideService(ServerSettingsService, serverSettings),
-      Effect.provideService(FileSystem.FileSystem, fileSystem),
-      Effect.provideService(Path.Path, path),
-      Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
-    );
+      const checkProvider = checkCodexProviderStatus((input) =>
+        Cache.get(
+          accountProbeCache,
+          JSON.stringify([input.binaryPath, input.homePath, input.launchArgs]),
+        ),
+      ).pipe(
+        Effect.provideService(ServerSettingsService, serverSettings),
+        Effect.provideService(FileSystem.FileSystem, fileSystem),
+        Effect.provideService(Path.Path, path),
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+      );
 
-    return yield* makeManagedServerProvider<CodexSettings>({
-      getSettings: serverSettings.getSettings.pipe(
-        Effect.map((settings) => settings.providers.codex),
-        Effect.orDie,
-      ),
-      streamSettings: serverSettings.streamChanges.pipe(
-        Stream.map((settings) => settings.providers.codex),
-      ),
-      haveSettingsChanged: (previous, next) => !Equal.equals(previous, next),
-      checkProvider,
-    });
-  }),
-);
+      const provider = yield* makeManagedServerProvider<CodexSettings>({
+        getSettings: serverSettings.getSettings.pipe(
+          Effect.map((settings) => settings.providers.codex),
+          Effect.orDie,
+        ),
+        streamSettings: serverSettings.streamChanges.pipe(
+          Stream.map((settings) => settings.providers.codex),
+        ),
+        haveSettingsChanged: (previous, next) => !Equal.equals(previous, next),
+        haveUsageAccountChanged: (previous, next) =>
+          previous.binaryPath !== next.binaryPath || previous.homePath !== next.homePath,
+        initialSnapshot: (codexSettings) => {
+          registerCodexCustomModelCapabilities(codexSettings);
+          return makePendingCodexProvider(codexSettings);
+        },
+        checkProvider,
+        invalidateOnExplicitRefresh: Cache.invalidateAll(accountProbeCache),
+      });
+      return yield* makeProviderWithVersionAdvisory(provider, CODEX_CLI_MAINTENANCE);
+    }),
+  );
+
+export const CodexProviderLive = makeCodexProviderLive();

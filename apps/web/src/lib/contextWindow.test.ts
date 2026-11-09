@@ -36,6 +36,20 @@ describe("contextWindow", () => {
     expect(snapshot?.compactsAutomatically).toBe(true);
   });
 
+  it("keeps a zero-usage snapshot so the meter can show empty after compaction", () => {
+    const snapshot = deriveLatestContextWindowSnapshot([
+      makeActivity("activity-1", "context-window.updated", { usedTokens: 50_000 }),
+      makeActivity("activity-2", "context-window.updated", {
+        usedTokens: 0,
+        maxTokens: 200_000,
+      }),
+    ]);
+
+    expect(snapshot?.usedTokens).toBe(0);
+    expect(snapshot?.usedPercentage).toBe(0);
+    expect(snapshot?.remainingTokens).toBe(200_000);
+  });
+
   it("ignores malformed payloads", () => {
     const snapshot = deriveLatestContextWindowSnapshot([
       makeActivity("activity-1", "context-window.updated", {}),
@@ -49,6 +63,16 @@ describe("contextWindow", () => {
     expect(formatContextWindowTokens(1400)).toBe("1.4k");
     expect(formatContextWindowTokens(14_000)).toBe("14k");
     expect(formatContextWindowTokens(258_000)).toBe("258k");
+  });
+
+  it.each([
+    [999_499, "999k"],
+    [999_500, "1m"],
+    [999_999, "1m"],
+    [1_000_000, "1m"],
+    [1_100_000, "1.1m"],
+  ])("formats %d tokens as %s at the million boundary", (tokens, expected) => {
+    expect(formatContextWindowTokens(tokens)).toBe(expected);
   });
 
   it("includes total processed tokens when available", () => {

@@ -1,7 +1,7 @@
 import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import type { ProjectId } from "@piedpiper/contracts";
-import type { ReactNode } from "react";
+import { type ReactNode, useMemo } from "react";
 
 export type SortableProjectHandleProps = Pick<
   ReturnType<typeof useSortable>,
@@ -27,6 +27,11 @@ export function SortableProjectItem({
     isDragging,
     isOver,
   } = useSortable({ id: projectId, disabled });
+  // dnd-kit memoizes each field but not the bag, so a fresh bag would re-render the memoized item.
+  const handleProps = useMemo<SortableProjectHandleProps>(
+    () => ({ attributes, listeners, setActivatorNodeRef }),
+    [attributes, listeners, setActivatorNodeRef],
+  );
   return (
     <li
       ref={setNodeRef}
@@ -40,7 +45,7 @@ export function SortableProjectItem({
       data-sidebar="menu-item"
       data-slot="sidebar-menu-item"
     >
-      {children({ attributes, listeners, setActivatorNodeRef })}
+      {children(handleProps)}
     </li>
   );
 }

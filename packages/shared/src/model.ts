@@ -1,5 +1,6 @@
 import {
   DEFAULT_MODEL_BY_PROVIDER,
+  LEGACY_MODEL_SLUGS_BY_PROVIDER,
   MODEL_SLUG_ALIASES_BY_PROVIDER,
   type ClaudeCodeEffort,
   type ClaudeModelOptions,
@@ -8,6 +9,11 @@ import {
   type ModelSelection,
   type ProviderKind,
 } from "@piedpiper/contracts";
+
+/** True for a known older model; the picker groups these as legacy, while unknown slugs stay current. */
+export function isLegacyBuiltInModel(provider: ProviderKind, slug: string): boolean {
+  return LEGACY_MODEL_SLUGS_BY_PROVIDER[provider].includes(slug);
+}
 
 export interface SelectableModelOption {
   slug: string;
@@ -85,17 +91,46 @@ export function resolveContextWindow(
   return hasContextWindowOption(caps, raw) ? raw : (defaultValue ?? undefined);
 }
 
+/** Keeps a chosen tier only on a model offering it, so it never follows the user to one without. */
+function resolveCodexServiceTierOption(
+  caps: ModelCapabilities,
+  serviceTier: CodexModelOptions["serviceTier"],
+): CodexModelOptions["serviceTier"] {
+  if (serviceTier === undefined) return undefined;
+  // A tier that is no longer offered resolves to an explicit null (Standard): turn/start's tier
+  // applies to later turns too, so omitting it would leave the thread on the old tier.
+  const options = caps.serviceTierOptions ?? [];
+  if (options.length === 0) {
+    if (!caps.supportsFastMode) return serviceTier === null ? undefined : null;
+    return serviceTier === null || serviceTier === "fast" || serviceTier === "priority"
+      ? serviceTier
+      : null;
+  }
+  if (serviceTier === null || serviceTier === "default") return serviceTier;
+  const tierId = serviceTier === "priority" ? "fast" : serviceTier;
+  return options.some((option) => option.value === tierId) ? serviceTier : null;
+}
+
 export function normalizeCodexModelOptionsWithCapabilities(
   caps: ModelCapabilities,
   modelOptions: CodexModelOptions | null | undefined,
 ): CodexModelOptions | undefined {
   const reasoningEffort = resolveEffort(caps, modelOptions?.reasoningEffort);
   const fastMode = caps.supportsFastMode ? modelOptions?.fastMode : undefined;
+  // The older fastMode flag also sent "fast" on earlier turns, so dropping it must reset the tier too.
+  const droppedFastMode =
+    modelOptions?.serviceTier === undefined &&
+    modelOptions?.fastMode === true &&
+    !caps.supportsFastMode;
+  const serviceTier = droppedFastMode
+    ? null
+    : resolveCodexServiceTierOption(caps, modelOptions?.serviceTier);
   const nextOptions: CodexModelOptions = {
     ...(reasoningEffort
       ? { reasoningEffort: reasoningEffort as CodexModelOptions["reasoningEffort"] }
       : {}),
     ...(fastMode !== undefined ? { fastMode } : {}),
+    ...(serviceTier !== undefined ? { serviceTier } : {}),
   };
   return Object.keys(nextOptions).length > 0 ? nextOptions : undefined;
 }
@@ -108,11 +143,13 @@ export function normalizeClaudeModelOptionsWithCapabilities(
   const thinking = caps.supportsThinkingToggle ? modelOptions?.thinking : undefined;
   const fastMode = caps.supportsFastMode ? modelOptions?.fastMode : undefined;
   const contextWindow = resolveContextWindow(caps, modelOptions?.contextWindow);
+  const ultracode = caps.supportsUltracode ? modelOptions?.ultracode : undefined;
   const nextOptions: ClaudeModelOptions = {
     ...(thinking !== undefined ? { thinking } : {}),
     ...(effort ? { effort: effort as ClaudeModelOptions["effort"] } : {}),
     ...(fastMode !== undefined ? { fastMode } : {}),
     ...(contextWindow !== undefined ? { contextWindow } : {}),
+    ...(ultracode !== undefined ? { ultracode } : {}),
   };
   return Object.keys(nextOptions).length > 0 ? nextOptions : undefined;
 }

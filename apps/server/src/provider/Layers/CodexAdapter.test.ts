@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
 import {
   ApprovalRequestId,
   EventId,
@@ -21,10 +24,13 @@ import {
   type CodexAppServerStartSessionInput,
   type CodexAppServerSendTurnInput,
 } from "../../codexAppServerManager.ts";
+import { resolveAttachmentPath } from "../../attachmentStore.ts";
+import { readCodexGeneratedImageAttachment } from "../../codex/generatedImages.ts";
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { ProviderAdapterValidationError } from "../Errors.ts";
 import { CodexAdapter } from "../Services/CodexAdapter.ts";
+import type { ProviderGoalRequest, ProviderGoalResponse } from "../Services/ProviderAdapter.ts";
 import { ProviderSessionDirectory } from "../Services/ProviderSessionDirectory.ts";
 import { makeCodexAdapterLive } from "./CodexAdapter.ts";
 
@@ -70,6 +76,14 @@ class FakeCodexManager extends CodexAppServerManager {
     turns: [],
   }));
 
+  public compactThreadImpl = vi.fn(async (_threadId: ThreadId): Promise<void> => undefined);
+
+  public runGoalRequestImpl = vi.fn(
+    async (_threadId: ThreadId, _request: ProviderGoalRequest): Promise<ProviderGoalResponse> => ({
+      goal: null,
+    }),
+  );
+
   public respondToRequestImpl = vi.fn(
     async (
       _threadId: ThreadId,
@@ -106,6 +120,17 @@ class FakeCodexManager extends CodexAppServerManager {
 
   override rollbackThread(threadId: ThreadId, numTurns: number) {
     return this.rollbackThreadImpl(threadId, numTurns);
+  }
+
+  override compactThread(threadId: ThreadId): Promise<void> {
+    return this.compactThreadImpl(threadId);
+  }
+
+  override runGoalRequest(
+    threadId: ThreadId,
+    request: ProviderGoalRequest,
+  ): Promise<ProviderGoalResponse> {
+    return this.runGoalRequestImpl(threadId, request);
   }
 
   override respondToRequest(
@@ -151,7 +176,7 @@ const providerSessionDirectoryTestLayer = Layer.succeed(ProviderSessionDirectory
 const validationManager = new FakeCodexManager();
 const validationLayer = it.layer(
   makeCodexAdapterLive({ manager: validationManager }).pipe(
-    Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+    Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "pp-codex-adapter-test-" })),
     Layer.provideMerge(ServerSettingsService.layerTest()),
     Layer.provideMerge(providerSessionDirectoryTestLayer),
     Layer.provideMerge(NodeServices.layer),
@@ -204,10 +229,107 @@ validationLayer("CodexAdapterLive validation", (it) => {
         provider: "codex",
         threadId: asThreadId("thread-1"),
         binaryPath: "codex",
+        cwd: process.cwd(),
         model: "gpt-5.3-codex",
         serviceTier: "fast",
         runtimeMode: "full-access",
       });
+    }),
+  );
+
+  it.effect("passes the resolved service tier when starting a session", () =>
+    Effect.gen(function* () {
+      for (const [options, expected] of [
+        [{ serviceTier: "ultrafast", fastMode: false }, "ultrafast"],
+        [{ serviceTier: null, fastMode: true }, null],
+        [{ fastMode: false }, null],
+        [undefined, undefined],
+      ] as const) {
+        validationManager.startSessionImpl.mockClear();
+        const adapter = yield* CodexAdapter;
+        yield* adapter.startSession({
+          provider: "codex",
+          threadId: asThreadId("thread-1"),
+          modelSelection: {
+            provider: "codex",
+            model: "gpt-5.3-codex",
+            ...(options === undefined ? {} : { options }),
+          },
+          runtimeMode: "full-access",
+        });
+        const sent = validationManager.startSessionImpl.mock.calls[0]?.[0];
+        assert.strictEqual(sent?.serviceTier, expected);
+        assert.strictEqual(sent !== undefined && "serviceTier" in sent, expected !== undefined);
+      }
+    }),
+  );
+});
+
+const serverCwdManager = new FakeCodexManager();
+const serverCwd = NodePath.join(NodeOS.tmpdir(), "piedpiper-codex-server-cwd");
+const serverCwdLayer = it.layer(
+  makeCodexAdapterLive({ manager: serverCwdManager }).pipe(
+    Layer.provideMerge(ServerConfig.layerTest(serverCwd, { prefix: "piedpiper-codex-cwd-" })),
+    Layer.provideMerge(ServerSettingsService.layerTest()),
+    Layer.provideMerge(providerSessionDirectoryTestLayer),
+    Layer.provideMerge(NodeServices.layer),
+  ),
+);
+
+serverCwdLayer("CodexAdapterLive session cwd", (it) => {
+  it.effect("falls back to the server's cwd, not the launch directory", () =>
+    Effect.gen(function* () {
+      serverCwdManager.startSessionImpl.mockClear();
+      const adapter = yield* CodexAdapter;
+      yield* adapter.startSession({
+        provider: "codex",
+        threadId: asThreadId("thread-server-cwd"),
+        runtimeMode: "full-access",
+      });
+      assert.equal(serverCwdManager.startSessionImpl.mock.calls[0]?.[0].cwd, serverCwd);
+    }),
+  );
+
+  it.effect("keeps a thread's own cwd", () =>
+    Effect.gen(function* () {
+      serverCwdManager.startSessionImpl.mockClear();
+      const adapter = yield* CodexAdapter;
+      yield* adapter.startSession({
+        provider: "codex",
+        threadId: asThreadId("thread-own-cwd"),
+        cwd: "/workspace/project",
+        runtimeMode: "full-access",
+      });
+      assert.equal(serverCwdManager.startSessionImpl.mock.calls[0]?.[0].cwd, "/workspace/project");
+    }),
+  );
+});
+
+const launchArgsManager = new FakeCodexManager();
+const launchArgsLayer = it.layer(
+  makeCodexAdapterLive({ manager: launchArgsManager }).pipe(
+    Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "pp-codex-adapter-test-" })),
+    Layer.provideMerge(
+      ServerSettingsService.layerTest({ providers: { codex: { launchArgs: "--enable foo" } } }),
+    ),
+    Layer.provideMerge(providerSessionDirectoryTestLayer),
+    Layer.provideMerge(NodeServices.layer),
+  ),
+);
+
+launchArgsLayer("CodexAdapterLive launch arguments", (it) => {
+  it.effect("passes the configured launch arguments to the app-server session", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      yield* adapter.startSession({
+        provider: "codex",
+        threadId: asThreadId("thread-launch-args"),
+        runtimeMode: "full-access",
+      });
+      assert.equal(
+        launchArgsManager.startSessionImpl.mock.calls[0]?.[0].launchArgs,
+        "--enable foo",
+      );
     }),
   );
 });
@@ -218,7 +340,7 @@ sessionErrorManager.sendTurnImpl.mockImplementation(async () => {
 });
 const sessionErrorLayer = it.layer(
   makeCodexAdapterLive({ manager: sessionErrorManager }).pipe(
-    Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+    Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "pp-codex-adapter-test-" })),
     Layer.provideMerge(ServerSettingsService.layerTest()),
     Layer.provideMerge(providerSessionDirectoryTestLayer),
     Layer.provideMerge(NodeServices.layer),
@@ -282,12 +404,197 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
       });
     }),
   );
+
+  it.effect("sends an explicit null service tier when Fast is turned off", () =>
+    Effect.gen(function* () {
+      for (const [options, expected] of [
+        [{ fastMode: false }, null],
+        [undefined, undefined],
+        [{ serviceTier: "ultrafast", fastMode: false }, "ultrafast"],
+        [{ serviceTier: null, fastMode: true }, null],
+      ] as const) {
+        sessionErrorManager.sendTurnImpl.mockClear();
+        const adapter = yield* CodexAdapter;
+        yield* Effect.ignore(
+          adapter.sendTurn({
+            threadId: asThreadId("sess-missing"),
+            input: "hello",
+            modelSelection: {
+              provider: "codex",
+              model: "gpt-5.3-codex",
+              ...(options === undefined ? {} : { options }),
+            },
+            attachments: [],
+          }),
+        );
+        const sent = sessionErrorManager.sendTurnImpl.mock.calls[0]?.[0];
+        assert.strictEqual(sent?.serviceTier, expected);
+        assert.strictEqual(sent !== undefined && "serviceTier" in sent, expected !== undefined);
+      }
+    }),
+  );
+
+  it.effect("passes image attachments to Codex by path instead of base64", () =>
+    Effect.gen(function* () {
+      sessionErrorManager.sendTurnImpl.mockClear();
+      const adapter = yield* CodexAdapter;
+      const { attachmentsDir } = yield* ServerConfig;
+      const attachmentId = "thread-codex-attachment-12345678-1234-1234-1234-123456789abc";
+      const attachmentPath = NodePath.join(attachmentsDir, `${attachmentId}.png`);
+      NodeFS.writeFileSync(attachmentPath, Buffer.alloc(4, 0x89));
+
+      try {
+        yield* Effect.ignore(
+          adapter.sendTurn({
+            threadId: asThreadId("sess-missing"),
+            input: "Use this image.",
+            attachments: [
+              {
+                type: "image",
+                id: attachmentId,
+                name: "generated.png",
+                mimeType: "image/png",
+                sizeBytes: 4,
+              },
+            ],
+          }),
+        );
+
+        assert.deepStrictEqual(sessionErrorManager.sendTurnImpl.mock.calls[0]?.[0]?.attachments, [
+          { type: "localImage", path: attachmentPath },
+        ]);
+      } finally {
+        NodeFS.rmSync(attachmentPath, { force: true });
+      }
+    }),
+  );
+
+  it.effect("leaves PDF attachments out of turn/start and never looks for their files", () =>
+    Effect.gen(function* () {
+      sessionErrorManager.sendTurnImpl.mockClear();
+      const adapter = yield* CodexAdapter;
+      const { attachmentsDir } = yield* ServerConfig;
+      const imageId = "thread-codex-attachment-22345678-1234-1234-1234-123456789abc";
+      const imagePath = NodePath.join(attachmentsDir, `${imageId}.png`);
+      NodeFS.writeFileSync(imagePath, Buffer.alloc(4, 0x89));
+      const pdf = {
+        type: "file",
+        id: "thread-codex-attachment-32345678-1234-1234-1234-123456789abc",
+        name: "report.pdf",
+        mimeType: "application/pdf",
+        sizeBytes: 4,
+      } as const;
+
+      try {
+        yield* Effect.ignore(
+          adapter.sendTurn({
+            threadId: asThreadId("sess-missing"),
+            input: "Read /attachments/report.pdf",
+            attachments: [
+              pdf,
+              {
+                type: "image",
+                id: imageId,
+                name: "generated.png",
+                mimeType: "image/png",
+                sizeBytes: 4,
+              },
+            ],
+          }),
+        );
+        yield* Effect.ignore(
+          adapter.sendTurn({
+            threadId: asThreadId("sess-missing"),
+            input: "Read /attachments/report.pdf",
+            attachments: [pdf],
+          }),
+        );
+
+        const [mixed, pdfOnly] = sessionErrorManager.sendTurnImpl.mock.calls;
+        assert.deepStrictEqual(mixed?.[0]?.attachments, [{ type: "localImage", path: imagePath }]);
+        assert.equal(pdfOnly?.[0]?.attachments, undefined);
+        assert.equal(pdfOnly?.[0]?.input, "Read /attachments/report.pdf");
+      } finally {
+        NodeFS.rmSync(imagePath, { force: true });
+      }
+    }),
+  );
+
+  it.effect("fails a turn with a request error when the attachment file is missing", () =>
+    Effect.gen(function* () {
+      sessionErrorManager.sendTurnImpl.mockClear();
+      const adapter = yield* CodexAdapter;
+
+      const result = yield* adapter
+        .sendTurn({
+          threadId: asThreadId("sess-missing"),
+          input: "Use this image.",
+          attachments: [
+            {
+              type: "image",
+              id: "thread-codex-attachment-missing-00000000-0000-0000-0000-000000000000",
+              name: "missing.png",
+              mimeType: "image/png",
+              sizeBytes: 4,
+            },
+          ],
+        })
+        .pipe(Effect.result);
+
+      assert.equal(result._tag, "Failure");
+      if (result._tag !== "Failure") {
+        return;
+      }
+      assert.equal(result.failure._tag, "ProviderAdapterRequestError");
+      assert.match(result.failure.detail, /was not found/);
+      assert.equal(sessionErrorManager.sendTurnImpl.mock.calls.length, 0);
+    }),
+  );
+
+  it.effect("fails a turn when the attachment path is a directory, not a file", () =>
+    Effect.gen(function* () {
+      sessionErrorManager.sendTurnImpl.mockClear();
+      const adapter = yield* CodexAdapter;
+      const { attachmentsDir } = yield* ServerConfig;
+      const attachmentId = "thread-codex-attachment-87654321-4321-4321-4321-cba987654321";
+      const attachmentPath = NodePath.join(attachmentsDir, `${attachmentId}.png`);
+      NodeFS.mkdirSync(attachmentPath, { recursive: true });
+
+      try {
+        const result = yield* adapter
+          .sendTurn({
+            threadId: asThreadId("sess-missing"),
+            input: "Use this image.",
+            attachments: [
+              {
+                type: "image",
+                id: attachmentId,
+                name: "folder.png",
+                mimeType: "image/png",
+                sizeBytes: 4,
+              },
+            ],
+          })
+          .pipe(Effect.result);
+
+        assert.equal(result._tag, "Failure");
+        if (result._tag !== "Failure") {
+          return;
+        }
+        assert.equal(result.failure._tag, "ProviderAdapterRequestError");
+        assert.match(result.failure.detail, /was not found/);
+        assert.equal(sessionErrorManager.sendTurnImpl.mock.calls.length, 0);
+      } finally {
+        NodeFS.rmSync(attachmentPath, { recursive: true, force: true });
+      }
+    }),
+  );
 });
 
 const lifecycleManager = new FakeCodexManager();
 const lifecycleLayer = it.layer(
   makeCodexAdapterLive({ manager: lifecycleManager }).pipe(
-    Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+    Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "pp-codex-adapter-test-" })),
     Layer.provideMerge(ServerSettingsService.layerTest()),
     Layer.provideMerge(providerSessionDirectoryTestLayer),
     Layer.provideMerge(NodeServices.layer),
@@ -331,6 +638,216 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
       assert.equal(firstEvent.value.itemId, "msg_1");
       assert.equal(firstEvent.value.turnId, "turn-1");
       assert.equal(firstEvent.value.payload.itemType, "assistant_message");
+    }),
+  );
+
+  it.effect("stores a generated image and carries it on the completed item", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const { attachmentsDir, stateDir } = yield* ServerConfig;
+      const savedPath = NodePath.join(stateDir, "ig_generated.png");
+      NodeFS.mkdirSync(stateDir, { recursive: true });
+      NodeFS.writeFileSync(
+        savedPath,
+        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      );
+      const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+
+      lifecycleManager.emit("event", {
+        id: asEventId("evt-image-complete"),
+        kind: "notification",
+        provider: "codex",
+        createdAt: new Date().toISOString(),
+        method: "item/completed",
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-1"),
+        itemId: asItemId("image_1"),
+        payload: {
+          item: { type: "imageGeneration", id: "image_1", status: "completed", savedPath },
+        },
+      } satisfies ProviderEvent);
+      const firstEvent = yield* Fiber.join(firstEventFiber);
+
+      assert.equal(firstEvent._tag, "Some");
+      if (firstEvent._tag !== "Some" || firstEvent.value.type !== "item.completed") {
+        assert.fail("expected item.completed");
+      }
+      assert.equal(firstEvent.value.payload.title, "Generated image");
+      const attachment = readCodexGeneratedImageAttachment(firstEvent.value.payload.data);
+      assert.equal(attachment?.mimeType, "image/png");
+      const stored = attachment && resolveAttachmentPath({ attachmentsDir, attachment });
+      assert.ok(stored && NodeFS.existsSync(stored));
+      NodeFS.rmSync(stored, { force: true });
+      NodeFS.rmSync(savedPath, { force: true });
+    }),
+  );
+
+  it.effect("keeps a turn's later events behind the image being stored", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const { attachmentsDir, stateDir } = yield* ServerConfig;
+      const savedPath = NodePath.join(stateDir, "ig_order.png");
+      NodeFS.mkdirSync(stateDir, { recursive: true });
+      NodeFS.writeFileSync(
+        savedPath,
+        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      );
+      const eventsFiber = yield* Stream.take(adapter.streamEvents, 2).pipe(
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      const base = {
+        kind: "notification",
+        provider: "codex",
+        createdAt: new Date().toISOString(),
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-order"),
+      } as const;
+      lifecycleManager.emit("event", {
+        ...base,
+        id: asEventId("evt-image-order"),
+        method: "item/completed",
+        itemId: asItemId("image_order"),
+        payload: {
+          item: { type: "imageGeneration", id: "image_order", status: "completed", savedPath },
+        },
+      } satisfies ProviderEvent);
+      lifecycleManager.emit("event", {
+        ...base,
+        id: asEventId("evt-turn-order"),
+        method: "turn/completed",
+        payload: { turn: { id: "turn-order", status: "completed" } },
+      } satisfies ProviderEvent);
+
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      assert.deepEqual(
+        events.map((event) => event.type),
+        ["item.completed", "turn.completed"],
+      );
+      const [imageEvent] = events;
+      if (imageEvent?.type !== "item.completed") assert.fail("expected item.completed");
+      const attachment = readCodexGeneratedImageAttachment(imageEvent.payload.data);
+      const stored = attachment && resolveAttachmentPath({ attachmentsDir, attachment });
+      if (stored) NodeFS.rmSync(stored, { force: true });
+      NodeFS.rmSync(savedPath, { force: true });
+    }),
+  );
+
+  it.effect("still completes the image item when its file cannot be stored", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+
+      lifecycleManager.emit("event", {
+        id: asEventId("evt-image-missing"),
+        kind: "notification",
+        provider: "codex",
+        createdAt: new Date().toISOString(),
+        method: "item/completed",
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-1"),
+        itemId: asItemId("image_2"),
+        payload: {
+          item: {
+            type: "imageGeneration",
+            id: "image_2",
+            status: "completed",
+            savedPath: NodePath.join(NodePath.sep, "nonexistent", "gone.png"),
+          },
+        },
+      } satisfies ProviderEvent);
+      const firstEvent = yield* Fiber.join(firstEventFiber);
+
+      if (firstEvent._tag !== "Some" || firstEvent.value.type !== "item.completed") {
+        assert.fail("expected item.completed");
+      }
+      assert.equal(firstEvent.value.payload.status, "completed");
+      assert.equal(readCodexGeneratedImageAttachment(firstEvent.value.payload.data), undefined);
+    }),
+  );
+
+  it.effect("runs goal requests and reports a CLI without goals by what to do about it", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const threadId = asThreadId("thread-goal");
+      const request: ProviderGoalRequest = { type: "set", status: "paused" };
+
+      const response = yield* adapter.runGoalRequest!(threadId, request);
+      assert.deepEqual(response, { goal: null });
+      assert.deepEqual(lifecycleManager.runGoalRequestImpl.mock.calls[0], [threadId, request]);
+
+      const message = "This Codex CLI cannot use /goal. Update Codex and try again.";
+      lifecycleManager.runGoalRequestImpl.mockRejectedValueOnce(new Error(message));
+      const failure = yield* adapter.runGoalRequest!(threadId, { type: "get" }).pipe(Effect.flip);
+      assert.equal(failure._tag, "ProviderAdapterRequestError");
+      assert.equal(failure._tag === "ProviderAdapterRequestError" && failure.detail, message);
+    }),
+  );
+
+  it.effect("starts compaction and reports a rejected request as a request error", () =>
+    Effect.gen(function* () {
+      const adapter = (yield* CodexAdapter) as unknown as {
+        readonly compactThread: (threadId: ThreadId) => Effect.Effect<void, { _tag: string }>;
+      };
+      const threadId = asThreadId("thread-compact");
+
+      yield* adapter.compactThread(threadId);
+      assert.deepEqual(lifecycleManager.compactThreadImpl.mock.calls[0], [threadId]);
+
+      lifecycleManager.compactThreadImpl.mockRejectedValueOnce(new Error("no compaction"));
+      const result = yield* adapter.compactThread(threadId).pipe(Effect.result);
+      assert.equal(result._tag, "Failure");
+      if (result._tag === "Failure") {
+        assert.equal(result.failure._tag, "ProviderAdapterRequestError");
+      }
+    }),
+  );
+
+  it.effect("emits one compacted state for an item and the legacy notification", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const compactedFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.type === "thread.state.changed"),
+        Stream.take(2),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      const base = {
+        kind: "notification",
+        provider: "codex",
+        createdAt: new Date().toISOString(),
+        threadId: asThreadId("thread-compact-events"),
+      } as const;
+
+      lifecycleManager.emit("event", {
+        ...base,
+        id: asEventId("evt-compaction-item"),
+        method: "item/completed",
+        turnId: asTurnId("turn-compact-1"),
+        payload: { item: { type: "contextCompaction", id: "cmp-1" } },
+      } satisfies ProviderEvent);
+      lifecycleManager.emit("event", {
+        ...base,
+        id: asEventId("evt-compaction-notification"),
+        method: "thread/compacted",
+        turnId: asTurnId("turn-compact-1"),
+        payload: { threadId: "provider-thread", turnId: "turn-compact-1" },
+      } satisfies ProviderEvent);
+      // Only a later compaction may complete the two-event collection.
+      lifecycleManager.emit("event", {
+        ...base,
+        id: asEventId("evt-compaction-item-2"),
+        method: "item/completed",
+        turnId: asTurnId("turn-compact-2"),
+        payload: { item: { type: "contextCompaction", id: "cmp-2" } },
+      } satisfies ProviderEvent);
+
+      const events = Array.from(yield* Fiber.join(compactedFiber));
+      assert.deepEqual(
+        events.map((event) => event.turnId),
+        ["turn-compact-1", "turn-compact-2"],
+      );
     }),
   );
 
@@ -447,7 +964,8 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
         id: asEventId("evt-retryable-error"),
         kind: "notification",
         provider: "codex",
-        threadId: asThreadId("thread-1"),
+        // Its own thread: the streak stays open, and these tests share one adapter.
+        threadId: asThreadId("thread-open-retry-streak"),
         createdAt: new Date().toISOString(),
         method: "error",
         turnId: asTurnId("turn-1"),

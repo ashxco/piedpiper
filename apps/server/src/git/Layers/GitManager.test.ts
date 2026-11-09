@@ -4,7 +4,8 @@ import { spawnSync } from "node:child_process";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
-import { Effect, FileSystem, Layer, PlatformError, Scope } from "effect";
+import { Deferred, Duration, Effect, Fiber, FileSystem, Layer, PlatformError, Scope } from "effect";
+import { TestClock } from "effect/testing";
 import { expect } from "vitest";
 import type { GitActionProgressEvent, ModelSelection } from "@piedpiper/contracts";
 
@@ -17,10 +18,27 @@ import {
 } from "../Services/GitHubCli.ts";
 import { type TextGenerationShape, TextGeneration } from "../Services/TextGeneration.ts";
 import { GitCoreLive } from "./GitCore.ts";
-import { GitCore } from "../Services/GitCore.ts";
-import { makeGitManager } from "./GitManager.ts";
+import { preRefreshRef } from "./GitManagerPullRequestRefresh.ts";
+import {
+  GitCore,
+  type GitPrepareCommitContextOptions,
+  type GitStatusDetailsOptions,
+} from "../Services/GitCore.ts";
+import {
+  ghSelectorMatchesRepository,
+  makeGitManager,
+  parseGhRepositorySelector,
+  parseGhRepositorySelectorHost,
+  prLookupFailureTtl,
+  publishedRemoteName,
+  pullRequestHost,
+} from "./GitManager.ts";
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
+import {
+  DefaultBranchAutoPull,
+  type DefaultBranchAutoPullShape,
+} from "../../defaultBranchAutoPull.ts";
 
 interface FakeGhScenario {
   prListSequence?: string[];
@@ -34,6 +52,7 @@ interface FakeGhScenario {
     url: string;
     baseRefName: string;
     headRefName: string;
+    headRefOid?: string;
     state?: "open" | "closed" | "merged";
     isCrossRepository?: boolean;
     headRepositoryNameWithOwner?: string | null;
@@ -41,6 +60,8 @@ interface FakeGhScenario {
   };
   repositoryCloneUrls?: Record<string, { url: string; sshUrl: string }>;
   failWith?: GitHubCliError;
+  /** The first `pr list` call waits for this before answering. */
+  prListGate?: Effect.Effect<void>;
 }
 
 interface FakeGitTextGeneration {
@@ -50,6 +71,7 @@ interface FakeGitTextGeneration {
     stagedSummary: string;
     stagedPatch: string;
     includeBranch?: boolean;
+    additionalInstructions?: string | undefined;
     modelSelection: ModelSelection;
   }) => Effect.Effect<
     { subject: string; body: string; branch?: string | undefined },
@@ -118,6 +140,7 @@ function normalizeFakePullRequestSummary(raw: unknown): GitHubPullRequestSummary
       : undefined;
   const isCrossRepository =
     typeof record.isCrossRepository === "boolean" ? record.isCrossRepository : undefined;
+  const isDraft = typeof record.isDraft === "boolean" ? record.isDraft : undefined;
   const headRepositoryNameWithOwner =
     typeof record.headRepositoryNameWithOwner === "string"
       ? record.headRepositoryNameWithOwner
@@ -137,8 +160,10 @@ function normalizeFakePullRequestSummary(raw: unknown): GitHubPullRequestSummary
     url,
     baseRefName,
     headRefName,
+    ...(typeof record.headRefOid === "string" ? { headRefOid: record.headRefOid } : {}),
     ...(state ? { state } : {}),
     ...(isCrossRepository !== undefined ? { isCrossRepository } : {}),
+    ...(isDraft !== undefined ? { isDraft } : {}),
     ...(headRepositoryNameWithOwner ? { headRepositoryNameWithOwner } : {}),
     ...(headRepositoryOwnerLogin ? { headRepositoryOwnerLogin } : {}),
   };
@@ -193,6 +218,19 @@ function runGit(
       args,
       allowNonZeroExit,
     });
+  });
+}
+
+// Keeps status's background fetch on the local bare repo while config still shows the GitHub URL.
+function configureVisibleRemoteUrlWithLocalRewrite(
+  cwd: string,
+  remote: string,
+  visibleUrl: string,
+  localPath: string,
+): Effect.Effect<void, GitCommandError, GitCore> {
+  return Effect.gen(function* () {
+    yield* runGit(cwd, ["config", `remote.${remote}.url`, visibleUrl]);
+    yield* runGit(cwd, ["config", `url.${localPath}.insteadOf`, visibleUrl]);
   });
 }
 
@@ -356,13 +394,17 @@ function createGitHubCliWithFakeGh(scenario: FakeGhScenario = {}): {
           ? scenario.prListByHeadSelector?.[headSelector]
           : undefined;
       const stdout = (mappedQueue ?? mappedStdout ?? prListQueue.shift() ?? "[]") + "\n";
-      return Effect.succeed({
-        stdout,
-        stderr: "",
-        code: 0,
-        signal: null,
-        timedOut: false,
-      });
+      const gate = scenario.prListGate ?? Effect.void;
+      delete scenario.prListGate;
+      return gate.pipe(
+        Effect.as({
+          stdout,
+          stderr: "",
+          code: 0,
+          signal: null,
+          timedOut: false,
+        }),
+      );
     }
 
     if (args[0] === "pr" && args[1] === "create") {
@@ -451,7 +493,8 @@ function createGitHubCliWithFakeGh(scenario: FakeGhScenario = {}): {
     }
 
     if (args[0] === "repo" && args[1] === "view") {
-      const repository = args[2];
+      // A host-qualified `HOST/OWNER/REPO` resolves the same scenario entry as `OWNER/REPO`.
+      const repository = args[2]?.split("/").slice(-2).join("/");
       if (typeof repository === "string" && args.includes("nameWithOwner,url,sshUrl")) {
         const cloneUrls = scenario.repositoryCloneUrls?.[repository];
         if (!cloneUrls) {
@@ -508,7 +551,7 @@ function createGitHubCliWithFakeGh(scenario: FakeGhScenario = {}): {
             "--limit",
             String(input.limit ?? 1),
             "--json",
-            "number,title,url,baseRefName,headRefName,state,mergedAt,isCrossRepository,headRepository,headRepositoryOwner",
+            "number,title,url,baseRefName,headRefName,state,mergedAt,isDraft,isCrossRepository,headRepository,headRepositoryOwner",
           ],
         }).pipe(
           Effect.map((result) => JSON.parse(result.stdout) as unknown[]),
@@ -552,18 +595,24 @@ function createGitHubCliWithFakeGh(scenario: FakeGhScenario = {}): {
             "view",
             input.reference,
             "--json",
-            "number,title,url,baseRefName,headRefName,state,mergedAt,isCrossRepository,headRepository,headRepositoryOwner",
+            "number,title,url,baseRefName,headRefName,state,mergedAt,isDraft,isCrossRepository,headRepository,headRepositoryOwner",
           ],
         }).pipe(Effect.map((result) => JSON.parse(result.stdout) as GitHubPullRequestSummary)),
       getRepositoryCloneUrls: (input) =>
         execute({
           cwd: input.cwd,
-          args: ["repo", "view", input.repository, "--json", "nameWithOwner,url,sshUrl"],
+          args: [
+            "repo",
+            "view",
+            input.host ? `${input.host}/${input.repository}` : input.repository,
+            "--json",
+            "nameWithOwner,url,sshUrl",
+          ],
         }).pipe(Effect.map((result) => JSON.parse(result.stdout))),
       checkoutPullRequest: (input) =>
         execute({
           cwd: input.cwd,
-          args: ["pr", "checkout", input.reference, ...(input.force ? ["--force"] : [])],
+          args: ["pr", "checkout", input.reference],
         }).pipe(Effect.asVoid),
     },
     ghCalls,
@@ -605,6 +654,16 @@ function preparePullRequestThread(
 function makeManager(input?: {
   ghScenario?: FakeGhScenario;
   textGeneration?: Partial<FakeGitTextGeneration>;
+  settings?: Parameters<typeof ServerSettingsService.layerTest>[0];
+  /** Collects every key GitManager reads through GitCore.readConfigValue. */
+  configReads?: string[];
+  /** Collects the options of every GitCore.prepareCommitContext call. */
+  prepareCommitContextCalls?: Array<GitPrepareCommitContextOptions | undefined>;
+  /** Counts GitCore.statusDetails calls. */
+  statusDetailsCalls?: { count: number };
+  /** Collects the options of every GitCore.statusDetails call. */
+  statusDetailsOptions?: Array<GitStatusDetailsOptions | undefined>;
+  autoPull?: Partial<DefaultBranchAutoPullShape>;
 }) {
   const { service: gitHubCli, ghCalls } = createGitHubCliWithFakeGh(input?.ghScenario);
   const textGeneration = createTextGeneration(input?.textGeneration);
@@ -612,12 +671,44 @@ function makeManager(input?: {
     prefix: "piedpiper-git-manager-test-",
   });
 
-  const serverSettingsLayer = ServerSettingsService.layerTest();
+  const serverSettingsLayer = ServerSettingsService.layerTest(input?.settings);
 
-  const gitCoreLayer = GitCoreLive.pipe(
+  const baseGitCoreLayer = GitCoreLive.pipe(
     Layer.provideMerge(NodeServices.layer),
     Layer.provideMerge(ServerConfigLayer),
   );
+  const configReads = input?.configReads;
+  const prepareCommitContextCalls = input?.prepareCommitContextCalls;
+  const statusDetailsCalls = input?.statusDetailsCalls;
+  const statusDetailsOptions = input?.statusDetailsOptions;
+  const gitCoreLayer =
+    configReads === undefined &&
+    prepareCommitContextCalls === undefined &&
+    statusDetailsCalls === undefined &&
+    statusDetailsOptions === undefined
+      ? baseGitCoreLayer
+      : Layer.effect(
+          GitCore,
+          Effect.gen(function* () {
+            const core = yield* GitCore;
+            return {
+              ...core,
+              readConfigValue: (cwd: string, key: string) => {
+                configReads?.push(key);
+                return core.readConfigValue(cwd, key);
+              },
+              prepareCommitContext: (cwd, filePaths, options) => {
+                prepareCommitContextCalls?.push(options);
+                return core.prepareCommitContext(cwd, filePaths, options);
+              },
+              statusDetails: (cwd, options) => {
+                if (statusDetailsCalls) statusDetailsCalls.count += 1;
+                statusDetailsOptions?.push(options);
+                return core.statusDetails(cwd, options);
+              },
+            } satisfies typeof core;
+          }),
+        ).pipe(Layer.provideMerge(baseGitCoreLayer));
 
   const managerLayer = Layer.mergeAll(
     Layer.succeed(GitHubCli, gitHubCli),
@@ -626,7 +717,16 @@ function makeManager(input?: {
     serverSettingsLayer,
   ).pipe(Layer.provideMerge(NodeServices.layer));
 
+  const autoPull = input?.autoPull;
   return makeGitManager().pipe(
+    (effect) =>
+      autoPull === undefined
+        ? effect
+        : Effect.provideService(effect, DefaultBranchAutoPull, {
+            maybePull: () => Effect.succeed(false),
+            keepsRefsFresh: () => Effect.succeed(false),
+            ...autoPull,
+          }),
     Effect.provide(managerLayer),
     Effect.map((manager) => ({ manager, ghCalls })),
   );
@@ -679,6 +779,89 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
     }),
   );
 
+  it.effect("status marks a draft PR as a draft", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("piedpiper-git-manager-");
+      yield* initRepo(repoDir);
+      yield* runGit(repoDir, ["checkout", "-b", "feature/status-draft-pr"]);
+      const remoteDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "feature/status-draft-pr"]);
+
+      const { manager } = yield* makeManager({
+        ghScenario: {
+          prListSequence: [
+            JSON.stringify([
+              {
+                number: 14,
+                title: "Draft PR",
+                url: "https://github.com/user/repo/pull/14",
+                baseRefName: "main",
+                headRefName: "feature/status-draft-pr",
+                state: "OPEN",
+                isDraft: true,
+              },
+            ]),
+          ],
+        },
+      });
+
+      const status = yield* manager.status({ cwd: repoDir });
+      expect(status.pr).toEqual({
+        number: 14,
+        title: "Draft PR",
+        url: "https://github.com/user/repo/pull/14",
+        baseBranch: "main",
+        headBranch: "feature/status-draft-pr",
+        state: "open",
+        isDraft: true,
+      });
+    }),
+  );
+
+  it.effect.each([
+    { isDraft: true, label: "View draft PR" },
+    { isDraft: false, label: "View PR" },
+  ])("labels the post-push PR CTA from draft state ($label)", ({ isDraft, label }) =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("piedpiper-git-manager-");
+      yield* initRepo(repoDir);
+      yield* runGit(repoDir, ["checkout", "-b", "feature/push-draft-pr"]);
+      const remoteDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "feature/push-draft-pr"]);
+      fs.writeFileSync(path.join(repoDir, "draft.txt"), "draft\n");
+      yield* runGit(repoDir, ["add", "draft.txt"]);
+      yield* runGit(repoDir, ["commit", "-m", "Draft work"]);
+
+      const { manager } = yield* makeManager({
+        ghScenario: {
+          prListByHeadSelector: {
+            "feature/push-draft-pr": JSON.stringify([
+              {
+                number: 15,
+                title: "Draft PR",
+                url: "https://github.com/user/repo/pull/15",
+                baseRefName: "main",
+                headRefName: "feature/push-draft-pr",
+                state: "OPEN",
+                isDraft,
+              },
+            ]),
+          },
+        },
+      });
+
+      const result = yield* runStackedAction(manager, { cwd: repoDir, action: "push" });
+      expect(result.push.status).toBe("pushed");
+      expect(result.toast.cta).toEqual({
+        kind: "open_pr",
+        label,
+        url: "https://github.com/user/repo/pull/15",
+      });
+    }),
+  );
+
   it.effect("status returns an explicit non-repo result for non-git directories", () =>
     Effect.gen(function* () {
       const cwd = yield* makeTempDir("piedpiper-git-manager-non-repo-");
@@ -697,6 +880,203 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
           insertions: 0,
           deletions: 0,
         },
+        hasUpstream: false,
+        aheadCount: 0,
+        behindCount: 0,
+        pr: null,
+      });
+    }),
+  );
+
+  it.effect("status re-reads git status after an automatic default branch pull", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("piedpiper-git-manager-autopull-");
+      yield* initRepo(repoDir);
+      const statusDetailsCalls = { count: 0 };
+      const pulledCwds: string[] = [];
+      const { manager } = yield* makeManager({
+        statusDetailsCalls,
+        autoPull: {
+          maybePull: (cwd) =>
+            Effect.sync(() => {
+              pulledCwds.push(cwd);
+              // Stands in for the pull changing the checkout after the first read.
+              fs.writeFileSync(path.join(repoDir, "pulled.txt"), "pulled\n");
+              return true;
+            }),
+        },
+      });
+
+      const status = yield* manager.status({ cwd: repoDir });
+
+      expect(pulledCwds).toHaveLength(1);
+      expect(statusDetailsCalls.count).toBe(2);
+      expect(status.hasWorkingTreeChanges).toBe(true);
+    }),
+  );
+
+  it.effect("a passive status read skips the upstream refresh and still returns the PR", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("piedpiper-git-manager-passive-");
+      yield* initRepo(repoDir);
+      yield* runGit(repoDir, ["checkout", "-b", "feature/passive"]);
+      yield* runGit(repoDir, ["remote", "add", "origin", yield* createBareRemote()]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "feature/passive"]);
+      const statusDetailsOptions: Array<GitStatusDetailsOptions | undefined> = [];
+      const { manager, ghCalls } = yield* makeManager({
+        ghScenario: { prListSequence: [lastKnownPrJson(7, "feature/passive")] },
+        statusDetailsOptions,
+        autoPull: {},
+      });
+
+      const status = yield* manager.status({ cwd: repoDir, refreshUpstream: false });
+
+      expect(status.pr?.number).toBe(7);
+      expect(ghCalls.some((call) => call.startsWith("pr list "))).toBe(true);
+      expect(statusDetailsOptions).toEqual([
+        { failWhenIndexLocked: true, skipUpstreamRefresh: true },
+      ]);
+    }),
+  );
+
+  it.effect("a normal status read after a passive one still refreshes the upstream", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("piedpiper-git-manager-passive-active-");
+      yield* initRepo(repoDir);
+      const statusDetailsOptions: Array<GitStatusDetailsOptions | undefined> = [];
+      const { manager } = yield* makeManager({ statusDetailsOptions, autoPull: {} });
+
+      yield* manager.status({ cwd: repoDir, refreshUpstream: false });
+      // A repeat inside the cache lifetime reuses the passive entry.
+      yield* manager.status({ cwd: repoDir, refreshUpstream: false });
+      yield* manager.status({ cwd: repoDir });
+
+      expect(statusDetailsOptions.map((options) => options?.skipUpstreamRefresh)).toEqual([
+        true,
+        false,
+      ]);
+    }),
+  );
+
+  it.effect("concurrent passive and normal reads do not share a result", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("piedpiper-git-manager-passive-concurrent-");
+      yield* initRepo(repoDir);
+      const statusDetailsOptions: Array<GitStatusDetailsOptions | undefined> = [];
+      const { manager } = yield* makeManager({ statusDetailsOptions, autoPull: {} });
+
+      yield* Effect.all(
+        [
+          manager.status({ cwd: repoDir, refreshUpstream: false }),
+          manager.status({ cwd: repoDir }),
+        ],
+        { concurrency: "unbounded" },
+      );
+
+      expect(
+        statusDetailsOptions.map((options) => options?.skipUpstreamRefresh).toSorted(),
+      ).toEqual([false, true]);
+    }),
+  );
+
+  it.effect("concurrent passive reads of one checkout share a single read", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("piedpiper-git-manager-passive-shared-");
+      yield* initRepo(repoDir);
+      const statusDetailsCalls = { count: 0 };
+      const { manager } = yield* makeManager({ statusDetailsCalls, autoPull: {} });
+
+      const results = yield* Effect.all(
+        Array.from({ length: 5 }, () => manager.status({ cwd: repoDir, refreshUpstream: false })),
+        { concurrency: "unbounded" },
+      );
+
+      expect(statusDetailsCalls.count).toBe(1);
+      expect(new Set(results.map((result) => result.branch)).size).toBe(1);
+    }),
+  );
+
+  it.effect("invalidating status clears passive and normal entries", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("piedpiper-git-manager-passive-invalidate-");
+      yield* initRepo(repoDir);
+      const statusDetailsCalls = { count: 0 };
+      const { manager } = yield* makeManager({ statusDetailsCalls, autoPull: {} });
+
+      yield* manager.status({ cwd: repoDir, refreshUpstream: false });
+      yield* manager.status({ cwd: repoDir });
+      expect(statusDetailsCalls.count).toBe(2);
+
+      yield* manager.refreshMissingPullRequest({ cwd: repoDir });
+      yield* manager.status({ cwd: repoDir, refreshUpstream: false });
+      yield* manager.status({ cwd: repoDir });
+      expect(statusDetailsCalls.count).toBe(4);
+    }),
+  );
+
+  it.effect("a passive status read keeps fetching where auto-pull needs fresh refs", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("piedpiper-git-manager-passive-autopull-");
+      yield* initRepo(repoDir);
+      const statusDetailsOptions: Array<GitStatusDetailsOptions | undefined> = [];
+      const askedCwds: string[] = [];
+      const { manager } = yield* makeManager({
+        statusDetailsOptions,
+        autoPull: {
+          keepsRefsFresh: (cwd) =>
+            Effect.sync(() => {
+              askedCwds.push(cwd);
+              return true;
+            }),
+        },
+      });
+
+      yield* manager.status({ cwd: repoDir, refreshUpstream: false });
+
+      expect(askedCwds).toEqual([fs.realpathSync(repoDir)]);
+      expect(statusDetailsOptions.map((options) => options?.skipUpstreamRefresh)).toEqual([false]);
+    }),
+  );
+
+  it.effect("status skips the automatic pull for non-git directories", () =>
+    Effect.gen(function* () {
+      const cwd = yield* makeTempDir("piedpiper-git-manager-autopull-non-repo-");
+      let pullCalls = 0;
+      const { manager } = yield* makeManager({
+        autoPull: {
+          maybePull: () =>
+            Effect.sync(() => {
+              pullCalls += 1;
+              return true;
+            }),
+        },
+      });
+
+      const status = yield* manager.status({ cwd });
+
+      expect(status.isRepo).toBe(false);
+      expect(pullCalls).toBe(0);
+    }),
+  );
+
+  it.effect("status returns an explicit non-repo result for deleted directories", () =>
+    Effect.gen(function* () {
+      const rootDir = yield* makeTempDir("piedpiper-git-manager-deleted-");
+      const fileSystem = yield* FileSystem.FileSystem;
+      const cwd = path.join(rootDir, "deleted-repo");
+      yield* fileSystem.makeDirectory(cwd, { recursive: true });
+      yield* fileSystem.remove(cwd, { recursive: true });
+      const { manager } = yield* makeManager();
+
+      const status = yield* manager.status({ cwd });
+
+      expect(status).toEqual({
+        isRepo: false,
+        hasOriginRemote: false,
+        isDefaultBranch: false,
+        branch: null,
+        hasWorkingTreeChanges: false,
+        workingTree: { files: [], insertions: 0, deletions: 0 },
         hasUpstream: false,
         aheadCount: 0,
         behindCount: 0,
@@ -734,6 +1114,681 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
       expect(second.pr?.number).toBe(113);
       expect(ghCalls.filter((call) => call.startsWith("pr list "))).toHaveLength(1);
     }),
+  );
+
+  it.effect("status keeps the PR lookup cached across status cache expiry", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("piedpiper-git-manager-");
+      yield* initRepo(repoDir);
+      yield* runGit(repoDir, ["checkout", "-b", "feature/status-pr-cache"]);
+      const remoteDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "feature/status-pr-cache"]);
+
+      const existingPr = {
+        number: 114,
+        title: "Cached PR",
+        url: "https://github.com/user/repo/pull/114",
+        baseRefName: "main",
+        headRefName: "feature/status-pr-cache",
+      };
+      const { manager, ghCalls } = yield* makeManager({
+        ghScenario: {
+          prListByHeadSelector: { "feature/status-pr-cache": JSON.stringify([existingPr]) },
+        },
+      });
+
+      const first = yield* manager.status({ cwd: repoDir });
+      yield* TestClock.adjust(Duration.millis(1_100));
+      const second = yield* manager.status({ cwd: repoDir });
+
+      expect(first.pr?.number).toBe(114);
+      expect(second.pr?.number).toBe(114);
+      expect(ghCalls.filter((call) => call.startsWith("pr list "))).toHaveLength(1);
+    }),
+  );
+
+  it.effect("status keeps the last known PR when a later lookup fails", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("piedpiper-git-manager-");
+      yield* initRepo(repoDir);
+      yield* runGit(repoDir, ["checkout", "-b", "feature/status-pr-fallback"]);
+      const remoteDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "feature/status-pr-fallback"]);
+
+      const { manager, ghCalls } = yield* makeManager({
+        ghScenario: {
+          prListSequence: [
+            JSON.stringify([
+              {
+                number: 115,
+                title: "Known PR",
+                url: "https://github.com/user/repo/pull/115",
+                baseRefName: "main",
+                headRefName: "feature/status-pr-fallback",
+              },
+            ]),
+            "not json",
+          ],
+        },
+      });
+
+      const first = yield* manager.status({ cwd: repoDir });
+      expect(first.pr?.number).toBe(115);
+
+      // A git action bumps the PR lookup epoch, forcing a fresh (failing) lookup.
+      yield* runStackedAction(manager, { cwd: repoDir, action: "push" });
+      const prListCallsBefore = ghCalls.filter((call) => call.startsWith("pr list ")).length;
+      const second = yield* manager.status({ cwd: repoDir });
+
+      expect(ghCalls.filter((call) => call.startsWith("pr list ")).length).toBeGreaterThan(
+        prListCallsBefore,
+      );
+      expect(second.pr?.number).toBe(115);
+    }),
+  );
+
+  const failGhLookups = (scenario: FakeGhScenario) => {
+    scenario.failWith = new GitHubCliError({
+      operation: "execute",
+      detail: "API rate limit exceeded",
+    });
+  };
+  // Expires both the 1s status cache and the 2m PR lookup cache so the next status re-runs `gh`.
+  const expirePrLookupCache = TestClock.adjust(Duration.seconds(121));
+  const lastKnownPrJson = (number: number, headRefName: string) =>
+    JSON.stringify([
+      {
+        number,
+        title: "Last known PR",
+        url: `https://github.com/user/repo/pull/${number}`,
+        baseRefName: "main",
+        headRefName,
+      },
+    ]);
+
+  it.effect(
+    "status does not reuse a stale PR after the branch is retargeted to a different upstream",
+    () =>
+      Effect.gen(function* () {
+        const repoDir = yield* makeTempDir("piedpiper-git-manager-");
+        yield* initRepo(repoDir);
+        yield* runGit(repoDir, ["checkout", "-b", "feature/pr-retarget"]);
+        yield* runGit(repoDir, ["remote", "add", "origin", yield* createBareRemote()]);
+        yield* runGit(repoDir, ["push", "-u", "origin", "feature/pr-retarget"]);
+
+        const ghScenario: FakeGhScenario = {
+          prListSequence: [lastKnownPrJson(216, "feature/pr-retarget")],
+        };
+        const { manager } = yield* makeManager({ ghScenario });
+        expect((yield* manager.status({ cwd: repoDir })).pr?.number).toBe(216);
+
+        yield* runGit(repoDir, ["remote", "add", "fork", yield* createBareRemote()]);
+        yield* runGit(repoDir, ["push", "-u", "fork", "feature/pr-retarget"]);
+        failGhLookups(ghScenario);
+        yield* expirePrLookupCache;
+
+        expect((yield* manager.status({ cwd: repoDir })).pr).toBeNull();
+      }),
+  );
+
+  it.effect("status keeps the last known PR when the branch gains its first upstream", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("piedpiper-git-manager-");
+      yield* initRepo(repoDir);
+      yield* runGit(repoDir, ["remote", "add", "origin", yield* createBareRemote()]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "main"]);
+      yield* runGit(repoDir, ["checkout", "-b", "feature/pr-first-upstream"]);
+      yield* runGit(repoDir, ["push", "origin", "feature/pr-first-upstream"]);
+
+      const ghScenario: FakeGhScenario = {
+        prListSequence: [lastKnownPrJson(217, "feature/pr-first-upstream")],
+      };
+      const { manager } = yield* makeManager({ ghScenario });
+      expect((yield* manager.status({ cwd: repoDir })).pr?.number).toBe(217);
+
+      yield* runGit(repoDir, ["branch", "--set-upstream-to=origin/feature/pr-first-upstream"]);
+      failGhLookups(ghScenario);
+      yield* expirePrLookupCache;
+
+      expect((yield* manager.status({ cwd: repoDir })).pr?.number).toBe(217);
+    }),
+  );
+
+  it.effect("status keeps the last known PR when the current remote URL can't be resolved", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("piedpiper-git-manager-");
+      yield* initRepo(repoDir);
+      yield* runGit(repoDir, ["checkout", "-b", "feature/pr-config-hiccup"]);
+      yield* runGit(repoDir, ["remote", "add", "origin", yield* createBareRemote()]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "feature/pr-config-hiccup"]);
+
+      const ghScenario: FakeGhScenario = {
+        prListSequence: [lastKnownPrJson(221, "feature/pr-config-hiccup")],
+      };
+      const { manager } = yield* makeManager({ ghScenario });
+      expect((yield* manager.status({ cwd: repoDir })).pr?.number).toBe(221);
+
+      // A failed `remote.origin.url` read looks like a missing key; tracking refs stay intact.
+      yield* runGit(repoDir, ["config", "--unset", "remote.origin.url"]);
+      failGhLookups(ghScenario);
+      yield* expirePrLookupCache;
+
+      expect((yield* manager.status({ cwd: repoDir })).pr?.number).toBe(221);
+    }),
+  );
+
+  it.effect("status reads the origin remote URL once when the branch tracks origin", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("piedpiper-git-manager-");
+      yield* initRepo(repoDir);
+      yield* runGit(repoDir, ["checkout", "-b", "feature/pr-origin-once"]);
+      yield* runGit(repoDir, ["remote", "add", "origin", yield* createBareRemote()]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "feature/pr-origin-once"]);
+
+      const configReads: string[] = [];
+      const { manager } = yield* makeManager({
+        ghScenario: { prListSequence: [lastKnownPrJson(222, "feature/pr-origin-once")] },
+        configReads,
+      });
+      expect((yield* manager.status({ cwd: repoDir })).pr?.number).toBe(222);
+      expect(configReads.filter((key) => key === "remote.origin.url")).toHaveLength(1);
+    }),
+  );
+
+  it.effect("status drops the last known PR when the tracked remote is repointed", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("piedpiper-git-manager-");
+      yield* initRepo(repoDir);
+      yield* runGit(repoDir, ["checkout", "-b", "feature/pr-repointed"]);
+      yield* runGit(repoDir, ["remote", "add", "origin", yield* createBareRemote()]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "feature/pr-repointed"]);
+
+      const ghScenario: FakeGhScenario = {
+        prListSequence: [lastKnownPrJson(218, "feature/pr-repointed")],
+      };
+      const { manager } = yield* makeManager({ ghScenario });
+      expect((yield* manager.status({ cwd: repoDir })).pr?.number).toBe(218);
+
+      const replacementRemoteDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["push", replacementRemoteDir, "feature/pr-repointed"]);
+      yield* runGit(repoDir, ["remote", "set-url", "origin", replacementRemoteDir]);
+      failGhLookups(ghScenario);
+      yield* expirePrLookupCache;
+
+      expect((yield* manager.status({ cwd: repoDir })).pr).toBeNull();
+    }),
+  );
+
+  it.effect(
+    "status drops the last known PR when the branch moves to another GitHub host with the same owner/repo",
+    () =>
+      Effect.gen(function* () {
+        const repoDir = yield* makeTempDir("piedpiper-git-manager-");
+        yield* initRepo(repoDir);
+        yield* runGit(repoDir, ["checkout", "-b", "feature/pr-other-host"]);
+        const originDir = yield* createBareRemote();
+        yield* runGit(repoDir, ["remote", "add", "origin", "https://github.com/acme/app.git"]);
+        yield* configureVisibleRemoteUrlWithLocalRewrite(
+          repoDir,
+          "origin",
+          "https://github.com/acme/app.git",
+          originDir,
+        );
+        yield* runGit(repoDir, ["config", "remote.origin.pushurl", originDir]);
+        yield* runGit(repoDir, ["push", "-u", "origin", "feature/pr-other-host"]);
+
+        const ghScenario: FakeGhScenario = {
+          prListSequence: [lastKnownPrJson(219, "feature/pr-other-host")],
+        };
+        const { manager } = yield* makeManager({ ghScenario });
+        expect((yield* manager.status({ cwd: repoDir })).pr?.number).toBe(219);
+
+        const mirrorDir = yield* createBareRemote();
+        yield* runGit(repoDir, ["remote", "add", "mirror", "git@github.acme.corp:acme/app.git"]);
+        yield* configureVisibleRemoteUrlWithLocalRewrite(
+          repoDir,
+          "mirror",
+          "git@github.acme.corp:acme/app.git",
+          mirrorDir,
+        );
+        yield* runGit(repoDir, ["config", "remote.mirror.pushurl", mirrorDir]);
+        yield* runGit(repoDir, ["push", "-u", "mirror", "feature/pr-other-host"]);
+        failGhLookups(ghScenario);
+        yield* expirePrLookupCache;
+
+        expect((yield* manager.status({ cwd: repoDir })).pr).toBeNull();
+      }),
+  );
+
+  it.effect("refreshMissingPullRequest finds a PR opened after a cached empty lookup", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("piedpiper-git-manager-");
+      yield* initRepo(repoDir);
+      yield* runGit(repoDir, ["checkout", "-b", "feature/agent-opened-pr"]);
+      yield* runGit(repoDir, ["remote", "add", "origin", yield* createBareRemote()]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "feature/agent-opened-pr"]);
+
+      const { manager, ghCalls } = yield* makeManager({
+        ghScenario: {
+          prListSequence: ["[]", lastKnownPrJson(320, "feature/agent-opened-pr")],
+        },
+      });
+      const prListCalls = () => ghCalls.filter((call) => call.startsWith("pr list ")).length;
+
+      expect((yield* manager.status({ cwd: repoDir })).pr).toBeNull();
+      yield* TestClock.adjust(Duration.millis(1_100));
+      expect((yield* manager.status({ cwd: repoDir })).pr).toBeNull();
+      expect(prListCalls()).toBe(1);
+
+      // A different checked-out branch leaves the cache alone.
+      yield* manager.refreshMissingPullRequest({ cwd: repoDir, branch: "feature/other" });
+      expect((yield* manager.status({ cwd: repoDir })).pr).toBeNull();
+
+      yield* manager.refreshMissingPullRequest({
+        cwd: repoDir,
+        branch: "feature/agent-opened-pr",
+      });
+      expect((yield* manager.status({ cwd: repoDir })).pr?.number).toBe(320);
+      expect(prListCalls()).toBe(2);
+
+      // A known PR stays cached.
+      yield* manager.refreshMissingPullRequest({ cwd: repoDir });
+      expect((yield* manager.status({ cwd: repoDir })).pr?.number).toBe(320);
+      expect(prListCalls()).toBe(2);
+    }),
+  );
+
+  it.effect("refreshMissingPullRequest drops an in-flight lookup that settles empty", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("piedpiper-git-manager-");
+      yield* initRepo(repoDir);
+      yield* runGit(repoDir, ["checkout", "-b", "feature/racing-pr"]);
+      yield* runGit(repoDir, ["remote", "add", "origin", yield* createBareRemote()]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "feature/racing-pr"]);
+
+      const gate = yield* Deferred.make<void>();
+      const statusDetailsCalls = { count: 0 };
+      const { manager, ghCalls } = yield* makeManager({
+        ghScenario: {
+          prListSequence: ["[]", lastKnownPrJson(321, "feature/racing-pr")],
+          prListGate: Deferred.await(gate),
+        },
+        statusDetailsCalls,
+      });
+      const prListCalls = () => ghCalls.filter((call) => call.startsWith("pr list ")).length;
+
+      const inFlight = yield* manager.status({ cwd: repoDir }).pipe(Effect.forkChild);
+      while (prListCalls() === 0) {
+        yield* Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 5)));
+      }
+      const statusCallsBefore = statusDetailsCalls.count;
+      yield* manager.refreshMissingPullRequest({ cwd: repoDir, branch: "feature/racing-pr" });
+      // The refresh reads only the cache: no git status (and its upstream fetch) on the turn path.
+      expect(statusDetailsCalls.count).toBe(statusCallsBefore);
+
+      yield* Deferred.succeed(gate, undefined);
+      expect((yield* Fiber.join(inFlight)).pr).toBeNull();
+      yield* TestClock.adjust(Duration.millis(1_100));
+      expect((yield* manager.status({ cwd: repoDir })).pr?.number).toBe(321);
+      expect(prListCalls()).toBe(2);
+    }),
+  );
+
+  it.effect("refreshMissingPullRequest keeps the failure backoff", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("piedpiper-git-manager-");
+      yield* initRepo(repoDir);
+      yield* runGit(repoDir, ["checkout", "-b", "feature/refresh-backoff"]);
+      yield* runGit(repoDir, ["remote", "add", "origin", yield* createBareRemote()]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "feature/refresh-backoff"]);
+
+      const ghScenario: FakeGhScenario = {};
+      failGhLookups(ghScenario);
+      const { manager, ghCalls } = yield* makeManager({ ghScenario });
+
+      expect((yield* manager.status({ cwd: repoDir })).pr).toBeNull();
+      const callsAfterFailure = ghCalls.length;
+      yield* manager.refreshMissingPullRequest({ cwd: repoDir });
+      expect((yield* manager.status({ cwd: repoDir })).pr).toBeNull();
+      expect(ghCalls.length).toBe(callsAfterFailure);
+    }),
+  );
+
+  it.effect("status does not show the PR of a local branch the current branch tracks", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("piedpiper-git-manager-");
+      yield* initRepo(repoDir);
+      yield* runGit(repoDir, ["remote", "add", "origin", yield* createBareRemote()]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "main"]);
+      yield* runGit(repoDir, ["checkout", "-b", "feature/base"]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "feature/base"]);
+      yield* runGit(repoDir, ["checkout", "--track", "-b", "feature/stacked", "feature/base"]);
+
+      const { manager, ghCalls } = yield* makeManager({
+        ghScenario: {
+          prListByHeadSelector: { "feature/base": lastKnownPrJson(400, "feature/base") },
+        },
+      });
+
+      const status = yield* manager.status({ cwd: repoDir });
+      expect(status.branch).toBe("feature/stacked");
+      expect(status.pr).toBeNull();
+      expect(ghCalls.some((call) => call.includes("feature/base"))).toBe(false);
+    }),
+  );
+
+  it.effect("status finds the PR of a stacked branch once it is pushed under its own name", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("piedpiper-git-manager-");
+      yield* initRepo(repoDir);
+      yield* runGit(repoDir, ["remote", "add", "origin", yield* createBareRemote()]);
+      yield* runGit(repoDir, ["checkout", "-b", "feature/base-pushed"]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "feature/base-pushed"]);
+      yield* runGit(repoDir, [
+        "checkout",
+        "--track",
+        "-b",
+        "feature/stacked-pushed",
+        "feature/base-pushed",
+      ]);
+      yield* runGit(repoDir, ["push", "origin", "feature/stacked-pushed"]);
+
+      const { manager, ghCalls } = yield* makeManager({
+        ghScenario: {
+          prListByHeadSelector: {
+            "feature/base-pushed": lastKnownPrJson(401, "feature/base-pushed"),
+            "feature/stacked-pushed": lastKnownPrJson(402, "feature/stacked-pushed"),
+          },
+        },
+      });
+
+      expect((yield* manager.status({ cwd: repoDir })).pr?.number).toBe(402);
+      expect(ghCalls.some((call) => call.includes(".:"))).toBe(false);
+      expect(ghCalls.some((call) => call.includes("feature/base-pushed"))).toBe(false);
+    }),
+  );
+
+  it.effect("status treats the only remote as the PR repository when there is no origin", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("piedpiper-git-manager-");
+      yield* initRepo(repoDir);
+      yield* runGit(repoDir, ["checkout", "-b", "feature/only-remote"]);
+      const upstreamDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["remote", "add", "upstream", "https://github.com/acme/app.git"]);
+      yield* configureVisibleRemoteUrlWithLocalRewrite(
+        repoDir,
+        "upstream",
+        "https://github.com/acme/app.git",
+        upstreamDir,
+      );
+      yield* runGit(repoDir, ["config", "remote.upstream.pushurl", upstreamDir]);
+      yield* runGit(repoDir, ["push", "-u", "upstream", "feature/only-remote"]);
+
+      const samePr = JSON.stringify([
+        {
+          number: 410,
+          title: "Same-repo PR",
+          url: "https://github.com/acme/app/pull/410",
+          baseRefName: "main",
+          headRefName: "feature/only-remote",
+          state: "OPEN",
+          isCrossRepository: false,
+          headRepository: { nameWithOwner: "acme/app" },
+          headRepositoryOwner: { login: "acme" },
+        },
+      ]);
+      const { manager } = yield* makeManager({
+        ghScenario: { prListByHeadSelector: { "feature/only-remote": samePr } },
+      });
+      expect((yield* manager.status({ cwd: repoDir })).pr?.number).toBe(410);
+
+      // `gh repo set-default` pointing elsewhere makes the remote a fork again.
+      yield* runGit(repoDir, ["config", "remote.upstream.gh-resolved", "other/app"]);
+      const { manager: forkManager } = yield* makeManager({
+        ghScenario: { prListByHeadSelector: { "feature/only-remote": samePr } },
+      });
+      expect((yield* forkManager.status({ cwd: repoDir })).pr).toBeNull();
+    }),
+  );
+
+  it.effect("parses gh repository selectors", () =>
+    Effect.sync(() => {
+      expect(parseGhRepositorySelector("Acme/App")).toBe("acme/app");
+      expect(parseGhRepositorySelector("github.example.com/acme/app")).toBe("acme/app");
+      expect(parseGhRepositorySelector("base")).toBeNull();
+      expect(parseGhRepositorySelector(undefined)).toBeNull();
+      expect(parseGhRepositorySelectorHost("GHE.corp/acme/app")).toBe("ghe.corp");
+      expect(parseGhRepositorySelectorHost("acme/app")).toBeNull();
+      const dotCom = { nameWithOwner: "Acme/App", host: "github.com" };
+      expect(ghSelectorMatchesRepository("acme/app", dotCom)).toBe(true);
+      expect(ghSelectorMatchesRepository("github.com/acme/app", dotCom)).toBe(true);
+      expect(ghSelectorMatchesRepository("ghe.corp/acme/app", dotCom)).toBe(false);
+      expect(ghSelectorMatchesRepository("ghe.corp/acme/app", { ...dotCom, host: null })).toBe(
+        true,
+      );
+      expect(ghSelectorMatchesRepository("other/app", dotCom)).toBe(false);
+      expect(publishedRemoteName(".")).toBeNull();
+      expect(publishedRemoteName("origin")).toBe("origin");
+      expect(pullRequestHost("https://github.acme.corp/acme/app/pull/1")).toBe("github.acme.corp");
+      expect(pullRequestHost("not a url")).toBeUndefined();
+    }),
+  );
+
+  it.effect("status skips the PR lookup for a branch that was never pushed", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("piedpiper-git-manager-");
+      yield* initRepo(repoDir);
+      const remoteDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "main"]);
+      yield* runGit(repoDir, ["checkout", "-b", "feature/never-pushed"]);
+
+      const { manager, ghCalls } = yield* makeManager();
+
+      const status = yield* manager.status({ cwd: repoDir });
+
+      expect(status.branch).toBe("feature/never-pushed");
+      expect(status.pr).toBeNull();
+      expect(ghCalls.filter((call) => call.startsWith("pr list "))).toHaveLength(0);
+    }),
+  );
+
+  it.effect("status still looks up PRs for a branch pushed without --set-upstream", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("piedpiper-git-manager-");
+      yield* initRepo(repoDir);
+      const remoteDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "main"]);
+      yield* runGit(repoDir, ["checkout", "-b", "feature/pushed-no-upstream"]);
+      yield* runGit(repoDir, ["push", "origin", "feature/pushed-no-upstream"]);
+
+      const { manager } = yield* makeManager({
+        ghScenario: {
+          prListSequence: [
+            JSON.stringify([
+              {
+                number: 214,
+                title: "Pushed without upstream",
+                url: "https://github.com/user/repo/pull/214",
+                baseRefName: "main",
+                headRefName: "feature/pushed-no-upstream",
+                state: "OPEN",
+                updatedAt: "2026-04-01T15:00:00Z",
+              },
+            ]),
+          ],
+        },
+      });
+
+      const status = yield* manager.status({ cwd: repoDir });
+      expect(status.pr?.number).toBe(214);
+    }),
+  );
+
+  it.effect("backs off repeated PR lookup failures past the healthy refresh cadence", () =>
+    Effect.sync(() => {
+      expect(Duration.toMillis(prLookupFailureTtl(1))).toBe(20_000);
+      expect(Duration.toMillis(prLookupFailureTtl(2))).toBe(40_000);
+      expect(Duration.toMillis(prLookupFailureTtl(4))).toBeGreaterThan(120_000);
+      expect(Duration.toMillis(prLookupFailureTtl(20))).toBe(900_000);
+    }),
+  );
+
+  it.effect("status hides merged PRs on the default branch", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("piedpiper-git-manager-");
+      yield* initRepo(repoDir);
+
+      const { manager } = yield* makeManager({
+        ghScenario: {
+          prListSequence: [
+            JSON.stringify([
+              {
+                number: 23,
+                title: "Merged PR",
+                url: "https://github.com/user/repo/pull/23",
+                baseRefName: "feature/status-default-branch-target",
+                headRefName: "main",
+                state: "MERGED",
+                mergedAt: "2026-01-30T10:00:00Z",
+                updatedAt: "2026-01-30T10:00:00Z",
+              },
+            ]),
+          ],
+        },
+      });
+
+      const status = yield* manager.status({ cwd: repoDir });
+      expect(status.branch).toBe("main");
+      expect(status.isDefaultBranch).toBe(true);
+      expect(status.pr).toBeNull();
+    }),
+  );
+
+  it.effect("status does not inherit a merged PR from a feature branch's default upstream", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("piedpiper-git-manager-");
+      yield* initRepo(repoDir);
+      const remoteDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "main"]);
+      yield* runGit(repoDir, ["remote", "set-head", "origin", "main"]);
+      yield* runGit(repoDir, ["checkout", "-b", "feature/from-main", "origin/main"]);
+
+      const { manager, ghCalls } = yield* makeManager({
+        ghScenario: {
+          prListSequence: [
+            JSON.stringify([
+              {
+                number: 54,
+                title: "Reverse merge from main",
+                url: "https://github.com/user/repo/pull/54",
+                baseRefName: "other-feature",
+                headRefName: "main",
+                state: "MERGED",
+                mergedAt: "2023-09-28T03:21:10Z",
+                updatedAt: "2023-09-28T03:21:10Z",
+              },
+            ]),
+          ],
+        },
+      });
+
+      const status = yield* manager.status({ cwd: repoDir });
+      expect(status.branch).toBe("feature/from-main");
+      expect(status.pr).toBeNull();
+      expect(ghCalls.some((call) => call.includes("pr list"))).toBe(false);
+    }),
+  );
+
+  it.effect("status does not inherit a PR from a feature branch tracking a non-main default", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("piedpiper-git-manager-");
+      yield* initRepo(repoDir);
+      const remoteDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+      yield* runGit(repoDir, ["push", "origin", "main:trunk"]);
+      yield* runGit(repoDir, ["remote", "set-head", "origin", "trunk"]);
+      yield* runGit(repoDir, ["checkout", "-b", "feature/from-trunk", "origin/trunk"]);
+
+      const { manager, ghCalls } = yield* makeManager({
+        ghScenario: {
+          prListSequence: [
+            JSON.stringify([
+              {
+                number: 55,
+                title: "Reverse merge from trunk",
+                url: "https://github.com/user/repo/pull/55",
+                baseRefName: "other-feature",
+                headRefName: "trunk",
+                state: "MERGED",
+                mergedAt: "2023-09-28T03:21:10Z",
+                updatedAt: "2023-09-28T03:21:10Z",
+              },
+            ]),
+          ],
+        },
+      });
+
+      const status = yield* manager.status({ cwd: repoDir });
+      expect(status.branch).toBe("feature/from-trunk");
+      expect(status.pr).toBeNull();
+      expect(ghCalls.some((call) => call.includes("pr list"))).toBe(false);
+    }),
+  );
+
+  it.effect(
+    "status preserves a fork PR whose head is named after the default branch",
+    () =>
+      Effect.gen(function* () {
+        const repoDir = yield* makeTempDir("piedpiper-git-manager-");
+        yield* initRepo(repoDir);
+        const originDir = yield* createBareRemote();
+        const forkDir = yield* createBareRemote();
+        yield* runGit(repoDir, ["remote", "add", "origin", originDir]);
+        yield* runGit(repoDir, ["push", "-u", "origin", "main"]);
+        yield* runGit(repoDir, ["remote", "set-head", "origin", "main"]);
+        yield* runGit(repoDir, ["remote", "add", "fork-seed", forkDir]);
+        yield* runGit(repoDir, ["push", "fork-seed", "main"]);
+        yield* runGit(repoDir, ["checkout", "-b", "piedpiper/pr-777/main"]);
+        yield* runGit(repoDir, ["branch", "--set-upstream-to", "fork-seed/main"]);
+        yield* configureVisibleRemoteUrlWithLocalRewrite(
+          repoDir,
+          "fork-seed",
+          "git@github.com:contributor/piedpiper-app.git",
+          forkDir,
+        );
+
+        const { manager } = yield* makeManager({
+          ghScenario: {
+            prListByHeadSelector: {
+              main: JSON.stringify([
+                {
+                  number: 777,
+                  title: "Fork PR from main",
+                  url: "https://github.com/user/repo/pull/777",
+                  baseRefName: "main",
+                  headRefName: "main",
+                  state: "OPEN",
+                  updatedAt: "2026-03-10T07:00:00Z",
+                  isCrossRepository: true,
+                  headRepository: { nameWithOwner: "contributor/piedpiper-app" },
+                  headRepositoryOwner: { login: "contributor" },
+                },
+              ]),
+            },
+          },
+        });
+
+        const status = yield* manager.status({ cwd: repoDir });
+        expect(status.branch).toBe("piedpiper/pr-777/main");
+        expect(status.pr?.number).toBe(777);
+        expect(status.pr?.state).toBe("open");
+      }),
+    20_000,
   );
 
   it.effect(
@@ -777,69 +1832,65 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
       }),
   );
 
-  it.effect(
-    "status detects cross-repo PRs from the upstream remote URL owner",
-    () =>
-      Effect.gen(function* () {
-        const repoDir = yield* makeTempDir("piedpiper-git-manager-");
-        yield* initRepo(repoDir);
-        const forkDir = yield* createBareRemote();
-        yield* runGit(repoDir, ["remote", "add", "fork-seed", forkDir]);
-        yield* runGit(repoDir, ["checkout", "-b", "statemachine"]);
-        fs.writeFileSync(path.join(repoDir, "fork-pr.txt"), "fork pr\n");
-        yield* runGit(repoDir, ["add", "fork-pr.txt"]);
-        yield* runGit(repoDir, ["commit", "-m", "Fork PR branch"]);
-        yield* runGit(repoDir, ["push", "-u", "fork-seed", "statemachine"]);
-        yield* runGit(repoDir, ["checkout", "-b", "piedpiper/pr-488/statemachine"]);
-        yield* runGit(repoDir, ["branch", "--set-upstream-to", "fork-seed/statemachine"]);
-        yield* runGit(repoDir, [
-          "config",
-          "remote.fork-seed.url",
-          "git@github.com:jasonLaster/piedpiper-app.git",
-        ]);
+  it.effect("status detects cross-repo PRs from the upstream remote URL owner", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("piedpiper-git-manager-");
+      yield* initRepo(repoDir);
+      const forkDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["remote", "add", "fork-seed", forkDir]);
+      yield* runGit(repoDir, ["checkout", "-b", "statemachine"]);
+      fs.writeFileSync(path.join(repoDir, "fork-pr.txt"), "fork pr\n");
+      yield* runGit(repoDir, ["add", "fork-pr.txt"]);
+      yield* runGit(repoDir, ["commit", "-m", "Fork PR branch"]);
+      yield* runGit(repoDir, ["push", "-u", "fork-seed", "statemachine"]);
+      yield* runGit(repoDir, ["checkout", "-b", "piedpiper/pr-488/statemachine"]);
+      yield* runGit(repoDir, ["branch", "--set-upstream-to", "fork-seed/statemachine"]);
+      yield* configureVisibleRemoteUrlWithLocalRewrite(
+        repoDir,
+        "fork-seed",
+        "git@github.com:jasonLaster/piedpiper-app.git",
+        forkDir,
+      );
 
-        const { manager, ghCalls } = yield* makeManager({
-          ghScenario: {
-            prListSequence: [
-              JSON.stringify([]),
-              JSON.stringify([]),
-              JSON.stringify([
-                {
-                  number: 488,
-                  title: "Rebase this PR on latest main",
-                  url: "https://github.com/user/repo/pull/488",
-                  baseRefName: "main",
-                  headRefName: "statemachine",
-                  state: "OPEN",
-                  updatedAt: "2026-03-10T07:00:00Z",
-                  isCrossRepository: true,
-                  headRepository: {
-                    nameWithOwner: "jasonLaster/piedpiper-app",
-                  },
-                  headRepositoryOwner: {
-                    login: "jasonLaster",
-                  },
+      const { manager, ghCalls } = yield* makeManager({
+        ghScenario: {
+          prListSequence: [
+            JSON.stringify([
+              {
+                number: 488,
+                title: "Rebase this PR on latest main",
+                url: "https://github.com/user/repo/pull/488",
+                baseRefName: "main",
+                headRefName: "statemachine",
+                state: "OPEN",
+                updatedAt: "2026-03-10T07:00:00Z",
+                isCrossRepository: true,
+                headRepository: {
+                  nameWithOwner: "jasonLaster/piedpiper-app",
                 },
-              ]),
-            ],
-          },
-        });
+                headRepositoryOwner: {
+                  login: "jasonLaster",
+                },
+              },
+            ]),
+          ],
+        },
+      });
 
-        const status = yield* manager.status({ cwd: repoDir });
-        expect(status.branch).toBe("piedpiper/pr-488/statemachine");
-        expect(status.pr).toEqual({
-          number: 488,
-          title: "Rebase this PR on latest main",
-          url: "https://github.com/user/repo/pull/488",
-          baseBranch: "main",
-          headBranch: "statemachine",
-          state: "open",
-        });
-        expect(ghCalls).toContain(
-          "pr list --head jasonLaster:statemachine --state all --limit 20 --json number,title,url,baseRefName,headRefName,state,mergedAt,updatedAt,isCrossRepository,headRepository,headRepositoryOwner",
-        );
-      }),
-    12_000,
+      const status = yield* manager.status({ cwd: repoDir });
+      expect(status.branch).toBe("piedpiper/pr-488/statemachine");
+      expect(status.pr).toEqual({
+        number: 488,
+        title: "Rebase this PR on latest main",
+        url: "https://github.com/user/repo/pull/488",
+        baseBranch: "main",
+        headBranch: "statemachine",
+        state: "open",
+      });
+      expect(ghCalls).toEqual([
+        "pr list --head statemachine --state all --limit 100 --json number,title,url,baseRefName,headRefName,state,mergedAt,updatedAt,isDraft,isCrossRepository,headRepository,headRepositoryOwner",
+      ]);
+    }),
   );
 
   it.effect(
@@ -858,11 +1909,13 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
         yield* runGit(repoDir, ["push", "-u", "my-org/upstream", "effect-atom"]);
         yield* runGit(repoDir, ["config", "remote.origin.url", "git@github.com:user/repo.git"]);
         yield* runGit(repoDir, ["config", "remote.origin.pushurl", originDir]);
-        yield* runGit(repoDir, [
-          "config",
-          "remote.my-org/upstream.url",
+        // Both remotes show the same URL; it rewrites to the tracked remote's bare repo.
+        yield* configureVisibleRemoteUrlWithLocalRewrite(
+          repoDir,
+          "my-org/upstream",
           "git@github.com:user/repo.git",
-        ]);
+          upstreamDir,
+        );
         yield* runGit(repoDir, ["config", "remote.my-org/upstream.pushurl", upstreamDir]);
         yield* runGit(repoDir, ["checkout", "main"]);
         yield* runGit(repoDir, ["branch", "-D", "effect-atom"]);
@@ -893,30 +1946,6 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
                   updatedAt: "2026-04-01T10:00:00Z",
                 },
               ]),
-              "test-org:effect-atom": JSON.stringify([]),
-              "my-org/upstream:effect-atom": JSON.stringify([]),
-              "test-org:upstream/effect-atom": JSON.stringify([
-                {
-                  number: 1518,
-                  title: "Wrong PR",
-                  url: "https://github.com/user/repo/pull/1518",
-                  baseRefName: "main",
-                  headRefName: "upstream/effect-atom",
-                  state: "OPEN",
-                  updatedAt: "2026-04-01T10:00:00Z",
-                },
-              ]),
-              "my-org/upstream:upstream/effect-atom": JSON.stringify([
-                {
-                  number: 1518,
-                  title: "Wrong PR",
-                  url: "https://github.com/user/repo/pull/1518",
-                  baseRefName: "main",
-                  headRefName: "upstream/effect-atom",
-                  state: "OPEN",
-                  updatedAt: "2026-04-01T10:00:00Z",
-                },
-              ]),
             },
           },
         });
@@ -934,16 +1963,9 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
         expect(ghCalls.some((call) => call.includes("pr list --head upstream/effect-atom "))).toBe(
           false,
         );
-        expect(
-          ghCalls.some((call) => call.includes("pr list --head test-org:upstream/effect-atom ")),
-        ).toBe(false);
-        expect(
-          ghCalls.some((call) =>
-            call.includes("pr list --head my-org/upstream:upstream/effect-atom "),
-          ),
-        ).toBe(false);
+        // gh matches the bare ref name, so owner-qualified selectors are never probed.
+        expect(ghCalls.every((call) => !/--head \S*:/.test(call))).toBe(true);
       }),
-    12_000,
   );
 
   it.effect("status returns merged PR state when latest PR was merged", () =>
@@ -1090,14 +2112,114 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
     }),
   );
 
+  it.effect("passes recent non-merge commit subjects as repository style examples", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("piedpiper-git-manager-");
+      yield* initRepo(repoDir);
+      yield* runGit(repoDir, ["config", "log.showSignature", "true"]);
+      yield* runGit(repoDir, ["commit", "--allow-empty", "-m", "feat(ui): add sidebar"]);
+      yield* runGit(repoDir, ["checkout", "-b", "side"]);
+      yield* runGit(repoDir, ["commit", "--allow-empty", "-m", "fix: side change"]);
+      yield* runGit(repoDir, ["checkout", "main"]);
+      yield* runGit(repoDir, ["merge", "--no-ff", "-m", "Merge branch side", "side"]);
+      fs.writeFileSync(path.join(repoDir, "README.md"), "hello\nstyle\n");
+
+      let instructions: string | undefined;
+      const { manager } = yield* makeManager({
+        textGeneration: {
+          generateCommitMessage: (input) => {
+            instructions = input.additionalInstructions;
+            return Effect.succeed({ subject: "docs: update readme", body: "" });
+          },
+        },
+      });
+      yield* runStackedAction(manager, { cwd: repoDir, action: "commit" });
+
+      expect(instructions).toContain("Recent commit subjects from this repository:");
+      expect(instructions).toContain("- feat(ui): add sidebar");
+      expect(instructions).toContain("- fix: side change");
+      expect(instructions).toContain("- Initial commit");
+      expect(instructions).not.toContain("Merge branch side");
+    }),
+  );
+
+  it.effect("shows a Claude writer the AGENTS.md a separate CLAUDE.md hides", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("piedpiper-git-manager-");
+      yield* initRepo(repoDir);
+      fs.writeFileSync(path.join(repoDir, "AGENTS.md"), "Prefix subjects with a gitmoji.\n");
+      fs.writeFileSync(path.join(repoDir, "CLAUDE.md"), "Something else.\n");
+      fs.writeFileSync(path.join(repoDir, "README.md"), "hello\nstyle\n");
+
+      const generate = (provider: "claudeAgent" | "codex") =>
+        Effect.gen(function* () {
+          let instructions: string | undefined;
+          const { manager } = yield* makeManager({
+            settings: {
+              textGenerationModelSelection:
+                provider === "claudeAgent"
+                  ? { provider, model: "claude-haiku-4-5" }
+                  : { provider, model: "gpt-5.4-mini" },
+            },
+            textGeneration: {
+              generateCommitMessage: (input) => {
+                instructions = input.additionalInstructions;
+                return Effect.fail(
+                  new TextGenerationError({
+                    operation: "generateCommitMessage",
+                    detail: "stop before committing",
+                  }),
+                );
+              },
+            },
+          });
+          yield* runStackedAction(manager, { cwd: repoDir, action: "commit" }).pipe(Effect.ignore);
+          return instructions;
+        });
+
+      expect(yield* generate("claudeAgent")).toContain("Prefix subjects with a gitmoji.");
+      // Codex reads AGENTS.md from the cwd on its own.
+      expect(yield* generate("codex")).not.toContain("Prefix subjects with a gitmoji.");
+    }),
+  );
+
+  it.effect("passes custom commit style instructions to commit generation", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("piedpiper-git-manager-");
+      yield* initRepo(repoDir);
+      fs.writeFileSync(path.join(repoDir, "README.md"), "hello\ncustom\n");
+
+      let instructions: string | undefined = "unset";
+      const prepareCommitContextCalls: Array<GitPrepareCommitContextOptions | undefined> = [];
+      const { manager } = yield* makeManager({
+        prepareCommitContextCalls,
+        settings: {
+          commitMessageStyle: { mode: "custom", customInstructions: "Prefix with a ticket id." },
+        },
+        textGeneration: {
+          generateCommitMessage: (input) => {
+            instructions = input.additionalInstructions;
+            return Effect.succeed({ subject: "ABC-1 Update readme", body: "" });
+          },
+        },
+      });
+      yield* runStackedAction(manager, { cwd: repoDir, action: "commit" });
+
+      expect(instructions).toBe("Prefix with a ticket id.");
+      expect(prepareCommitContextCalls).toEqual([{ includePatch: true }]);
+    }),
+  );
+
   it.effect("uses custom commit message when provided", () =>
     Effect.gen(function* () {
       const repoDir = yield* makeTempDir("piedpiper-git-manager-");
       yield* initRepo(repoDir);
       fs.writeFileSync(path.join(repoDir, "README.md"), "hello\ncustom\n");
       let generatedCount = 0;
+      const prepareCommitContextCalls: Array<GitPrepareCommitContextOptions | undefined> = [];
 
       const { manager } = yield* makeManager({
+        prepareCommitContextCalls,
         textGeneration: {
           generateCommitMessage: (input) =>
             Effect.sync(() => {
@@ -1120,6 +2242,7 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
       expect(result.commit.status).toBe("created");
       expect(result.commit.subject).toBe("feat: custom summary line");
       expect(generatedCount).toBe(0);
+      expect(prepareCommitContextCalls).toEqual([{ includePatch: false }]);
       expect(
         yield* runGit(repoDir, ["log", "-1", "--pretty=%s"]).pipe(
           Effect.map((result) => result.stdout.trim()),
@@ -1155,6 +2278,35 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
       );
       expect(statusStdout).toContain("b.txt");
       expect(statusStdout).not.toContain("a.txt");
+    }),
+  );
+
+  it.effect("leaves the user's staging untouched when commit message generation fails", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("piedpiper-git-manager-");
+      yield* initRepo(repoDir);
+      fs.writeFileSync(path.join(repoDir, "staged.txt"), "staged\n");
+      fs.writeFileSync(path.join(repoDir, "unstaged.txt"), "unstaged\n");
+      yield* runGit(repoDir, ["add", "staged.txt"]);
+
+      const { manager } = yield* makeManager({
+        textGeneration: {
+          generateCommitMessage: () =>
+            Effect.fail(
+              new TextGenerationError({
+                operation: "generateCommitMessage",
+                detail: "model unavailable",
+              }),
+            ),
+        },
+      });
+      yield* runStackedAction(manager, { cwd: repoDir, action: "commit" }).pipe(Effect.flip);
+
+      const statusStdout = yield* runGit(repoDir, ["status", "--porcelain"]).pipe(
+        Effect.map((r) => r.stdout),
+      );
+      expect(statusStdout).toContain("A  staged.txt");
+      expect(statusStdout).toContain("?? unstaged.txt");
     }),
   );
 
@@ -1345,6 +2497,40 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
     }),
   );
 
+  it.effect("pushes existing commits without committing dirty worktree changes", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("piedpiper-git-manager-");
+      yield* initRepo(repoDir);
+      yield* runGit(repoDir, ["checkout", "-b", "feature/push-dirty"]);
+      const remoteDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+      fs.writeFileSync(path.join(repoDir, "push-dirty.txt"), "push dirty\n");
+      yield* runGit(repoDir, ["add", "push-dirty.txt"]);
+      yield* runGit(repoDir, ["commit", "-m", "Push dirty branch"]);
+      fs.writeFileSync(path.join(repoDir, "README.md"), "edited\n");
+      fs.writeFileSync(path.join(repoDir, "untracked.txt"), "untracked\n");
+
+      const { manager } = yield* makeManager();
+      const result = yield* runStackedAction(manager, { cwd: repoDir, action: "push" });
+
+      expect(result.commit.status).toBe("skipped_not_requested");
+      expect(result.push.status).toBe("pushed");
+      const worktreeStatus = (yield* runGit(repoDir, ["status", "--porcelain"])).stdout;
+      expect(worktreeStatus).toContain(" M README.md");
+      expect(worktreeStatus).toContain("?? untracked.txt");
+      expect(
+        (yield* runGit(repoDir, [
+          "--git-dir",
+          remoteDir,
+          "log",
+          "-1",
+          "--pretty=%s",
+          "feature/push-dirty",
+        ])).stdout.trim(),
+      ).toBe("Push dirty branch");
+    }),
+  );
+
   it.effect("pushes existing clean commits without rerunning commit logic", () =>
     Effect.gen(function* () {
       const repoDir = yield* makeTempDir("piedpiper-git-manager-");
@@ -1458,7 +2644,83 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
       expect(result.worktreePath).toBeNull();
       const branch = (yield* runGit(repoDir, ["branch", "--show-current"])).stdout.trim();
       expect(branch).toBe("feature/pr-local");
-      expect(ghCalls).toContain("pr checkout 64 --force");
+      expect(ghCalls).toContain("pr checkout 64");
+      expect(ghCalls.some((call) => call.includes("--force"))).toBe(false);
+    }),
+  );
+
+  it.effect.each([{ staged: false }, { staged: true }])(
+    "refuses local pull request checkout when tracked changes are uncommitted (staged: $staged)",
+    ({ staged }) =>
+      Effect.gen(function* () {
+        const repoDir = yield* makeTempDir("piedpiper-git-manager-");
+        yield* initRepo(repoDir);
+        fs.writeFileSync(path.join(repoDir, "README.md"), "work in progress\n");
+        fs.writeFileSync(path.join(repoDir, "untracked.txt"), "untracked\n");
+        if (staged) {
+          yield* runGit(repoDir, ["add", "README.md"]);
+        }
+        const headBefore = (yield* runGit(repoDir, ["rev-parse", "HEAD"])).stdout.trim();
+        const statusBefore = (yield* runGit(repoDir, ["status", "--porcelain"])).stdout;
+
+        const { manager, ghCalls } = yield* makeManager({
+          ghScenario: {
+            pullRequest: {
+              number: 65,
+              title: "Local PR",
+              url: "https://github.com/user/repo/pull/65",
+              baseRefName: "main",
+              headRefName: "feature/pr-dirty",
+              state: "open",
+            },
+          },
+        });
+
+        const errorMessage = yield* preparePullRequestThread(manager, {
+          cwd: repoDir,
+          reference: "#65",
+          mode: "local",
+        }).pipe(
+          Effect.flip,
+          Effect.map((error) => error.message),
+        );
+
+        expect(errorMessage).toContain("uncommitted changes");
+        expect(ghCalls.some((call) => call.startsWith("pr checkout"))).toBe(false);
+        const branch = (yield* runGit(repoDir, ["branch", "--show-current"])).stdout.trim();
+        expect(branch).toBe("main");
+        expect(fs.readFileSync(path.join(repoDir, "README.md"), "utf8")).toBe("work in progress\n");
+        expect((yield* runGit(repoDir, ["rev-parse", "HEAD"])).stdout.trim()).toBe(headBefore);
+        expect((yield* runGit(repoDir, ["status", "--porcelain"])).stdout).toBe(statusBefore);
+      }),
+  );
+
+  it.effect("allows local pull request checkout with only untracked files", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("piedpiper-git-manager-");
+      yield* initRepo(repoDir);
+      fs.writeFileSync(path.join(repoDir, "untracked.txt"), "untracked\n");
+
+      const { manager } = yield* makeManager({
+        ghScenario: {
+          pullRequest: {
+            number: 66,
+            title: "Local PR",
+            url: "https://github.com/user/repo/pull/66",
+            baseRefName: "main",
+            headRefName: "feature/pr-untracked",
+            state: "open",
+          },
+        },
+      });
+
+      const result = yield* preparePullRequestThread(manager, {
+        cwd: repoDir,
+        reference: "#66",
+        mode: "local",
+      });
+
+      expect(result.branch).toBe("feature/pr-untracked");
     }),
   );
 
@@ -1569,6 +2831,70 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
     }),
   );
 
+  it.effect.each(["local", "worktree"] as const)(
+    "looks up fork clone URLs on the PR's own GitHub host in %s mode",
+    (mode) =>
+      Effect.gen(function* () {
+        const repoDir = yield* makeTempDir("piedpiper-git-manager-");
+        yield* initRepo(repoDir);
+        const originDir = yield* createBareRemote();
+        const forkDir = yield* createBareRemote();
+        yield* runGit(repoDir, ["remote", "add", "origin", originDir]);
+        yield* runGit(repoDir, ["push", "-u", "origin", "main"]);
+        yield* runGit(repoDir, ["remote", "add", "fork-seed", forkDir]);
+        yield* runGit(repoDir, ["checkout", "-b", "feature/pr-enterprise-fork"]);
+        fs.writeFileSync(path.join(repoDir, "enterprise.txt"), "enterprise\n");
+        yield* runGit(repoDir, ["add", "enterprise.txt"]);
+        yield* runGit(repoDir, ["commit", "-m", "Enterprise fork PR branch"]);
+        yield* runGit(repoDir, ["push", "-u", "fork-seed", "feature/pr-enterprise-fork"]);
+        yield* runGit(repoDir, ["checkout", "main"]);
+        if (mode === "local") {
+          yield* runGit(repoDir, ["branch", "-D", "feature/pr-enterprise-fork"]);
+        }
+
+        const { manager, ghCalls } = yield* makeManager({
+          ghScenario: {
+            pullRequest: {
+              number: 83,
+              title: "Enterprise fork PR",
+              url: "https://github.acme.corp/user/repo/pull/83",
+              baseRefName: "main",
+              headRefName: "feature/pr-enterprise-fork",
+              state: "open",
+              isCrossRepository: true,
+              headRepositoryNameWithOwner: "octocat/piedpiper-app",
+              headRepositoryOwnerLogin: "octocat",
+            },
+            repositoryCloneUrls: {
+              "octocat/piedpiper-app": { url: forkDir, sshUrl: forkDir },
+            },
+          },
+        });
+
+        const result = yield* preparePullRequestThread(manager, {
+          cwd: repoDir,
+          reference: "83",
+          mode,
+        });
+
+        if (mode === "local") {
+          expect(result.branch).toBe("feature/pr-enterprise-fork");
+          expect(
+            (yield* runGit(repoDir, ["rev-parse", "--abbrev-ref", "@{upstream}"])).stdout.trim(),
+          ).toBe("fork-seed/feature/pr-enterprise-fork");
+        } else {
+          expect(result.worktreePath).not.toBeNull();
+        }
+        const repoViews = ghCalls.filter((call) => call.startsWith("repo view "));
+        expect(repoViews.length).toBeGreaterThan(0);
+        expect(
+          repoViews.every((call) =>
+            call.startsWith("repo view github.acme.corp/octocat/piedpiper-app "),
+          ),
+        ).toBe(true);
+      }),
+  );
+
   it.effect("preserves fork upstream tracking when preparing a local PR thread", () =>
     Effect.gen(function* () {
       const repoDir = yield* makeTempDir("piedpiper-git-manager-");
@@ -1649,7 +2975,7 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
           pullRequest: {
             number: 642,
             title: "fix: use commit as the default git action without origin",
-            url: "https://github.com/user/repo/pull/642",
+            url: "https://github.com/user/piedpiper/pull/642",
             baseRefName: "main",
             headRefName: "fix/git-action-default-without-origin",
             state: "open",
@@ -1853,7 +3179,14 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
       yield* runGit(repoDir, ["push", "-u", "fork-seed", "feature/pr-reused-fork"]);
       yield* runGit(repoDir, ["checkout", "main"]);
       const worktreePath = path.join(repoDir, "..", `pr-reused-fork-${Date.now()}`);
-      yield* runGit(repoDir, ["worktree", "add", worktreePath, "feature/pr-reused-fork"]);
+      yield* runGit(repoDir, [
+        "worktree",
+        "add",
+        "-b",
+        "piedpiper/pr-83/feature/pr-reused-fork",
+        worktreePath,
+        "feature/pr-reused-fork",
+      ]);
       yield* runGit(worktreePath, ["branch", "--unset-upstream"], true);
 
       const { manager } = yield* makeManager({
@@ -1890,6 +3223,507 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
       expect(
         (yield* runGit(worktreePath, ["rev-parse", "--abbrev-ref", "@{upstream}"])).stdout.trim(),
       ).toBe("fork-seed/feature/pr-reused-fork");
+    }),
+  );
+
+  it.effect("preserves the upstream of the user's own branch sharing the fork head name", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("piedpiper-git-manager-");
+      yield* initRepo(repoDir);
+      const originDir = yield* createBareRemote();
+      const forkDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["remote", "add", "origin", originDir]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "main"]);
+      yield* runGit(repoDir, ["remote", "add", "fork-seed", forkDir]);
+      yield* runGit(repoDir, ["push", "fork-seed", "main"]);
+      yield* runGit(repoDir, ["checkout", "-b", "feature/root-branch"]);
+      const mainWorktreePath = path.join(repoDir, "..", `pr-own-main-${Date.now()}`);
+      yield* runGit(repoDir, ["worktree", "add", mainWorktreePath, "main"]);
+
+      const { manager } = yield* makeManager({
+        ghScenario: {
+          pullRequest: {
+            number: 94,
+            title: "Fork main PR",
+            url: "https://github.com/user/repo/pull/94",
+            baseRefName: "main",
+            headRefName: "main",
+            state: "open",
+            isCrossRepository: true,
+            headRepositoryNameWithOwner: "octocat/piedpiper-app",
+            headRepositoryOwnerLogin: "octocat",
+          },
+          repositoryCloneUrls: {
+            "octocat/piedpiper-app": { url: forkDir, sshUrl: forkDir },
+          },
+        },
+      });
+
+      const result = yield* preparePullRequestThread(manager, {
+        cwd: repoDir,
+        reference: "94",
+        mode: "worktree",
+      });
+
+      expect(result.worktreePath && fs.realpathSync.native(result.worktreePath)).toBe(
+        fs.realpathSync.native(mainWorktreePath),
+      );
+      // The thread records the branch the reused worktree actually has checked out.
+      expect(result.branch).toBe("main");
+      expect(result.isOnPullRequestHead).toBe(false);
+      expect(result.checkoutChanged).toBe(false);
+      expect((yield* runGit(repoDir, ["config", "branch.main.remote"])).stdout.trim()).toBe(
+        "origin",
+      );
+      expect(
+        (yield* runGit(mainWorktreePath, [
+          "rev-parse",
+          "--abbrev-ref",
+          "@{upstream}",
+        ])).stdout.trim(),
+      ).toBe("origin/main");
+    }),
+  );
+
+  it.effect.each([
+    { isCrossRepository: false, padding: 0 },
+    { isCrossRepository: false, padding: 110 },
+    { isCrossRepository: true, padding: 0 },
+    { isCrossRepository: true, padding: 110 },
+  ])(
+    "reuses an existing PR worktree with $padding preceding branches (fork: $isCrossRepository)",
+    ({ isCrossRepository, padding }) =>
+      Effect.gen(function* () {
+        const repoDir = yield* makeTempDir("piedpiper-git-manager-");
+        yield* initRepo(repoDir);
+        const remoteDir = yield* createBareRemote();
+        yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+        yield* runGit(repoDir, ["push", "-u", "origin", "main"]);
+        const forkDir = isCrossRepository ? yield* createBareRemote() : null;
+        if (forkDir) {
+          yield* runGit(repoDir, ["remote", "add", "fork-seed", forkDir]);
+          yield* runGit(repoDir, ["push", "fork-seed", "main:pr-pagination"]);
+        }
+        const headBranch = "pr-pagination";
+        const localBranch = isCrossRepository ? "piedpiper/pr-78/pr-pagination" : headBranch;
+        yield* runGit(repoDir, ["branch", localBranch]);
+        yield* runGit(repoDir, ["push", "origin", `${localBranch}:refs/pull/78/head`]);
+        const worktreePath = path.join(repoDir, "..", `pr-page-${Date.now()}-${padding}`);
+        yield* runGit(repoDir, ["worktree", "add", worktreePath, localBranch]);
+        for (let index = 0; index < padding; index++) {
+          yield* runGit(repoDir, [
+            "branch",
+            `a-padding-${String(index).padStart(3, "0")}/${localBranch}`,
+          ]);
+        }
+        const gitCore = yield* GitCore;
+        const firstPage = yield* gitCore.listBranches({ cwd: repoDir, query: localBranch });
+        expect(firstPage.nextCursor !== null).toBe(padding > 0);
+        expect(firstPage.branches.some((branch) => branch.name === localBranch)).toBe(
+          padding === 0,
+        );
+
+        const { manager } = yield* makeManager({
+          ghScenario: {
+            repositoryCloneUrls: forkDir
+              ? { "contributor/piedpiper-app": { url: forkDir, sshUrl: forkDir } }
+              : {},
+            pullRequest: {
+              number: 78,
+              title: "Paginated PR worktree",
+              url: "https://github.com/user/piedpiper-app/pull/78",
+              baseRefName: "main",
+              headRefName: headBranch,
+              state: "open",
+              isCrossRepository,
+              ...(isCrossRepository
+                ? {
+                    headRepositoryNameWithOwner: "contributor/piedpiper-app",
+                    headRepositoryOwnerLogin: "contributor",
+                  }
+                : {}),
+            },
+          },
+        });
+
+        // Fetching directly into this checked-out branch would fail with git exit 128.
+        const result = yield* preparePullRequestThread(manager, {
+          cwd: repoDir,
+          reference: "78",
+          mode: "worktree",
+        });
+        expect(result.worktreePath && fs.realpathSync.native(result.worktreePath)).toBe(
+          fs.realpathSync.native(worktreePath),
+        );
+        expect(result.branch).toBe(localBranch);
+        expect(result.isOnPullRequestHead).toBe(true);
+        expect((yield* runGit(worktreePath, ["branch", "--show-current"])).stdout.trim()).toBe(
+          localBranch,
+        );
+      }),
+  );
+
+  // One PR commit pushed to origin, checked out in a worktree that tracks it, then a newer head.
+  const makeReusedPullRequestWorktree = (input: {
+    readonly number: number;
+    readonly branch: string;
+    readonly rewriteHead?: boolean;
+  }) =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("piedpiper-git-manager-");
+      yield* initRepo(repoDir);
+      const remoteDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "main"]);
+      yield* runGit(repoDir, ["checkout", "-b", input.branch]);
+      fs.writeFileSync(path.join(repoDir, "pr.txt"), "first\n");
+      yield* runGit(repoDir, ["add", "pr.txt"]);
+      yield* runGit(repoDir, ["commit", "-m", "First PR commit"]);
+      yield* runGit(repoDir, ["push", "-u", "origin", input.branch]);
+      const staleCommit = (yield* runGit(repoDir, ["rev-parse", "HEAD"])).stdout.trim();
+      yield* runGit(repoDir, ["checkout", "main"]);
+      const worktreePath = path.join(repoDir, "..", `pr-reuse-${input.number}-${Date.now()}`);
+      yield* runGit(repoDir, ["worktree", "add", worktreePath, input.branch]);
+
+      const publisherDir = yield* makeTempDir("piedpiper-git-publisher-");
+      yield* runGit(publisherDir, ["clone", remoteDir, "."]);
+      yield* runGit(publisherDir, ["config", "user.email", "test@example.com"]);
+      yield* runGit(publisherDir, ["config", "user.name", "Test User"]);
+      yield* runGit(publisherDir, ["checkout", input.branch]);
+      if (input.rewriteHead) {
+        yield* runGit(publisherDir, ["reset", "--hard", "HEAD~1"]);
+      }
+      fs.writeFileSync(path.join(publisherDir, "pr.txt"), "second\n");
+      yield* runGit(publisherDir, ["add", "pr.txt"]);
+      yield* runGit(publisherDir, ["commit", "-m", "Second PR commit"]);
+      yield* runGit(publisherDir, ["push", "--force", "origin", input.branch]);
+      yield* runGit(publisherDir, [
+        "push",
+        "--force",
+        "origin",
+        `HEAD:refs/pull/${input.number}/head`,
+      ]);
+      const latestCommit = (yield* runGit(publisherDir, ["rev-parse", "HEAD"])).stdout.trim();
+
+      const { manager } = yield* makeManager({
+        ghScenario: {
+          pullRequest: {
+            number: input.number,
+            title: "Reused PR",
+            url: `https://github.com/user/repo/pull/${input.number}`,
+            baseRefName: "main",
+            headRefName: input.branch,
+            state: "open",
+          },
+        },
+      });
+      return { repoDir, worktreePath, staleCommit, latestCommit, manager };
+    });
+
+  it.effect("fast-forwards a reused PR worktree to the latest pull request commit", () =>
+    Effect.gen(function* () {
+      const { repoDir, worktreePath, latestCommit, manager } = yield* makeReusedPullRequestWorktree(
+        {
+          number: 120,
+          branch: "feature/pr-ff",
+        },
+      );
+
+      const result = yield* preparePullRequestThread(manager, {
+        cwd: repoDir,
+        reference: "120",
+        mode: "worktree",
+      });
+
+      expect(result.isOnPullRequestHead).toBe(true);
+      expect(result.checkoutChanged).toBe(true);
+      expect((yield* runGit(worktreePath, ["rev-parse", "HEAD"])).stdout.trim()).toBe(latestCommit);
+
+      const again = yield* preparePullRequestThread(manager, {
+        cwd: repoDir,
+        reference: "120",
+        mode: "worktree",
+      });
+      expect(again.isOnPullRequestHead).toBe(true);
+      expect(again.checkoutChanged).toBe(false);
+    }),
+  );
+
+  it.effect("follows a force-pushed head when the reused worktree holds nothing of its own", () =>
+    Effect.gen(function* () {
+      const { repoDir, worktreePath, staleCommit, latestCommit, manager } =
+        yield* makeReusedPullRequestWorktree({
+          number: 121,
+          branch: "feature/pr-forced",
+          rewriteHead: true,
+        });
+
+      const result = yield* preparePullRequestThread(manager, {
+        cwd: repoDir,
+        reference: "121",
+        mode: "worktree",
+      });
+
+      expect(result.isOnPullRequestHead).toBe(true);
+      expect(result.checkoutChanged).toBe(true);
+      expect((yield* runGit(worktreePath, ["rev-parse", "HEAD"])).stdout.trim()).toBe(latestCommit);
+      expect((yield* runGit(repoDir, ["rev-parse", preRefreshRef(121)])).stdout.trim()).toBe(
+        staleCommit,
+      );
+      // The move went through the pull ref, which must not leave the branch reading as ahead.
+      expect((yield* runGit(worktreePath, ["rev-parse", "@{upstream}"])).stdout.trim()).toBe(
+        latestCommit,
+      );
+    }),
+  );
+
+  it.effect("follows a force-pushed head after a background fetch moved the tracking ref", () =>
+    Effect.gen(function* () {
+      const { repoDir, worktreePath, staleCommit, latestCommit, manager } =
+        yield* makeReusedPullRequestWorktree({
+          number: 128,
+          branch: "feature/pr-forced-fetched",
+          rewriteHead: true,
+        });
+      yield* runGit(repoDir, ["fetch", "origin"]);
+      expect((yield* runGit(worktreePath, ["rev-parse", "@{upstream}"])).stdout.trim()).toBe(
+        latestCommit,
+      );
+
+      const result = yield* preparePullRequestThread(manager, {
+        cwd: repoDir,
+        reference: "128",
+        mode: "worktree",
+      });
+
+      expect(result.isOnPullRequestHead).toBe(true);
+      expect(result.checkoutChanged).toBe(true);
+      expect((yield* runGit(worktreePath, ["rev-parse", "HEAD"])).stdout.trim()).toBe(latestCommit);
+      expect((yield* runGit(repoDir, ["rev-parse", preRefreshRef(128)])).stdout.trim()).toBe(
+        staleCommit,
+      );
+    }),
+  );
+
+  it.effect("keeps own commits after a background fetch moved the tracking ref", () =>
+    Effect.gen(function* () {
+      const { repoDir, worktreePath, manager } = yield* makeReusedPullRequestWorktree({
+        number: 129,
+        branch: "feature/pr-own-commit-fetched",
+        rewriteHead: true,
+      });
+      fs.writeFileSync(path.join(worktreePath, "own.txt"), "own\n");
+      yield* runGit(worktreePath, ["add", "own.txt"]);
+      yield* runGit(worktreePath, ["commit", "-m", "My own commit"]);
+      const ownCommit = (yield* runGit(worktreePath, ["rev-parse", "HEAD"])).stdout.trim();
+      yield* runGit(repoDir, ["fetch", "origin"]);
+
+      const result = yield* preparePullRequestThread(manager, {
+        cwd: repoDir,
+        reference: "129",
+        mode: "worktree",
+      });
+
+      expect(result.isOnPullRequestHead).toBe(false);
+      expect(result.checkoutChanged).toBe(false);
+      expect((yield* runGit(worktreePath, ["rev-parse", "HEAD"])).stdout.trim()).toBe(ownCommit);
+    }),
+  );
+
+  it.effect("reports a local checkout it cannot compare with the head as not on it", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("piedpiper-git-manager-");
+      yield* initRepo(repoDir);
+      const { manager } = yield* makeManager({
+        ghScenario: {
+          pullRequest: {
+            number: 130,
+            title: "Local PR",
+            url: "https://github.com/user/repo/pull/130",
+            baseRefName: "main",
+            headRefName: "feature/pr-local-unknown",
+            state: "open",
+          },
+        },
+      });
+
+      const result = yield* preparePullRequestThread(manager, {
+        cwd: repoDir,
+        reference: "130",
+        mode: "local",
+      });
+
+      expect(result.isOnPullRequestHead).toBe(false);
+    }),
+  );
+
+  it.effect("keeps uncommitted changes in a reused PR worktree and reports it as off head", () =>
+    Effect.gen(function* () {
+      const { repoDir, worktreePath, staleCommit, manager } = yield* makeReusedPullRequestWorktree({
+        number: 122,
+        branch: "feature/pr-dirty-reuse",
+      });
+      fs.writeFileSync(path.join(worktreePath, "scratch.txt"), "local\n");
+
+      const result = yield* preparePullRequestThread(manager, {
+        cwd: repoDir,
+        reference: "122",
+        mode: "worktree",
+      });
+
+      expect(result.isOnPullRequestHead).toBe(false);
+      expect(result.checkoutChanged).toBe(false);
+      expect((yield* runGit(worktreePath, ["rev-parse", "HEAD"])).stdout.trim()).toBe(staleCommit);
+      expect(fs.readFileSync(path.join(worktreePath, "scratch.txt"), "utf8")).toBe("local\n");
+    }),
+  );
+
+  it.effect("keeps a reused PR worktree's own commits when the head was force-pushed", () =>
+    Effect.gen(function* () {
+      const { repoDir, worktreePath, manager } = yield* makeReusedPullRequestWorktree({
+        number: 123,
+        branch: "feature/pr-own-commit",
+        rewriteHead: true,
+      });
+      fs.writeFileSync(path.join(worktreePath, "own.txt"), "own\n");
+      yield* runGit(worktreePath, ["add", "own.txt"]);
+      yield* runGit(worktreePath, ["commit", "-m", "My own commit"]);
+      const ownCommit = (yield* runGit(worktreePath, ["rev-parse", "HEAD"])).stdout.trim();
+
+      const result = yield* preparePullRequestThread(manager, {
+        cwd: repoDir,
+        reference: "123",
+        mode: "worktree",
+      });
+
+      expect(result.isOnPullRequestHead).toBe(false);
+      expect(result.checkoutChanged).toBe(false);
+      expect((yield* runGit(worktreePath, ["rev-parse", "HEAD"])).stdout.trim()).toBe(ownCommit);
+    }),
+  );
+
+  it.effect("never moves a reused PR worktree onto an upstream that is not the PR head", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("piedpiper-git-manager-");
+      yield* initRepo(repoDir);
+      const remoteDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "main"]);
+      const worktreePath = path.join(repoDir, "..", `pr-reuse-main-${Date.now()}`);
+      yield* runGit(repoDir, ["worktree", "add", "-b", "feature/pr-gone", worktreePath, "main"]);
+      yield* runGit(worktreePath, ["branch", "--set-upstream-to", "origin/main"]);
+      const before = (yield* runGit(worktreePath, ["rev-parse", "HEAD"])).stdout.trim();
+      fs.writeFileSync(path.join(repoDir, "main-only.txt"), "main\n");
+      yield* runGit(repoDir, ["add", "main-only.txt"]);
+      yield* runGit(repoDir, ["commit", "-m", "Advance main"]);
+      yield* runGit(repoDir, ["push", "origin", "main"]);
+
+      const { manager } = yield* makeManager({
+        ghScenario: {
+          pullRequest: {
+            number: 124,
+            title: "Head branch deleted",
+            url: "https://github.com/user/repo/pull/124",
+            baseRefName: "main",
+            headRefName: "feature/pr-gone",
+            state: "open",
+          },
+        },
+      });
+
+      const result = yield* preparePullRequestThread(manager, {
+        cwd: repoDir,
+        reference: "124",
+        mode: "worktree",
+      });
+
+      expect(result.isOnPullRequestHead).toBe(false);
+      expect(result.checkoutChanged).toBe(false);
+      expect((yield* runGit(worktreePath, ["rev-parse", "HEAD"])).stdout.trim()).toBe(before);
+    }),
+  );
+
+  it.effect("ignores a pull ref that disagrees with GitHub's reported head", () =>
+    Effect.gen(function* () {
+      const { repoDir, worktreePath, staleCommit, latestCommit } =
+        yield* makeReusedPullRequestWorktree({
+          number: 125,
+          branch: "feature/pr-wrong-ref",
+        });
+      const { manager } = yield* makeManager({
+        ghScenario: {
+          pullRequest: {
+            number: 125,
+            title: "Reused PR",
+            url: "https://github.com/user/repo/pull/125",
+            baseRefName: "main",
+            headRefName: "feature/pr-wrong-ref",
+            headRefOid: staleCommit,
+            state: "open",
+          },
+        },
+      });
+      expect(latestCommit).not.toBe(staleCommit);
+
+      const result = yield* preparePullRequestThread(manager, {
+        cwd: repoDir,
+        reference: "125",
+        mode: "worktree",
+      });
+
+      expect((yield* runGit(worktreePath, ["rev-parse", "HEAD"])).stdout.trim()).toBe(staleCommit);
+      expect(result.isOnPullRequestHead).toBe(true);
+      expect(result.checkoutChanged).toBe(false);
+    }),
+  );
+
+  it.effect("reports a local PR checkout that is not on GitHub's head without resetting it", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("piedpiper-git-manager-");
+      yield* initRepo(repoDir);
+      const head = (yield* runGit(repoDir, ["rev-parse", "HEAD"])).stdout.trim();
+
+      const pullRequest = {
+        title: "Local PR",
+        baseRefName: "main",
+        state: "open" as const,
+      };
+      const onHead = yield* makeManager({
+        ghScenario: {
+          pullRequest: {
+            ...pullRequest,
+            number: 126,
+            url: "https://github.com/user/repo/pull/126",
+            headRefName: "feature/pr-local-on-head",
+            headRefOid: head,
+          },
+        },
+      });
+      const onHeadResult = yield* preparePullRequestThread(onHead.manager, {
+        cwd: repoDir,
+        reference: "126",
+        mode: "local",
+      });
+      expect(onHeadResult.isOnPullRequestHead).toBe(true);
+
+      const offHead = yield* makeManager({
+        ghScenario: {
+          pullRequest: {
+            ...pullRequest,
+            number: 127,
+            url: "https://github.com/user/repo/pull/127",
+            headRefName: "feature/pr-local-off-head",
+            headRefOid: "0".repeat(40),
+          },
+        },
+      });
+      const offHeadResult = yield* preparePullRequestThread(offHead.manager, {
+        cwd: repoDir,
+        reference: "127",
+        mode: "local",
+      });
+      expect(offHeadResult.isOnPullRequestHead).toBe(false);
+      expect((yield* runGit(repoDir, ["rev-parse", "HEAD"])).stdout.trim()).toBe(head);
     }),
   );
 
@@ -1932,7 +3766,7 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
       fs.writeFileSync(path.join(repoDir, "hooked.txt"), "hooked\n");
       fs.writeFileSync(
         path.join(repoDir, ".git", "hooks", "pre-commit"),
-        '#!/bin/sh\necho "hook: start" >&2\nsleep 1\necho "hook: end" >&2\n',
+        '#!/bin/sh\necho "hook: start" >&2\nsleep 0.05\necho "hook: end" >&2\n',
         { mode: 0o755 },
       );
 

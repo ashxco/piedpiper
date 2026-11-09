@@ -11,13 +11,26 @@ export type ComposerPromptSegment =
   | {
       type: "mention";
       path: string;
+      /** Length of the raw `@...` token in the prompt text, which may be quoted even when not needed. */
+      tokenLength: number;
     }
   | {
       type: "terminal-context";
       context: TerminalContextDraft | null;
     };
 
-const MENTION_TOKEN_REGEX = /(^|\s)@([^\s@]+)(?=\s)/g;
+const MENTION_TOKEN_REGEX = /(^|\s)@(?:"((?:\\.|[^"\\])*)"|([^\s@"]+))(?=\s)/g;
+const SIMPLE_MENTION_PATH_REGEX = /^[^\s@"]+$/;
+// Unquoted `@name(` tokens are pasted decorators (`@Injectable()`), not file mentions.
+const DECORATOR_CALL_REFERENCE_REGEX = /^[\p{ID_Start}_$][\p{ID_Continue}.$\u200c\u200d]*\(/u;
+
+/** Mention text for a path: bare when unambiguous, otherwise quoted with `\` and `"` escaped. */
+export function serializeComposerMentionPath(path: string): string {
+  if (SIMPLE_MENTION_PATH_REGEX.test(path) && !DECORATOR_CALL_REFERENCE_REGEX.test(path)) {
+    return path;
+  }
+  return `"${path.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
+}
 
 function pushTextSegment(segments: ComposerPromptSegment[], text: string): void {
   if (!text) return;
@@ -39,7 +52,8 @@ function splitPromptTextIntoComposerSegments(text: string): ComposerPromptSegmen
   for (const match of text.matchAll(MENTION_TOKEN_REGEX)) {
     const fullMatch = match[0];
     const prefix = match[1] ?? "";
-    const path = match[2] ?? "";
+    const quotedPath = match[2];
+    const path = quotedPath !== undefined ? quotedPath.replace(/\\(.)/g, "$1") : (match[3] ?? "");
     const matchIndex = match.index ?? 0;
     const mentionStart = matchIndex + prefix.length;
     const mentionEnd = mentionStart + fullMatch.length - prefix.length;
@@ -48,8 +62,9 @@ function splitPromptTextIntoComposerSegments(text: string): ComposerPromptSegmen
       pushTextSegment(segments, text.slice(cursor, mentionStart));
     }
 
-    if (path.length > 0) {
-      segments.push({ type: "mention", path });
+    const isDecoratorCall = quotedPath === undefined && DECORATOR_CALL_REFERENCE_REGEX.test(path);
+    if (path.length > 0 && !isDecoratorCall) {
+      segments.push({ type: "mention", path, tokenLength: mentionEnd - mentionStart });
     } else {
       pushTextSegment(segments, text.slice(mentionStart, mentionEnd));
     }
@@ -97,4 +112,38 @@ export function splitPromptIntoComposerSegments(
   }
 
   return segments;
+}
+
+/** True when [start, end) covers the whitespace that delimits an `@` mention token. */
+export function selectionTouchesMentionBoundary(
+  prompt: string,
+  start: number,
+  end: number,
+): boolean {
+  if (!prompt || start >= end) {
+    return false;
+  }
+  const coversWhitespaceAt = (index: number) =>
+    index >= 0 &&
+    index < prompt.length &&
+    /\s/.test(prompt[index]!) &&
+    start <= index &&
+    index < end;
+
+  let offset = 0;
+  for (const segment of splitPromptIntoComposerSegments(prompt)) {
+    if (segment.type === "mention") {
+      const mentionEnd = offset + segment.tokenLength;
+      if (coversWhitespaceAt(offset - 1) || coversWhitespaceAt(mentionEnd)) {
+        return true;
+      }
+      offset = mentionEnd;
+      continue;
+    }
+    offset += segment.type === "text" ? segment.text.length : 1;
+    if (offset > end) {
+      break;
+    }
+  }
+  return false;
 }

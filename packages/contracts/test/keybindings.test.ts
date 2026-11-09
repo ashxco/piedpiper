@@ -3,10 +3,15 @@ import { assert, it } from "@effect/vitest";
 import { Effect } from "effect";
 
 import {
+  COMPOSER_CONTROL_KEYBINDING_COMMANDS,
+  COMPOSER_SEND_KEYBINDING_COMMANDS,
   KeybindingsConfig,
+  NAVIGATION_KEYBINDING_COMMANDS,
   KeybindingRule,
+  KeybindingRuleUpsert,
   ResolvedKeybindingRule,
   ResolvedKeybindingsConfig,
+  STATIC_KEYBINDING_COMMANDS,
 } from "../src/keybindings";
 
 const decode = <S extends Schema.Top>(
@@ -55,6 +60,69 @@ it.effect("parses keybinding rules", () =>
   }),
 );
 
+it.effect("parses the ported shortcut commands", () =>
+  Effect.gen(function* () {
+    const commands = [
+      "sidebar.toggle",
+      "navigation.back",
+      "navigation.forward",
+      "diff.close",
+      "modelPicker.toggle",
+      "composer.effort",
+      "composer.mode",
+      "composer.workspace",
+      "composer.branch",
+      "composer.sendBackground",
+      "composer.sendAndNewThread",
+      "thread.stop",
+      "thread.undo",
+    ] as const;
+    for (const command of commands) {
+      const parsed = yield* decode(KeybindingRule, {
+        key: "mod+k",
+        command,
+        when: "isDesktop",
+      });
+      assert.strictEqual(parsed.command, command);
+    }
+    assert.deepEqual(
+      [...COMPOSER_CONTROL_KEYBINDING_COMMANDS, ...COMPOSER_SEND_KEYBINDING_COMMANDS],
+      commands.slice(4, 11),
+    );
+    assert.deepEqual(
+      [...NAVIGATION_KEYBINDING_COMMANDS],
+      ["navigation.back", "navigation.forward"],
+    );
+  }),
+);
+
+it.effect("parses the upstream shortcut commands", () =>
+  Effect.gen(function* () {
+    const commands = [
+      "chat.find",
+      "workspace.focusNext",
+      "workspace.focusPrevious",
+      "commandPalette.toggle",
+      "filePicker.toggle",
+      "thread.copyReference",
+      "thread.pin",
+      "terminal.splitVertical",
+    ] as const;
+    const staticCommands: ReadonlyArray<string> = STATIC_KEYBINDING_COMMANDS;
+    for (const command of commands) {
+      const parsed = yield* decode(KeybindingRule, { key: "mod+k", command });
+      assert.strictEqual(parsed.command, command);
+      assert.include(staticCommands, command);
+    }
+  }),
+);
+
+it.effect("lists each static command once", () =>
+  Effect.sync(() => {
+    assert.strictEqual(new Set(STATIC_KEYBINDING_COMMANDS).size, STATIC_KEYBINDING_COMMANDS.length);
+  }),
+);
+
 it.effect("rejects invalid command values", () =>
   Effect.gen(function* () {
     const result = yield* Effect.exit(
@@ -74,6 +142,21 @@ it.effect("accepts dynamic script run commands", () =>
       command: "script.setup.run",
     });
     assert.strictEqual(parsed.command, "script.setup.run");
+  }),
+);
+
+it.effect("parses a rule upsert with and without the rule it replaces", () =>
+  Effect.gen(function* () {
+    const added = yield* decode(KeybindingRuleUpsert, { key: "mod+j", command: "chat.new" });
+    assert.strictEqual(added.replace, undefined);
+
+    const edited = yield* decode(KeybindingRuleUpsert, {
+      key: "mod+j",
+      command: "chat.new",
+      when: "!terminalFocus",
+      replace: { key: "mod+n", command: "chat.new", when: "!terminalFocus" },
+    });
+    assert.strictEqual(edited.replace?.key, "mod+n");
   }),
 );
 

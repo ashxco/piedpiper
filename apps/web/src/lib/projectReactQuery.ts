@@ -6,6 +6,7 @@ export const projectQueryKeys = {
   all: ["projects"] as const,
   searchEntries: (cwd: string | null, query: string, limit: number) =>
     ["projects", "search-entries", cwd, query, limit] as const,
+  configFile: (cwd: string | null) => ["projects", "config-file", cwd] as const,
 };
 
 const DEFAULT_SEARCH_ENTRIES_LIMIT = 80;
@@ -39,5 +40,25 @@ export function projectSearchEntriesQueryOptions(input: {
     enabled: (input.enabled ?? true) && input.cwd !== null && input.query.length > 0,
     staleTime: input.staleTime ?? DEFAULT_SEARCH_ENTRIES_STALE_TIME,
     placeholderData: (previous) => previous ?? EMPTY_SEARCH_ENTRIES_RESULT,
+  });
+}
+
+const PROJECT_CONFIG_FILE_STALE_TIME = 30_000;
+
+/**
+ * Reads piedpiper.json. `cwd` must be the project's workspace root, not a thread worktree: the
+ * server returns null outside registered project roots.
+ */
+export function projectConfigFileQueryOptions(input: { cwd: string | null; enabled?: boolean }) {
+  return queryOptions({
+    queryKey: projectQueryKeys.configFile(input.cwd),
+    queryFn: async () => {
+      if (!input.cwd) {
+        throw new Error("Project config file is unavailable.");
+      }
+      return ensureNativeApi().projects.readConfigFile({ cwd: input.cwd });
+    },
+    enabled: (input.enabled ?? true) && input.cwd !== null,
+    staleTime: PROJECT_CONFIG_FILE_STALE_TIME,
   });
 }

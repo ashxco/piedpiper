@@ -26,6 +26,7 @@ import { toPersistenceSqlError } from "../../persistence/Errors.ts";
 import { OrchestrationEventStore } from "../../persistence/Services/OrchestrationEventStore.ts";
 import { OrchestrationCommandReceiptRepository } from "../../persistence/Services/OrchestrationCommandReceipts.ts";
 import {
+  OrchestrationCommandIdConflictError,
   OrchestrationCommandInvariantError,
   OrchestrationCommandPreviouslyRejectedError,
   type OrchestrationDispatchError,
@@ -34,6 +35,7 @@ import type { ServerReadModel } from "../ServerReadModel.ts";
 import { fromContractReadModel } from "../ServerReadModel.ts";
 import { decideOrchestrationCommand } from "../decider.ts";
 import { createEmptyReadModel, projectEvent } from "../projector.ts";
+import { ensureReplayableFrom } from "./OrchestrationEventMaintenance.ts";
 import { OrchestrationProjectionPipeline } from "../Services/ProjectionPipeline.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import {
@@ -81,6 +83,8 @@ const makeOrchestrationEngine = Effect.gen(function* () {
 
   const processEnvelope = (envelope: CommandEnvelope): Effect.Effect<void> => {
     const dispatchStartSequence = readModel.snapshotSequence;
+    // Reconcile republishes only events this dispatch appended; a shared state dir can hold events another server already handled.
+    const appendedEventIds = new Set<OrchestrationEvent["eventId"]>();
     const processingStartedAtMs = Date.now();
     const aggregateRef = commandToAggregateRef(envelope.command);
     const baseMetricAttributes = {
@@ -102,7 +106,9 @@ const makeOrchestrationEngine = Effect.gen(function* () {
       readModel = nextReadModel;
 
       for (const persistedEvent of persistedEvents) {
-        yield* PubSub.publish(eventPubSub, persistedEvent);
+        if (appendedEventIds.has(persistedEvent.eventId)) {
+          yield* PubSub.publish(eventPubSub, persistedEvent);
+        }
       }
     });
 
@@ -119,6 +125,19 @@ const makeOrchestrationEngine = Effect.gen(function* () {
           commandId: envelope.command.commandId,
         });
         if (Option.isSome(existingReceipt)) {
+          // A receipt only proves this exact command ran; never replay it for another aggregate.
+          if (
+            existingReceipt.value.aggregateKind !== aggregateRef.aggregateKind ||
+            existingReceipt.value.aggregateId !== aggregateRef.aggregateId
+          ) {
+            return yield* new OrchestrationCommandIdConflictError({
+              commandId: envelope.command.commandId,
+              receiptAggregateKind: existingReceipt.value.aggregateKind,
+              receiptAggregateId: existingReceipt.value.aggregateId,
+              commandAggregateKind: aggregateRef.aggregateKind,
+              commandAggregateId: aggregateRef.aggregateId,
+            });
+          }
           if (existingReceipt.value.status === "accepted") {
             return {
               sequence: existingReceipt.value.resultSequence,
@@ -139,12 +158,14 @@ const makeOrchestrationEngine = Effect.gen(function* () {
           .withTransaction(
             Effect.gen(function* () {
               const committedEvents: OrchestrationEvent[] = [];
+              const attachmentCleanups: Array<Effect.Effect<void>> = [];
               let nextReadModel = readModel;
 
               for (const nextEvent of eventBases) {
                 const savedEvent = yield* eventStore.append(nextEvent);
+                appendedEventIds.add(savedEvent.eventId);
                 nextReadModel = yield* projectEvent(nextReadModel, savedEvent);
-                yield* projectionPipeline.projectEvent(savedEvent);
+                attachmentCleanups.push(yield* projectionPipeline.projectEventDeferred(savedEvent));
                 committedEvents.push(savedEvent);
               }
 
@@ -168,6 +189,7 @@ const makeOrchestrationEngine = Effect.gen(function* () {
 
               return {
                 committedEvents,
+                attachmentCleanups,
                 lastSequence: lastSavedEvent.sequence,
                 nextReadModel,
               } as const;
@@ -182,6 +204,10 @@ const makeOrchestrationEngine = Effect.gen(function* () {
           );
 
         readModel = committedCommand.nextReadModel;
+        // File cleanup waits for the commit; each cleanup logs and swallows its own failures.
+        for (const cleanup of committedCommand.attachmentCleanups) {
+          yield* cleanup;
+        }
         for (const [index, event] of committedCommand.committedEvents.entries()) {
           yield* PubSub.publish(eventPubSub, event);
           if (index === 0) {
@@ -231,7 +257,10 @@ const makeOrchestrationEngine = Effect.gen(function* () {
           }
 
           const error = Cause.squash(exit.cause) as OrchestrationDispatchError;
-          if (!Schema.is(OrchestrationCommandPreviouslyRejectedError)(error)) {
+          if (
+            !Schema.is(OrchestrationCommandPreviouslyRejectedError)(error) &&
+            !Schema.is(OrchestrationCommandIdConflictError)(error)
+          ) {
             yield* reconcileReadModelAfterDispatchFailure.pipe(
               Effect.catch(() =>
                 Effect.logWarning(
@@ -278,8 +307,16 @@ const makeOrchestrationEngine = Effect.gen(function* () {
   const getReadModel: OrchestrationEngineShape["getReadModel"] = () =>
     Effect.sync((): ServerReadModel => readModel);
 
-  const readEvents: OrchestrationEngineShape["readEvents"] = (fromSequenceExclusive) =>
-    eventStore.readFromSequence(fromSequenceExclusive);
+  // The boundary is written before deletes, so the second check catches a prune during the read.
+  const readEvents: OrchestrationEngineShape["readEvents"] = (fromSequenceExclusive) => {
+    const ensureReplayable = Stream.fromEffectDrain(
+      ensureReplayableFrom(sql, fromSequenceExclusive),
+    );
+    return ensureReplayable.pipe(
+      Stream.concat(eventStore.readFromSequence(fromSequenceExclusive)),
+      Stream.concat(ensureReplayable),
+    );
+  };
 
   const dispatch: OrchestrationEngineShape["dispatch"] = (command) =>
     Effect.gen(function* () {

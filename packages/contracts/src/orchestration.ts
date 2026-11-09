@@ -20,6 +20,7 @@ export const ORCHESTRATION_WS_METHODS = {
   dispatchCommand: "orchestration.dispatchCommand",
   getTurnDiff: "orchestration.getTurnDiff",
   getFullThreadDiff: "orchestration.getFullThreadDiff",
+  getTurnDiffFileContents: "orchestration.getTurnDiffFileContents",
   replayEvents: "orchestration.replayEvents",
 } as const;
 
@@ -41,15 +42,6 @@ export type ProviderSandboxMode = typeof ProviderSandboxMode.Type;
 
 export const DEFAULT_PROVIDER_KIND: ProviderKind = "claudeAgent";
 
-/**
- * Stable project id for the hidden "Advisors" workspace. Threads created from
- * the Advisors page belong to this singleton project, which is bootstrapped
- * server-side on startup against a directory under the app's state dir. It is
- * filtered out of the sidebar project list so it behaves as an internal,
- * project-less chat surface.
- */
-export const ADVISORS_PROJECT_ID: ProjectId = ProjectId.makeUnsafe("project-advisors");
-
 export const CodexModelSelection = Schema.Struct({
   provider: Schema.Literal("codex"),
   model: TrimmedNonEmptyString,
@@ -67,7 +59,8 @@ export type ClaudeModelSelection = typeof ClaudeModelSelection.Type;
 export const ModelSelection = Schema.Union([CodexModelSelection, ClaudeModelSelection]);
 export type ModelSelection = typeof ModelSelection.Type;
 
-export const RuntimeMode = Schema.Literals(["approval-required", "full-access"]);
+// "auto": an AI reviewer approves routine tool calls and only risky ones prompt the user.
+export const RuntimeMode = Schema.Literals(["approval-required", "auto", "full-access"]);
 export type RuntimeMode = typeof RuntimeMode.Type;
 export const DEFAULT_RUNTIME_MODE: RuntimeMode = "full-access";
 export const ProviderInteractionMode = Schema.Literals(["default", "plan", "ask"]);
@@ -88,8 +81,23 @@ export const ProviderUserInputAnswers = Schema.Record(Schema.String, Schema.Unkn
 export type ProviderUserInputAnswers = typeof ProviderUserInputAnswers.Type;
 
 export const PROVIDER_SEND_TURN_MAX_INPUT_CHARS = 120_000;
-export const PROVIDER_SEND_TURN_MAX_ATTACHMENTS = 8;
+export const PROVIDER_SEND_TURN_MAX_ATTACHMENTS = 100;
 export const PROVIDER_SEND_TURN_MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+// Base64 plus the RPC envelope must fit one WebSocket message (ws maxPayload is 100 MiB).
+export const PROVIDER_SEND_TURN_MAX_TOTAL_IMAGE_BYTES = 64 * 1024 * 1024;
+export const PROVIDER_SEND_TURN_SUPPORTED_IMAGE_MIME_TYPES = [
+  "image/gif",
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+] as const;
+const PROVIDER_SEND_TURN_SUPPORTED_IMAGE_MIME_TYPE_SET = new Set<string>(
+  PROVIDER_SEND_TURN_SUPPORTED_IMAGE_MIME_TYPES,
+);
+// The attachment schema stays permissive so already-persisted attachments still decode.
+export function isProviderSendTurnSupportedImageMimeType(mimeType: string): boolean {
+  return PROVIDER_SEND_TURN_SUPPORTED_IMAGE_MIME_TYPE_SET.has(mimeType.trim().toLowerCase());
+}
 const PROVIDER_SEND_TURN_MAX_IMAGE_DATA_URL_CHARS = 14_000_000;
 const CHAT_ATTACHMENT_ID_MAX_CHARS = 128;
 // Correlation id is command id by design in this model.
@@ -122,10 +130,54 @@ const UploadChatImageAttachment = Schema.Struct({
 });
 export type UploadChatImageAttachment = typeof UploadChatImageAttachment.Type;
 
-export const ChatAttachment = Schema.Union([ChatImageAttachment]);
+// Dev under Bun only: its 16 MiB WebSocket frame default closes the socket (1009) above about 12 MiB.
+export const PROVIDER_SEND_TURN_MAX_FILE_BYTES = 20 * 1024 * 1024;
+// 20 MiB in base64 plus the data URL prefix.
+const PROVIDER_SEND_TURN_MAX_FILE_DATA_URL_CHARS = 28_000_000;
+
+export const ChatFileAttachment = Schema.Struct({
+  type: Schema.Literal("file"),
+  id: ChatAttachmentId,
+  name: TrimmedNonEmptyString.check(Schema.isMaxLength(255)),
+  mimeType: Schema.Literal("application/pdf"),
+  sizeBytes: NonNegativeInt.check(Schema.isLessThanOrEqualTo(PROVIDER_SEND_TURN_MAX_FILE_BYTES)),
+});
+export type ChatFileAttachment = typeof ChatFileAttachment.Type;
+
+export const UploadChatFileAttachment = Schema.Struct({
+  type: Schema.Literal("file"),
+  name: TrimmedNonEmptyString.check(Schema.isMaxLength(255)),
+  mimeType: Schema.Literal("application/pdf"),
+  sizeBytes: NonNegativeInt.check(Schema.isLessThanOrEqualTo(PROVIDER_SEND_TURN_MAX_FILE_BYTES)),
+  dataUrl: TrimmedNonEmptyString.check(
+    Schema.isMaxLength(PROVIDER_SEND_TURN_MAX_FILE_DATA_URL_CHARS),
+  ),
+});
+export type UploadChatFileAttachment = typeof UploadChatFileAttachment.Type;
+
+export const ChatAttachment = Schema.Union([ChatImageAttachment, ChatFileAttachment]);
 export type ChatAttachment = typeof ChatAttachment.Type;
-const UploadChatAttachment = Schema.Union([UploadChatImageAttachment]);
+const UploadChatAttachment = Schema.Union([UploadChatImageAttachment, UploadChatFileAttachment]);
 export type UploadChatAttachment = typeof UploadChatAttachment.Type;
+
+/** Checks the per-message attachment count and total bytes; returns a user-facing error. */
+export function getProviderAttachmentLimitError(
+  attachments: ReadonlyArray<{ readonly sizeBytes: number; readonly type?: string }>,
+): string | undefined {
+  const hasFile = attachments.some((attachment) => attachment.type === "file");
+  if (attachments.length > PROVIDER_SEND_TURN_MAX_ATTACHMENTS) {
+    const noun = hasFile ? "attachments" : "images";
+    return `You can attach up to ${PROVIDER_SEND_TURN_MAX_ATTACHMENTS} ${noun} per message.`;
+  }
+  const totalBytes = attachments.reduce((total, attachment) => total + attachment.sizeBytes, 0);
+  if (totalBytes > PROVIDER_SEND_TURN_MAX_TOTAL_IMAGE_BYTES) {
+    const limitMib = PROVIDER_SEND_TURN_MAX_TOTAL_IMAGE_BYTES / (1024 * 1024);
+    return hasFile
+      ? `Attachments can total up to ${limitMib} MiB per message. Use smaller files or send fewer at once.`
+      : `Images can total up to ${limitMib} MiB per message. Use smaller images or send fewer at once.`;
+  }
+  return undefined;
+}
 
 export const ProjectScriptIcon = Schema.Literals([
   "play",
@@ -146,12 +198,23 @@ export const ProjectScript = Schema.Struct({
 });
 export type ProjectScript = typeof ProjectScript.Type;
 
+/** A user-chosen project icon: workspace-relative inside the repo, absolute outside it. */
+export const ProjectFaviconPath = TrimmedNonEmptyString.check(
+  Schema.isMaxLength(1024),
+  Schema.isPattern(/\.(?:avif|gif|ico|jpe?g|png|svg|webp)$/i),
+);
+export type ProjectFaviconPath = typeof ProjectFaviconPath.Type;
+
 export const OrchestrationProject = Schema.Struct({
   id: ProjectId,
   title: TrimmedNonEmptyString,
   workspaceRoot: TrimmedNonEmptyString,
   defaultModelSelection: Schema.NullOr(ModelSelection),
   scripts: Schema.Array(ProjectScript),
+  // Optional so snapshots from older servers decode; absent and null both mean no override.
+  faviconPath: Schema.optional(Schema.NullOr(ProjectFaviconPath)),
+  // Optional so snapshots from older servers decode; absent and null both mean not archived.
+  archivedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
   deletedAt: Schema.NullOr(IsoDateTime),
@@ -231,6 +294,11 @@ export const OrchestrationCheckpointSummary = Schema.Struct({
   checkpointRef: CheckpointRef,
   status: OrchestrationCheckpointStatus,
   files: Schema.Array(OrchestrationCheckpointFile),
+  // Set when `files` was capped for the wire; absent means `files` is complete.
+  filesTotal: Schema.optional(NonNegativeInt),
+  // Set with `filesTotal`; they cover the full list rather than the capped `files`.
+  additionsTotal: Schema.optional(NonNegativeInt),
+  deletionsTotal: Schema.optional(NonNegativeInt),
   assistantMessageId: Schema.NullOr(MessageId),
   completedAt: IsoDateTime,
 });
@@ -241,6 +309,7 @@ export const OrchestrationThreadActivityTone = Schema.Literals([
   "tool",
   "approval",
   "error",
+  "thinking",
 ]);
 export type OrchestrationThreadActivityTone = typeof OrchestrationThreadActivityTone.Type;
 
@@ -255,6 +324,99 @@ export const OrchestrationThreadActivity = Schema.Struct({
   createdAt: IsoDateTime,
 });
 export type OrchestrationThreadActivity = typeof OrchestrationThreadActivity.Type;
+
+/** Activity kind of one thinking block. Re-appended under the same id as its text grows. */
+export const THREAD_REASONING_ACTIVITY_KIND = "reasoning.block";
+
+/** Payload of a `reasoning.block` activity; `detail` holds the whole block so far. */
+export const ThreadReasoningActivityPayload = Schema.Struct({
+  stream: Schema.Literals(["summary", "raw"]),
+  /** `promoted`: the adapter re-emitted this thinking block as assistant text, so it shows no row. */
+  status: Schema.Literals(["inProgress", "completed", "promoted"]),
+  detail: Schema.String,
+  providerItemId: Schema.optional(Schema.String),
+});
+export type ThreadReasoningActivityPayload = typeof ThreadReasoningActivityPayload.Type;
+
+/** Activity kind recorded when a turn runs on a different model or reasoning effort than the previous turn. */
+export const THREAD_MODEL_SWITCH_ACTIVITY_KIND = "turn.model-switched";
+
+/** Payload of a `turn.model-switched` activity; `messageId` is the user message the divider sits above. */
+export const ThreadModelSwitchActivityPayload = Schema.Struct({
+  messageId: MessageId,
+  from: ModelSelection,
+  to: ModelSelection,
+});
+export type ThreadModelSwitchActivityPayload = typeof ThreadModelSwitchActivityPayload.Type;
+
+// Ends a runtime.warning for an SDK message with nothing to show; the web work log hides these rows.
+export const UNKNOWN_SDK_MESSAGE_NO_CONTENT_SUFFIX = "(no displayable text content)";
+
+/** Activity kind recorded when a turn stops on a provider usage limit. */
+export const THREAD_USAGE_LIMIT_ACTIVITY_KIND = "turn.usage-limit-reached";
+
+/** Activity kind recording that a limited turn must not auto-resume: Cancel, Stop or archive. */
+export const THREAD_USAGE_LIMIT_RESUME_CANCELLED_ACTIVITY_KIND =
+  "turn.usage-limit-resume-cancelled";
+
+/** Prefix of the message id of a turn Pied Piper sent itself after a usage limit reset. */
+export const USAGE_LIMIT_RESUME_MESSAGE_ID_PREFIX = "usage-limit-resume:";
+
+/** Payload of a `turn.usage-limit-reached` activity; `resetAt` is null when any limit's reset is unknown. */
+export const ThreadUsageLimitActivityPayload = Schema.Struct({
+  resetAt: Schema.NullOr(IsoDateTime),
+  limitTypes: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
+});
+export type ThreadUsageLimitActivityPayload = typeof ThreadUsageLimitActivityPayload.Type;
+
+export const ProviderGoalStatus = Schema.Literals([
+  "active",
+  "paused",
+  "blocked",
+  "usage_limited",
+  "budget_limited",
+  "complete",
+]);
+export type ProviderGoalStatus = typeof ProviderGoalStatus.Type;
+
+/** A provider-native goal set with `/goal`. The provider owns this state; Pied Piper mirrors its latest report. */
+export const ProviderGoal = Schema.Struct({
+  objective: TrimmedNonEmptyString,
+  status: ProviderGoalStatus,
+  tokensUsed: Schema.optional(NonNegativeInt),
+  tokenBudget: Schema.optional(Schema.NullOr(NonNegativeInt)),
+  timeUsedSeconds: Schema.optional(NonNegativeInt),
+  checks: Schema.optional(NonNegativeInt),
+  lastCheck: Schema.optional(Schema.String),
+});
+export type ProviderGoal = typeof ProviderGoal.Type;
+
+/** Activity kind recording the latest provider goal report. */
+export const THREAD_GOAL_ACTIVITY_KIND = "goal.updated";
+
+/** Payload of a `goal.updated` activity; a null goal means it was cleared. */
+export const ThreadGoalActivityPayload = Schema.Struct({
+  goal: Schema.NullOr(ProviderGoal),
+});
+export type ThreadGoalActivityPayload = typeof ThreadGoalActivityPayload.Type;
+
+/** The reasoning effort a selection states, if any (Codex `reasoningEffort`, Claude `effort`). */
+export function getModelSelectionEffort(selection: ModelSelection): string | undefined {
+  return selection.provider === "codex"
+    ? selection.options?.reasoningEffort
+    : selection.options?.effort;
+}
+
+/**
+ * Whether a turn's selection differs from the previous turn's by provider, model or effort.
+ * An unstated effort reads as unchanged, since the composer omits an untouched effort.
+ */
+export function isModelSelectionSwitch(from: ModelSelection, to: ModelSelection): boolean {
+  if (from.provider !== to.provider || from.model !== to.model) return true;
+  const fromEffort = getModelSelectionEffort(from);
+  const toEffort = getModelSelectionEffort(to);
+  return fromEffort !== undefined && toEffort !== undefined && fromEffort !== toEffort;
+}
 
 const OrchestrationLatestTurnState = Schema.Literals([
   "running",
@@ -326,6 +488,10 @@ const ProjectMetaUpdateCommand = Schema.Struct({
   workspaceRoot: Schema.optional(TrimmedNonEmptyString),
   defaultModelSelection: Schema.optional(Schema.NullOr(ModelSelection)),
   scripts: Schema.optional(Schema.Array(ProjectScript)),
+  // Absent leaves unchanged; null clears the override.
+  faviconPath: Schema.optional(Schema.NullOr(ProjectFaviconPath)),
+  // Absent leaves unchanged; null unarchives. Archiving keeps threads and messages, unlike project.delete.
+  archivedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
 });
 
 const ProjectDeleteCommand = Schema.Struct({
@@ -376,6 +542,8 @@ const ThreadMetaUpdateCommand = Schema.Struct({
   title: Schema.optional(TrimmedNonEmptyString),
   modelSelection: Schema.optional(ModelSelection),
   branch: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
+  // Compare-and-set guard: branch/worktreePath apply only if the thread's branch still equals this.
+  expectedBranch: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   worktreePath: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
 });
 
@@ -459,11 +627,22 @@ const ThreadUserInputRespondCommand = Schema.Struct({
   createdAt: IsoDateTime,
 });
 
+// Closes a non-blocking question without replying; a blocking one still needs an answer.
+const ThreadUserInputDismissCommand = Schema.Struct({
+  type: Schema.Literal("thread.user-input.dismiss"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  requestId: ApprovalRequestId,
+  createdAt: IsoDateTime,
+});
+
 const ThreadCheckpointRevertCommand = Schema.Struct({
   type: Schema.Literal("thread.checkpoint.revert"),
   commandId: CommandId,
   threadId: ThreadId,
   turnCount: NonNegativeInt,
+  // false rewinds only the conversation and leaves the working tree untouched.
+  restoreFiles: Schema.optional(Schema.Boolean),
   createdAt: IsoDateTime,
 });
 
@@ -471,6 +650,23 @@ const ThreadSessionStopCommand = Schema.Struct({
   type: Schema.Literal("thread.session.stop"),
   commandId: CommandId,
   threadId: ThreadId,
+  // Set when the session is only being reloaded, not stopped by the user; omitted cancels the resume.
+  keepUsageLimitResume: Schema.optional(Schema.Boolean),
+  createdAt: IsoDateTime,
+});
+
+const ThreadTitleRegenerateCommand = Schema.Struct({
+  type: Schema.Literal("thread.title.regenerate"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  createdAt: IsoDateTime,
+});
+
+const ThreadUsageLimitResumeCancelCommand = Schema.Struct({
+  type: Schema.Literal("thread.usage-limit-resume.cancel"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  turnId: TurnId,
   createdAt: IsoDateTime,
 });
 
@@ -489,8 +685,11 @@ const DispatchableClientOrchestrationCommand = Schema.Union([
   ThreadTurnInterruptCommand,
   ThreadApprovalRespondCommand,
   ThreadUserInputRespondCommand,
+  ThreadUserInputDismissCommand,
   ThreadCheckpointRevertCommand,
   ThreadSessionStopCommand,
+  ThreadTitleRegenerateCommand,
+  ThreadUsageLimitResumeCancelCommand,
 ]);
 export type DispatchableClientOrchestrationCommand =
   typeof DispatchableClientOrchestrationCommand.Type;
@@ -510,8 +709,11 @@ export const ClientOrchestrationCommand = Schema.Union([
   ThreadTurnInterruptCommand,
   ThreadApprovalRespondCommand,
   ThreadUserInputRespondCommand,
+  ThreadUserInputDismissCommand,
   ThreadCheckpointRevertCommand,
   ThreadSessionStopCommand,
+  ThreadTitleRegenerateCommand,
+  ThreadUsageLimitResumeCancelCommand,
 ]);
 export type ClientOrchestrationCommand = typeof ClientOrchestrationCommand.Type;
 
@@ -520,6 +722,8 @@ const ThreadSessionSetCommand = Schema.Struct({
   commandId: CommandId,
   threadId: ThreadId,
   session: OrchestrationSession,
+  /** Set when this update settles a failed start of the turn requested by this message. */
+  failedTurnStartMessageId: Schema.optional(MessageId),
   createdAt: IsoDateTime,
 });
 
@@ -538,6 +742,7 @@ const ThreadMessageAssistantCompleteCommand = Schema.Struct({
   commandId: CommandId,
   threadId: ThreadId,
   messageId: MessageId,
+  attachments: Schema.optional(Schema.Array(ChatAttachment)),
   turnId: Schema.optional(TurnId),
   createdAt: IsoDateTime,
 });
@@ -580,6 +785,23 @@ const ThreadRevertCompleteCommand = Schema.Struct({
   createdAt: IsoDateTime,
 });
 
+export const ThreadTitleRegenerationOutcome = Schema.Literals([
+  "updated",
+  "unchanged",
+  "empty",
+  "failed",
+]);
+export type ThreadTitleRegenerationOutcome = typeof ThreadTitleRegenerationOutcome.Type;
+
+export const ThreadTitleRegenerationSettleCommand = Schema.Struct({
+  type: Schema.Literal("thread.title.regeneration.settle"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  outcome: ThreadTitleRegenerationOutcome,
+  detail: Schema.optional(TrimmedNonEmptyString),
+  createdAt: IsoDateTime,
+});
+
 const InternalOrchestrationCommand = Schema.Union([
   ThreadSessionSetCommand,
   ThreadMessageAssistantDeltaCommand,
@@ -588,6 +810,7 @@ const InternalOrchestrationCommand = Schema.Union([
   ThreadTurnDiffCompleteCommand,
   ThreadActivityAppendCommand,
   ThreadRevertCompleteCommand,
+  ThreadTitleRegenerationSettleCommand,
 ]);
 export type InternalOrchestrationCommand = typeof InternalOrchestrationCommand.Type;
 
@@ -616,6 +839,8 @@ export const OrchestrationEventType = Schema.Literals([
   "thread.checkpoint-revert-requested",
   "thread.reverted",
   "thread.session-stop-requested",
+  "thread.title-regeneration-requested",
+  "thread.title-regeneration-settled",
   "thread.session-set",
   "thread.proposed-plan-upserted",
   "thread.turn-diff-completed",
@@ -633,6 +858,8 @@ export const ProjectCreatedPayload = Schema.Struct({
   workspaceRoot: TrimmedNonEmptyString,
   defaultModelSelection: Schema.NullOr(ModelSelection),
   scripts: Schema.Array(ProjectScript),
+  // Optional so persisted events from older servers still decode.
+  faviconPath: Schema.optional(Schema.NullOr(ProjectFaviconPath)),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
 });
@@ -643,6 +870,9 @@ export const ProjectMetaUpdatedPayload = Schema.Struct({
   workspaceRoot: Schema.optional(TrimmedNonEmptyString),
   defaultModelSelection: Schema.optional(Schema.NullOr(ModelSelection)),
   scripts: Schema.optional(Schema.Array(ProjectScript)),
+  // Absent leaves unchanged; null clears, matching ProjectMetaUpdateCommand.
+  faviconPath: Schema.optional(Schema.NullOr(ProjectFaviconPath)),
+  archivedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
   updatedAt: IsoDateTime,
 });
 
@@ -754,6 +984,8 @@ const ThreadUserInputResponseRequestedPayload = Schema.Struct({
 export const ThreadCheckpointRevertRequestedPayload = Schema.Struct({
   threadId: ThreadId,
   turnCount: NonNegativeInt,
+  // Absent on stored events, meaning files are restored.
+  restoreFiles: Schema.optional(Schema.Boolean),
   createdAt: IsoDateTime,
 });
 
@@ -764,12 +996,26 @@ export const ThreadRevertedPayload = Schema.Struct({
 
 export const ThreadSessionStopRequestedPayload = Schema.Struct({
   threadId: ThreadId,
+  keepUsageLimitResume: Schema.optional(Schema.Boolean),
+  createdAt: IsoDateTime,
+});
+
+export const ThreadTitleRegenerationRequestedPayload = Schema.Struct({
+  threadId: ThreadId,
+  createdAt: IsoDateTime,
+});
+
+export const ThreadTitleRegenerationSettledPayload = Schema.Struct({
+  threadId: ThreadId,
+  outcome: ThreadTitleRegenerationOutcome,
+  detail: Schema.optional(TrimmedNonEmptyString),
   createdAt: IsoDateTime,
 });
 
 export const ThreadSessionSetPayload = Schema.Struct({
   threadId: ThreadId,
   session: OrchestrationSession,
+  failedTurnStartMessageId: Schema.optional(MessageId),
 });
 
 export const ThreadProposedPlanUpsertedPayload = Schema.Struct({
@@ -784,6 +1030,11 @@ export const ThreadTurnDiffCompletedPayload = Schema.Struct({
   checkpointRef: CheckpointRef,
   status: OrchestrationCheckpointStatus,
   files: Schema.Array(OrchestrationCheckpointFile),
+  // Set when `files` was capped for the wire; absent means `files` is complete.
+  filesTotal: Schema.optional(NonNegativeInt),
+  // Set with `filesTotal`; they cover the full list rather than the capped `files`.
+  additionsTotal: Schema.optional(NonNegativeInt),
+  deletionsTotal: Schema.optional(NonNegativeInt),
   assistantMessageId: Schema.NullOr(MessageId),
   completedAt: IsoDateTime,
 });
@@ -907,6 +1158,16 @@ export const OrchestrationEvent = Schema.Union([
   }),
   Schema.Struct({
     ...EventBaseFields,
+    type: Schema.Literal("thread.title-regeneration-requested"),
+    payload: ThreadTitleRegenerationRequestedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.title-regeneration-settled"),
+    payload: ThreadTitleRegenerationSettledPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
     type: Schema.Literal("thread.session-set"),
     payload: ThreadSessionSetPayload,
   }),
@@ -998,7 +1259,11 @@ const OrchestrationGetSnapshotResult = OrchestrationReadModel;
 export type OrchestrationGetSnapshotResult = typeof OrchestrationGetSnapshotResult.Type;
 
 export const OrchestrationGetTurnDiffInput = TurnCountRange.mapFields(
-  Struct.assign({ threadId: ThreadId }),
+  Struct.assign({
+    threadId: ThreadId,
+    // Patch-only `git diff -w`; omitted means false so existing clients keep exact diffs.
+    ignoreWhitespace: Schema.optionalKey(Schema.Boolean),
+  }),
   { unsafePreserveChecks: true },
 );
 export type OrchestrationGetTurnDiffInput = typeof OrchestrationGetTurnDiffInput.Type;
@@ -1009,11 +1274,36 @@ export type OrchestrationGetTurnDiffResult = typeof OrchestrationGetTurnDiffResu
 export const OrchestrationGetFullThreadDiffInput = Schema.Struct({
   threadId: ThreadId,
   toTurnCount: NonNegativeInt,
+  ignoreWhitespace: Schema.optionalKey(Schema.Boolean),
 });
 export type OrchestrationGetFullThreadDiffInput = typeof OrchestrationGetFullThreadDiffInput.Type;
 
 export const OrchestrationGetFullThreadDiffResult = ThreadTurnDiff;
 export type OrchestrationGetFullThreadDiffResult = typeof OrchestrationGetFullThreadDiffResult.Type;
+
+export const OrchestrationGetTurnDiffFileContentsInput = TurnCountRange.mapFields(
+  Struct.assign({
+    threadId: ThreadId,
+    // Not trimmed: a filename can have leading or trailing spaces. The server validates the path.
+    path: Schema.String,
+    previousPath: Schema.optionalKey(Schema.String),
+  }),
+  { unsafePreserveChecks: true },
+);
+export type OrchestrationGetTurnDiffFileContentsInput =
+  typeof OrchestrationGetTurnDiffFileContentsInput.Type;
+
+export const OrchestrationGetTurnDiffFileContentsResult = Schema.Struct({
+  threadId: ThreadId,
+  fromTurnCount: NonNegativeInt,
+  toTurnCount: NonNegativeInt,
+  path: Schema.String,
+  oldContents: Schema.NullOr(Schema.String),
+  newContents: Schema.NullOr(Schema.String),
+  unavailableReason: Schema.NullOr(Schema.Literals(["binary", "too-large"])),
+});
+export type OrchestrationGetTurnDiffFileContentsResult =
+  typeof OrchestrationGetTurnDiffFileContentsResult.Type;
 
 export const OrchestrationReplayEventsInput = Schema.Struct({
   fromSequenceExclusive: NonNegativeInt,
@@ -1039,6 +1329,10 @@ export const OrchestrationRpcSchemas = {
   getFullThreadDiff: {
     input: OrchestrationGetFullThreadDiffInput,
     output: OrchestrationGetFullThreadDiffResult,
+  },
+  getTurnDiffFileContents: {
+    input: OrchestrationGetTurnDiffFileContentsInput,
+    output: OrchestrationGetTurnDiffFileContentsResult,
   },
   replayEvents: {
     input: OrchestrationReplayEventsInput,
@@ -1072,6 +1366,14 @@ export class OrchestrationGetTurnDiffError extends Schema.TaggedErrorClass<Orche
 
 export class OrchestrationGetFullThreadDiffError extends Schema.TaggedErrorClass<OrchestrationGetFullThreadDiffError>()(
   "OrchestrationGetFullThreadDiffError",
+  {
+    message: TrimmedNonEmptyString,
+    cause: Schema.optional(Schema.Defect),
+  },
+) {}
+
+export class OrchestrationGetTurnDiffFileContentsError extends Schema.TaggedErrorClass<OrchestrationGetTurnDiffFileContentsError>()(
+  "OrchestrationGetTurnDiffFileContentsError",
   {
     message: TrimmedNonEmptyString,
     cause: Schema.optional(Schema.Defect),

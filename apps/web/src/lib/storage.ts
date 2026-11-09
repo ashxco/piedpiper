@@ -10,6 +10,13 @@ export interface DebouncedStorage<R = unknown> extends StateStorage<R> {
   flush: () => void;
 }
 
+export interface DeferredStorage<TValue> {
+  getItem: (name: string) => string | null | Promise<string | null>;
+  setItem: (name: string, value: TValue) => void;
+  removeItem: (name: string) => void;
+  flush: () => void;
+}
+
 export function createMemoryStorage(): StateStorage {
   const store = new Map<string, string>();
   return {
@@ -43,10 +50,19 @@ export function createDebouncedStorage(
   baseStorage: Partial<StateStorage> | null | undefined,
   debounceMs: number = 300,
 ): DebouncedStorage {
+  return createDeferredStorage<string>(baseStorage, (value) => value, debounceMs);
+}
+
+/** Keep only the latest value and serialize it when the debounce fires or `flush` runs. */
+export function createDeferredStorage<TValue>(
+  baseStorage: Partial<StateStorage> | null | undefined,
+  serialize: (value: TValue) => string,
+  debounceMs: number = 300,
+): DeferredStorage<TValue> {
   const resolvedStorage = resolveStorage(baseStorage);
   const debouncedSetItem = new Debouncer(
-    (name: string, value: string) => {
-      resolvedStorage.setItem(name, value);
+    (name: string, value: TValue) => {
+      resolvedStorage.setItem(name, serialize(value));
     },
     { wait: debounceMs },
   );
@@ -58,6 +74,8 @@ export function createDebouncedStorage(
     },
     removeItem: (name) => {
       debouncedSetItem.cancel();
+      // cancel() leaves the captured value in Pacer's lastArgs; reset() drops it.
+      debouncedSetItem.reset();
       resolvedStorage.removeItem(name);
     },
     flush: () => {

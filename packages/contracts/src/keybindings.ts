@@ -27,17 +27,57 @@ export const THREAD_KEYBINDING_COMMANDS = [
 ] as const;
 export type ThreadKeybindingCommand = (typeof THREAD_KEYBINDING_COMMANDS)[number];
 
-const STATIC_KEYBINDING_COMMANDS = [
+/**
+ * Commands that open (or toggle) a composer control from the keyboard.
+ * `composer.mode` toggles the runtime/access mode (Supervised / Full access).
+ */
+export const COMPOSER_CONTROL_KEYBINDING_COMMANDS = [
+  "modelPicker.toggle",
+  "composer.effort",
+  "composer.mode",
+  "composer.workspace",
+  "composer.branch",
+] as const;
+export type ComposerControlKeybindingCommand =
+  (typeof COMPOSER_CONTROL_KEYBINDING_COMMANDS)[number];
+
+/** Composer submit variants that send and then move to a fresh new-thread draft. */
+export const COMPOSER_SEND_KEYBINDING_COMMANDS = [
+  "composer.sendBackground",
+  "composer.sendAndNewThread",
+] as const;
+export type ComposerSendKeybindingCommand = (typeof COMPOSER_SEND_KEYBINDING_COMMANDS)[number];
+
+export const NAVIGATION_KEYBINDING_COMMANDS = ["navigation.back", "navigation.forward"] as const;
+export type NavigationKeybindingCommand = (typeof NAVIGATION_KEYBINDING_COMMANDS)[number];
+
+export const STATIC_KEYBINDING_COMMANDS = [
+  "workspace.focusNext",
+  "workspace.focusPrevious",
+  "sidebar.toggle",
+  ...NAVIGATION_KEYBINDING_COMMANDS,
   "terminal.toggle",
   "terminal.split",
+  "terminal.splitVertical",
   "terminal.new",
   "terminal.close",
   "diff.toggle",
+  "diff.close",
+  "commandPalette.toggle",
+  "filePicker.toggle",
   "chat.new",
   "chat.newLocal",
+  "chat.find",
+  ...COMPOSER_CONTROL_KEYBINDING_COMMANDS,
+  ...COMPOSER_SEND_KEYBINDING_COMMANDS,
   "editor.openFavorite",
+  "thread.stop",
+  "thread.undo",
+  "thread.copyReference",
+  "thread.pin",
   ...THREAD_KEYBINDING_COMMANDS,
 ] as const;
+export type StaticKeybindingCommand = (typeof STATIC_KEYBINDING_COMMANDS)[number];
 
 export const SCRIPT_RUN_COMMAND_PATTERN = Schema.TemplateLiteral([
   Schema.Literal("script."),
@@ -69,6 +109,13 @@ export const KeybindingRule = Schema.Struct({
   when: Schema.optional(KeybindingWhen),
 });
 export type KeybindingRule = typeof KeybindingRule.Type;
+
+/** A rule to save, plus the persisted rule it takes the place of when editing one. */
+export const KeybindingRuleUpsert = Schema.Struct({
+  ...KeybindingRule.fields,
+  replace: Schema.optional(KeybindingRule),
+});
+export type KeybindingRuleUpsert = typeof KeybindingRuleUpsert.Type;
 
 export const KeybindingsConfig = Schema.Array(KeybindingRule).check(
   Schema.isMaxLength(MAX_KEYBINDINGS_COUNT),

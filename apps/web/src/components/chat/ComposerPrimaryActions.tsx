@@ -1,9 +1,11 @@
-import { memo } from "react";
+import { memo, useEffect, useState } from "react";
 import { ChevronDownIcon, ChevronLeftIcon } from "lucide-react";
 import { cn } from "~/lib/utils";
+import { formatWorkingTimer } from "../../session-logic";
 import { Button } from "../ui/button";
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../ui/menu";
 import { toastManager } from "../ui/toast";
+import { isThreadForceStopInFlight, isThreadStopUnresponsive } from "./composerThreadStop";
 
 interface PendingActionState {
   questionIndex: number;
@@ -25,7 +27,14 @@ interface ComposerPrimaryActionsProps {
   onPreviousPendingQuestion: () => void;
   onInterrupt: () => void;
   onImplementPlanInNewThread: () => void;
+  /** When Stop was pressed on the running turn; the button then shows that it is stopping. */
+  stopRequestedAtMs?: number | null;
+  /** When Force stop was last dispatched; the button waits on it before it can be sent again. */
+  forceStopRequestedAtMs?: number | null;
+  onForceStop?: () => void;
 }
+
+const UNRESPONSIVE_STOP_MESSAGE = "Agent not responding to Stop";
 
 const formatPendingPrimaryActionLabel = (input: {
   isLastQuestion: boolean;
@@ -36,6 +45,96 @@ const formatPendingPrimaryActionLabel = (input: {
   }
   return input.isLastQuestion ? "Submit" : "Next";
 };
+
+/** One button for Stop and Stopping, so keyboard focus survives pressing it. */
+function ThreadStopControl({
+  requestedAtMs,
+  forceStopRequestedAtMs,
+  compact,
+  onInterrupt,
+  onForceStop,
+  className,
+}: {
+  requestedAtMs: number | null;
+  forceStopRequestedAtMs: number | null;
+  compact: boolean;
+  onInterrupt: () => void;
+  onForceStop: (() => void) | undefined;
+  className: string | undefined;
+}) {
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    if (requestedAtMs === null) return;
+    setNowMs(Date.now());
+    const timer = window.setInterval(() => setNowMs(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [requestedAtMs]);
+  const isStopping = requestedAtMs !== null;
+  const elapsed = isStopping
+    ? formatWorkingTimer(
+        new Date(requestedAtMs).toISOString(),
+        new Date(Math.max(nowMs, requestedAtMs)).toISOString(),
+      )
+    : null;
+  const isUnresponsive =
+    isStopping && onForceStop !== undefined && isThreadStopUnresponsive(requestedAtMs, nowMs);
+  const isForceStopping = isThreadForceStopInFlight(forceStopRequestedAtMs, nowMs);
+  return (
+    <div className="flex min-w-0 items-center gap-2">
+      {/* Mounted before it has text, since a live region inserted with its content may not be read. */}
+      <span role="status" className="sr-only">
+        {isUnresponsive ? UNRESPONSIVE_STOP_MESSAGE : isStopping ? "Stopping" : null}
+      </span>
+      {isUnresponsive ? (
+        <>
+          {compact ? null : (
+            <span aria-hidden="true" className="whitespace-nowrap text-muted-foreground text-xs">
+              {UNRESPONSIVE_STOP_MESSAGE}
+            </span>
+          )}
+          <Button
+            type="button"
+            size="xs"
+            variant="destructive-outline"
+            className="rounded-full aria-disabled:cursor-default aria-disabled:opacity-64"
+            aria-disabled={isForceStopping || undefined}
+            onClick={onForceStop}
+          >
+            {isForceStopping ? "Force stopping..." : "Force stop"}
+          </Button>
+        </>
+      ) : null}
+      <button
+        type="button"
+        aria-disabled={isStopping || undefined}
+        aria-label={isStopping ? undefined : "Stop generation"}
+        className={cn(
+          "flex shrink-0 items-center justify-center rounded-full text-white transition-all duration-150",
+          isStopping
+            ? "h-8 cursor-default gap-1.5 bg-rose-500/50 px-3 text-xs"
+            : "size-8 cursor-pointer bg-rose-500/90 hover:scale-105 hover:bg-rose-500",
+          className,
+        )}
+        onClick={isStopping ? undefined : onInterrupt}
+      >
+        {isStopping ? (
+          <>
+            Stopping
+            {elapsed ? (
+              <span aria-hidden="true" className="tabular-nums">
+                {elapsed}
+              </span>
+            ) : null}
+          </>
+        ) : (
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor" aria-hidden="true">
+            <rect x="2" y="2" width="8" height="8" rx="1.5" />
+          </svg>
+        )}
+      </button>
+    </div>
+  );
+}
 
 export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
   compact,
@@ -49,10 +148,25 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
   onPreviousPendingQuestion,
   onInterrupt,
   onImplementPlanInNewThread,
+  stopRequestedAtMs = null,
+  forceStopRequestedAtMs = null,
+  onForceStop,
 }: ComposerPrimaryActionsProps) {
+  const renderStopControl = (className?: string) => (
+    <ThreadStopControl
+      requestedAtMs={stopRequestedAtMs}
+      forceStopRequestedAtMs={forceStopRequestedAtMs}
+      compact={compact}
+      onInterrupt={onInterrupt}
+      onForceStop={onForceStop}
+      className={className}
+    />
+  );
+
   if (pendingAction) {
     return (
       <div className={cn("flex items-center justify-end", compact ? "gap-1.5" : "gap-2")}>
+        {isRunning ? renderStopControl(stopRequestedAtMs === null ? "sm:size-7" : "sm:h-7") : null}
         {pendingAction.questionIndex > 0 ? (
           compact ? (
             <Button
@@ -116,18 +230,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
   }
 
   if (isRunning) {
-    return (
-      <button
-        type="button"
-        className="flex size-8 cursor-pointer items-center justify-center rounded-full bg-rose-500/90 text-white transition-all duration-150 hover:bg-rose-500 hover:scale-105 sm:h-8 sm:w-8"
-        onClick={onInterrupt}
-        aria-label="Stop generation"
-      >
-        <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor" aria-hidden="true">
-          <rect x="2" y="2" width="8" height="8" rx="1.5" />
-        </svg>
-      </button>
-    );
+    return renderStopControl();
   }
 
   if (showPlanFollowUpPrompt) {
@@ -149,7 +252,10 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
         <Button
           type="submit"
           size="sm"
-          className={cn("h-9 rounded-l-full rounded-r-none sm:h-8", compact ? "px-3" : "px-4")}
+          className={cn(
+            "h-9 rounded-l-full rounded-r-none sm:h-8 [&:active:not([aria-haspopup])]:scale-100",
+            compact ? "px-3" : "px-4",
+          )}
           disabled={isSendBusy || isConnecting}
         >
           {isConnecting || isSendBusy ? "Sending..." : "Implement"}

@@ -2,10 +2,13 @@ import { DownloadIcon, RotateCwIcon, TriangleAlertIcon, XIcon } from "lucide-rea
 import { useQueryClient } from "@tanstack/react-query";
 import { useCallback, useState } from "react";
 import { isElectron } from "../../env";
+import { useSettings } from "../../hooks/useSettings";
 import {
   setDesktopUpdateStateQueryData,
+  trackDesktopInstallRequest,
   useDesktopUpdateState,
 } from "../../lib/desktopUpdateReactQuery";
+import { readNativeApi } from "../../nativeApi";
 import { toastManager } from "../ui/toast";
 import {
   getArm64IntelBuildWarningDescription,
@@ -35,7 +38,11 @@ export function SidebarUpdatePill() {
   const arm64Description =
     state && showArm64Warning ? getArm64IntelBuildWarningDescription(state) : null;
 
-  const handleAction = useCallback(() => {
+  const continueThreadsAfterRestart = useSettings(
+    (settings) => settings.continueThreadsAfterRestart,
+  );
+
+  const handleAction = useCallback(async () => {
     const bridge = window.desktopBridge;
     if (!bridge || !state) return;
     if (disabled || action === "none") return;
@@ -72,10 +79,13 @@ export function SidebarUpdatePill() {
     }
 
     if (action === "install") {
-      const confirmed = window.confirm(getDesktopUpdateInstallConfirmationMessage(state));
+      const api = readNativeApi();
+      const message = getDesktopUpdateInstallConfirmationMessage(state, navigator.platform, {
+        continueThreadsAfterRestart,
+      });
+      const confirmed = api ? await api.dialogs.confirm(message) : window.confirm(message);
       if (!confirmed) return;
-      void bridge
-        .installUpdate()
+      void trackDesktopInstallRequest(() => bridge.installUpdate())
         .then((result) => {
           setDesktopUpdateStateQueryData(queryClient, result.state);
           if (!shouldToastDesktopUpdateActionResult(result)) return;
@@ -95,7 +105,7 @@ export function SidebarUpdatePill() {
           });
         });
     }
-  }, [action, disabled, queryClient, state]);
+  }, [action, continueThreadsAfterRestart, disabled, queryClient, state]);
 
   if (!visible && !showArm64Warning) return null;
 

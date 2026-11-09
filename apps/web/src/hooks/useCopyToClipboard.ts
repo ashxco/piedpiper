@@ -1,5 +1,58 @@
 import * as React from "react";
 
+/** Copy fallback for pages served over plain HTTP, where `navigator.clipboard` is absent. */
+export function writeTextWithExecCommand(value: string): boolean {
+  if (
+    typeof document === "undefined" ||
+    typeof document.execCommand !== "function" ||
+    !document.body
+  ) {
+    return false;
+  }
+
+  const textarea = document.createElement("textarea");
+  textarea.value = value;
+  textarea.setAttribute("readonly", "");
+  textarea.setAttribute("aria-hidden", "true");
+  textarea.style.position = "fixed";
+  textarea.style.top = "0";
+  textarea.style.left = "0";
+  textarea.style.opacity = "0";
+  // 16px keeps iOS Safari from zooming when the textarea takes focus.
+  textarea.style.fontSize = "16px";
+
+  const previouslyFocused = document.activeElement;
+  document.body.appendChild(textarea);
+  try {
+    textarea.focus({ preventScroll: true });
+    textarea.select();
+    textarea.setSelectionRange(0, value.length);
+    return document.execCommand("copy");
+  } catch {
+    return false;
+  } finally {
+    textarea.remove();
+    const restoreFocus = (previouslyFocused as { focus?: unknown } | null)?.focus;
+    if (typeof restoreFocus === "function") {
+      restoreFocus.call(previouslyFocused);
+    }
+  }
+}
+
+/**
+ * Writes text with the Clipboard API, falling back to `execCommand("copy")` when the API is
+ * unavailable (non-secure contexts). The fallback runs synchronously so it stays inside the
+ * user gesture that triggered the copy.
+ */
+export function writeTextToClipboard(value: string): Promise<void> {
+  if (typeof navigator === "undefined" || !navigator.clipboard?.writeText) {
+    return writeTextWithExecCommand(value)
+      ? Promise.resolve()
+      : Promise.reject(new Error("Clipboard API unavailable."));
+  }
+  return navigator.clipboard.writeText(value);
+}
+
 export function useCopyToClipboard<TContext = void>({
   timeout = 2000,
   onCopy,
@@ -15,19 +68,22 @@ export function useCopyToClipboard<TContext = void>({
   const onErrorRef = React.useRef(onError);
   const timeoutRef = React.useRef(timeout);
 
-  onCopyRef.current = onCopy;
-  onErrorRef.current = onError;
-  timeoutRef.current = timeout;
+  // Refs stay current via an effect so render never writes them.
+  React.useLayoutEffect(() => {
+    onCopyRef.current = onCopy;
+    onErrorRef.current = onError;
+    timeoutRef.current = timeout;
+  });
 
   const copyToClipboard = React.useCallback((value: string, ctx: TContext): void => {
-    if (typeof window === "undefined" || !navigator.clipboard?.writeText) {
+    if (typeof window === "undefined") {
       onErrorRef.current?.(new Error("Clipboard API unavailable."), ctx);
       return;
     }
 
     if (!value) return;
 
-    navigator.clipboard.writeText(value).then(
+    writeTextToClipboard(value).then(
       () => {
         if (timeoutIdRef.current) {
           clearTimeout(timeoutIdRef.current);

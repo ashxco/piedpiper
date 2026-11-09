@@ -1,9 +1,9 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it, describe, expect } from "@effect/vitest";
-import { Effect, FileSystem, Layer, Path } from "effect";
+import { Effect, FileSystem, Layer, Path, PlatformError } from "effect";
 
 import { WorkspacePaths } from "../Services/WorkspacePaths.ts";
-import { WorkspacePathsLive } from "./WorkspacePaths.ts";
+import { makeWorkspacePaths, WorkspacePathsLive } from "./WorkspacePaths.ts";
 
 const TestLayer = Layer.empty.pipe(
   Layer.provideMerge(WorkspacePathsLive),
@@ -58,6 +58,83 @@ it.layer(TestLayer)("WorkspacePathsLive", (it) => {
       }),
     );
 
+    it.effect("reports a permission failure instead of a missing folder", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const workspacePaths = yield* makeWorkspacePaths.pipe(
+          Effect.provideService(FileSystem.FileSystem, {
+            ...fileSystem,
+            stat: (statPath) =>
+              Effect.fail(
+                PlatformError.systemError({
+                  _tag: "PermissionDenied",
+                  module: "FileSystem",
+                  method: "stat",
+                  pathOrDescriptor: String(statPath),
+                }),
+              ),
+          }),
+        );
+        const normalizedWorkspaceRoot = path.resolve("locked");
+
+        const error = yield* workspacePaths.normalizeWorkspaceRoot(" locked ").pipe(Effect.flip);
+
+        expect(error._tag).toBe("WorkspaceRootStatFailedError");
+        expect(error.message).toBe(
+          `Workspace root could not be accessed (permission denied): ${normalizedWorkspaceRoot}`,
+        );
+      }),
+    );
+
+    it.effect("reads the errno code: EPERM is a permission failure, others are named", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const withStatErrno = (_tag: "Unknown" | "BadResource", code: string) =>
+          makeWorkspacePaths.pipe(
+            Effect.provideService(FileSystem.FileSystem, {
+              ...fileSystem,
+              stat: (statPath) =>
+                Effect.fail(
+                  PlatformError.systemError({
+                    _tag,
+                    module: "FileSystem",
+                    method: "stat",
+                    pathOrDescriptor: String(statPath),
+                    cause: Object.assign(new Error(code), { code }),
+                  }),
+                ),
+            }),
+          );
+
+        const eperm = yield* (yield* withStatErrno("Unknown", "EPERM"))
+          .normalizeWorkspaceRoot("/locked")
+          .pipe(Effect.flip);
+        expect(eperm.message).toContain("(permission denied)");
+
+        const eloop = yield* (yield* withStatErrno("BadResource", "ELOOP"))
+          .normalizeWorkspaceRoot("/loop")
+          .pipe(Effect.flip);
+        expect(eloop.message).toContain("(ELOOP)");
+      }),
+    );
+
+    it.effect("treats a path below a file as missing", () =>
+      Effect.gen(function* () {
+        const workspacePaths = yield* WorkspacePaths;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir();
+        yield* writeTextFile(cwd, "file.txt", "x");
+        const filePath = path.join(cwd, "file.txt");
+
+        const error = yield* workspacePaths
+          .normalizeWorkspaceRoot(path.join(filePath, "child"))
+          .pipe(Effect.flip);
+
+        expect(error._tag).toBe("WorkspaceRootNotExistsError");
+      }),
+    );
+
     it.effect("rejects file paths", () =>
       Effect.gen(function* () {
         const workspacePaths = yield* WorkspacePaths;
@@ -90,6 +167,32 @@ it.layer(TestLayer)("WorkspacePathsLive", (it) => {
           relativePath: "plans/effect-rpc.md",
         });
       }),
+    );
+
+    it.effect.skipIf(process.platform === "win32")(
+      "keeps literal backslashes in POSIX file names",
+      () =>
+        Effect.gen(function* () {
+          const workspacePaths = yield* WorkspacePaths;
+          const cwd = yield* makeTempDir();
+          const path = yield* Path.Path;
+
+          const resolved = yield* workspacePaths.resolveRelativePathWithinRoot({
+            workspaceRoot: cwd,
+            relativePath: "weird\\name.txt",
+          });
+          expect(resolved).toEqual({
+            absolutePath: path.join(cwd, "weird\\name.txt"),
+            relativePath: "weird\\name.txt",
+          });
+
+          // On POSIX this is a single file name inside the root, not a traversal.
+          const dotted = yield* workspacePaths.resolveRelativePathWithinRoot({
+            workspaceRoot: cwd,
+            relativePath: "..\\..\\etc",
+          });
+          expect(dotted.relativePath).toBe("..\\..\\etc");
+        }),
     );
 
     it.effect("rejects paths that escape the workspace root", () =>

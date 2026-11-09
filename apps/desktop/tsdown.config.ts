@@ -18,4 +18,10 @@ export default defineConfig([
     ...shared,
     entry: ["src/preload.ts"],
   },
+  {
+    // Packaged entry: boot.js requires compileCache.js then main.js at runtime, so they stay separate files.
+    ...shared,
+    entry: ["src/boot.ts", "src/compileCache.ts"],
+    external: (id) => id === "./main.js" || id === "./compileCache.js",
+  },
 ]);

@@ -2,6 +2,7 @@ import { Schema } from "effect";
 import * as Rpc from "effect/unstable/rpc/Rpc";
 import * as RpcGroup from "effect/unstable/rpc/RpcGroup";
 
+import { AgentSessionScanError, AgentSessionScanResult } from "./agentSessions";
 import { ProviderItemId, ThreadId } from "./baseSchemas";
 import { OpenError, OpenInEditorInput } from "./editor";
 import {
@@ -12,7 +13,10 @@ import {
   GitCommandError,
   GitCreateBranchInput,
   GitCreateWorktreeInput,
+  GitCreateWorktreeProgressEvent,
   GitCreateWorktreeResult,
+  GitDiffPreviewInput,
+  GitDiffPreviewResult,
   GitGitHubCliStatus,
   GitGitHubCliStatusInput,
   GitGitHubCreateRepoInput,
@@ -32,6 +36,7 @@ import {
   GitStatusInput,
   GitStatusResult,
 } from "./git";
+import { GitCloneRepositoryEvent, GitCloneRepositoryInput } from "./gitClone";
 import { KeybindingsConfigError } from "./keybindings";
 import {
   ClientOrchestrationCommand,
@@ -43,6 +48,8 @@ import {
   OrchestrationGetSnapshotError,
   OrchestrationGetSnapshotInput,
   OrchestrationGetTurnDiffError,
+  OrchestrationGetTurnDiffFileContentsError,
+  OrchestrationGetTurnDiffFileContentsInput,
   OrchestrationGetTurnDiffInput,
   OrchestrationReplayEventsError,
   OrchestrationReplayEventsInput,
@@ -57,26 +64,25 @@ import {
   ProjectCreateDirectoryError,
   ProjectCreateDirectoryInput,
   ProjectCreateDirectoryResult,
+  ProjectReadConfigFileInput,
+  ProjectReadConfigFileResult,
+  ProjectStatPathInput,
+  ProjectStatPathResult,
   ProjectWriteFileError,
   ProjectWriteFileInput,
   ProjectWriteFileResult,
 } from "./project";
 import {
-  SkillsSearchInput,
-  SkillsSearchResult,
-  SkillsSearchError,
-  SkillDetailInput,
-  SkillDetailResult,
-  SkillDetailError,
-  SkillUninstallInput,
-  SkillUninstallResult,
-  SkillUninstallError,
-} from "./skills";
+  ProjectBrowseDirectoriesError,
+  ProjectBrowseDirectoriesInput,
+  ProjectBrowseDirectoriesResult,
+} from "./projectBrowse";
 import {
   TerminalClearInput,
   TerminalCloseInput,
   TerminalError,
-  TerminalEvent,
+  TerminalEventStreamItem,
+  TerminalMetadataStreamEvent,
   TerminalOpenInput,
   TerminalResizeInput,
   TerminalRestartInput,
@@ -84,13 +90,25 @@ import {
   TerminalWriteInput,
 } from "./terminal";
 import {
+  ProviderListSlashCommandsInput,
+  ProviderListSlashCommandsResult,
   ServerConfigStreamEvent,
   ServerConfig,
   ServerLifecycleStreamEvent,
   ServerProviderUpdatedPayload,
+  ServerRemoveKeybindingInput,
+  ServerRemoveKeybindingResult,
   ServerUpsertKeybindingInput,
   ServerUpsertKeybindingResult,
 } from "./server";
+import {
+  OtlpEndpointCheckInput,
+  OtlpEndpointCheckResult,
+  ServerProcessDiagnosticsResult,
+  ServerSignalProcessInput,
+  ServerSignalProcessResult,
+  ServerTraceDiagnosticsResult,
+} from "./serverDiagnostics";
 import { ServerSettings, ServerSettingsError, ServerSettingsPatch } from "./settings";
 
 export const WS_METHODS = {
@@ -100,13 +118,12 @@ export const WS_METHODS = {
   projectsRemove: "projects.remove",
   projectsSearchEntries: "projects.searchEntries",
   projectsWriteFile: "projects.writeFile",
+  projectsReadConfigFile: "projects.readConfigFile",
   projectsCheckDirectoryExists: "projects.checkDirectoryExists",
+  projectsStatPath: "projects.statPath",
   projectsCreateDirectory: "projects.createDirectory",
-
-  // Skills methods
-  skillsSearch: "skills.search",
-  skillsGetDetail: "skills.getDetail",
-  skillsUninstall: "skills.uninstall",
+  projectsBrowseDirectories: "projects.browseDirectories",
+  projectsScanAgentSessions: "projects.scanAgentSessions",
 
   // Shell methods
   shellOpenInEditor: "shell.openInEditor",
@@ -114,13 +131,16 @@ export const WS_METHODS = {
   // Git methods
   gitPull: "git.pull",
   gitStatus: "git.status",
+  gitDiffPreview: "git.diffPreview",
   gitRunStackedAction: "git.runStackedAction",
   gitListBranches: "git.listBranches",
   gitCreateWorktree: "git.createWorktree",
+  gitCreateWorktreeWithProgress: "git.createWorktreeWithProgress",
   gitRemoveWorktree: "git.removeWorktree",
   gitCreateBranch: "git.createBranch",
   gitCheckout: "git.checkout",
   gitInit: "git.init",
+  gitCloneRepository: "git.cloneRepository",
   gitAddRemote: "git.addRemote",
   gitGitHubCliStatus: "git.gitHubCliStatus",
   gitGitHubCreateRepo: "git.gitHubCreateRepo",
@@ -139,12 +159,19 @@ export const WS_METHODS = {
   serverGetConfig: "server.getConfig",
   serverRefreshProviders: "server.refreshProviders",
   serverUpsertKeybinding: "server.upsertKeybinding",
+  serverRemoveKeybinding: "server.removeKeybinding",
   serverGetSettings: "server.getSettings",
   serverUpdateSettings: "server.updateSettings",
+  serverGetTraceDiagnostics: "server.getTraceDiagnostics",
+  serverGetProcessDiagnostics: "server.getProcessDiagnostics",
+  serverSignalProcess: "server.signalProcess",
+  serverCheckOtlpEndpoint: "server.checkOtlpEndpoint",
+  providerListSlashCommands: "provider.listSlashCommands",
 
   // Streaming subscriptions
   subscribeOrchestrationDomainEvents: "subscribeOrchestrationDomainEvents",
   subscribeTerminalEvents: "subscribeTerminalEvents",
+  subscribeTerminalMetadata: "subscribeTerminalMetadata",
   subscribeServerConfig: "subscribeServerConfig",
   subscribeServerLifecycle: "subscribeServerLifecycle",
   subscribeToolInputPreview: "subscribeToolInputPreview",
@@ -182,6 +209,12 @@ export const WsServerUpsertKeybindingRpc = Rpc.make(WS_METHODS.serverUpsertKeybi
   error: KeybindingsConfigError,
 });
 
+export const WsServerRemoveKeybindingRpc = Rpc.make(WS_METHODS.serverRemoveKeybinding, {
+  payload: ServerRemoveKeybindingInput,
+  success: ServerRemoveKeybindingResult,
+  error: KeybindingsConfigError,
+});
+
 export const WsServerGetConfigRpc = Rpc.make(WS_METHODS.serverGetConfig, {
   payload: Schema.Struct({}),
   success: ServerConfig,
@@ -205,6 +238,31 @@ export const WsServerUpdateSettingsRpc = Rpc.make(WS_METHODS.serverUpdateSetting
   error: ServerSettingsError,
 });
 
+export const WsServerGetTraceDiagnosticsRpc = Rpc.make(WS_METHODS.serverGetTraceDiagnostics, {
+  payload: Schema.Struct({}),
+  success: ServerTraceDiagnosticsResult,
+});
+
+export const WsServerGetProcessDiagnosticsRpc = Rpc.make(WS_METHODS.serverGetProcessDiagnostics, {
+  payload: Schema.Struct({}),
+  success: ServerProcessDiagnosticsResult,
+});
+
+export const WsServerSignalProcessRpc = Rpc.make(WS_METHODS.serverSignalProcess, {
+  payload: ServerSignalProcessInput,
+  success: ServerSignalProcessResult,
+});
+
+export const WsServerCheckOtlpEndpointRpc = Rpc.make(WS_METHODS.serverCheckOtlpEndpoint, {
+  payload: OtlpEndpointCheckInput,
+  success: OtlpEndpointCheckResult,
+});
+
+export const WsProviderListSlashCommandsRpc = Rpc.make(WS_METHODS.providerListSlashCommands, {
+  payload: ProviderListSlashCommandsInput,
+  success: ProviderListSlashCommandsResult,
+});
+
 export const WsProjectsSearchEntriesRpc = Rpc.make(WS_METHODS.projectsSearchEntries, {
   payload: ProjectSearchEntriesInput,
   success: ProjectSearchEntriesResult,
@@ -217,9 +275,19 @@ export const WsProjectsWriteFileRpc = Rpc.make(WS_METHODS.projectsWriteFile, {
   error: ProjectWriteFileError,
 });
 
+export const WsProjectsReadConfigFileRpc = Rpc.make(WS_METHODS.projectsReadConfigFile, {
+  payload: ProjectReadConfigFileInput,
+  success: ProjectReadConfigFileResult,
+});
+
 export const WsProjectsCheckDirectoryExistsRpc = Rpc.make(WS_METHODS.projectsCheckDirectoryExists, {
   payload: ProjectCheckDirectoryExistsInput,
   success: ProjectCheckDirectoryExistsResult,
+});
+
+export const WsProjectsStatPathRpc = Rpc.make(WS_METHODS.projectsStatPath, {
+  payload: ProjectStatPathInput,
+  success: ProjectStatPathResult,
 });
 
 export const WsProjectsCreateDirectoryRpc = Rpc.make(WS_METHODS.projectsCreateDirectory, {
@@ -228,22 +296,16 @@ export const WsProjectsCreateDirectoryRpc = Rpc.make(WS_METHODS.projectsCreateDi
   error: ProjectCreateDirectoryError,
 });
 
-export const WsSkillsSearchRpc = Rpc.make(WS_METHODS.skillsSearch, {
-  payload: SkillsSearchInput,
-  success: SkillsSearchResult,
-  error: SkillsSearchError,
+export const WsProjectsBrowseDirectoriesRpc = Rpc.make(WS_METHODS.projectsBrowseDirectories, {
+  payload: ProjectBrowseDirectoriesInput,
+  success: ProjectBrowseDirectoriesResult,
+  error: ProjectBrowseDirectoriesError,
 });
 
-export const WsSkillsGetDetailRpc = Rpc.make(WS_METHODS.skillsGetDetail, {
-  payload: SkillDetailInput,
-  success: SkillDetailResult,
-  error: SkillDetailError,
-});
-
-export const WsSkillsUninstallRpc = Rpc.make(WS_METHODS.skillsUninstall, {
-  payload: SkillUninstallInput,
-  success: SkillUninstallResult,
-  error: SkillUninstallError,
+export const WsProjectsScanAgentSessionsRpc = Rpc.make(WS_METHODS.projectsScanAgentSessions, {
+  payload: Schema.Struct({}),
+  success: AgentSessionScanResult,
+  error: AgentSessionScanError,
 });
 
 export const WsShellOpenInEditorRpc = Rpc.make(WS_METHODS.shellOpenInEditor, {
@@ -255,6 +317,12 @@ export const WsGitStatusRpc = Rpc.make(WS_METHODS.gitStatus, {
   payload: GitStatusInput,
   success: GitStatusResult,
   error: GitManagerServiceError,
+});
+
+export const WsGitDiffPreviewRpc = Rpc.make(WS_METHODS.gitDiffPreview, {
+  payload: GitDiffPreviewInput,
+  success: GitDiffPreviewResult,
+  error: GitCommandError,
 });
 
 export const WsGitPullRpc = Rpc.make(WS_METHODS.gitPull, {
@@ -294,6 +362,16 @@ export const WsGitCreateWorktreeRpc = Rpc.make(WS_METHODS.gitCreateWorktree, {
   error: GitCommandError,
 });
 
+export const WsGitCreateWorktreeWithProgressRpc = Rpc.make(
+  WS_METHODS.gitCreateWorktreeWithProgress,
+  {
+    payload: GitCreateWorktreeInput,
+    success: GitCreateWorktreeProgressEvent,
+    error: GitCommandError,
+    stream: true,
+  },
+);
+
 export const WsGitRemoveWorktreeRpc = Rpc.make(WS_METHODS.gitRemoveWorktree, {
   payload: GitRemoveWorktreeInput,
   error: GitCommandError,
@@ -312,6 +390,13 @@ export const WsGitCheckoutRpc = Rpc.make(WS_METHODS.gitCheckout, {
 export const WsGitInitRpc = Rpc.make(WS_METHODS.gitInit, {
   payload: GitInitInput,
   error: GitCommandError,
+});
+
+export const WsGitCloneRepositoryRpc = Rpc.make(WS_METHODS.gitCloneRepository, {
+  payload: GitCloneRepositoryInput,
+  success: GitCloneRepositoryEvent,
+  error: GitCommandError,
+  stream: true,
 });
 
 export const WsGitAddRemoteRpc = Rpc.make(WS_METHODS.gitAddRemote, {
@@ -393,6 +478,15 @@ export const WsOrchestrationGetFullThreadDiffRpc = Rpc.make(
   },
 );
 
+export const WsOrchestrationGetTurnDiffFileContentsRpc = Rpc.make(
+  ORCHESTRATION_WS_METHODS.getTurnDiffFileContents,
+  {
+    payload: OrchestrationGetTurnDiffFileContentsInput,
+    success: OrchestrationRpcSchemas.getTurnDiffFileContents.output,
+    error: OrchestrationGetTurnDiffFileContentsError,
+  },
+);
+
 export const WsOrchestrationReplayEventsRpc = Rpc.make(ORCHESTRATION_WS_METHODS.replayEvents, {
   payload: OrchestrationReplayEventsInput,
   success: OrchestrationRpcSchemas.replayEvents.output,
@@ -410,7 +504,13 @@ export const WsSubscribeOrchestrationDomainEventsRpc = Rpc.make(
 
 export const WsSubscribeTerminalEventsRpc = Rpc.make(WS_METHODS.subscribeTerminalEvents, {
   payload: Schema.Struct({}),
-  success: TerminalEvent,
+  success: TerminalEventStreamItem,
+  stream: true,
+});
+
+export const WsSubscribeTerminalMetadataRpc = Rpc.make(WS_METHODS.subscribeTerminalMetadata, {
+  payload: Schema.Struct({}),
+  success: TerminalMetadataStreamEvent,
   stream: true,
 });
 
@@ -437,27 +537,37 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerGetConfigRpc,
   WsServerRefreshProvidersRpc,
   WsServerUpsertKeybindingRpc,
+  WsServerRemoveKeybindingRpc,
   WsServerGetSettingsRpc,
   WsServerUpdateSettingsRpc,
+  WsServerGetTraceDiagnosticsRpc,
+  WsServerGetProcessDiagnosticsRpc,
+  WsServerSignalProcessRpc,
+  WsServerCheckOtlpEndpointRpc,
+  WsProviderListSlashCommandsRpc,
   WsProjectsSearchEntriesRpc,
   WsProjectsWriteFileRpc,
+  WsProjectsReadConfigFileRpc,
   WsProjectsCheckDirectoryExistsRpc,
   WsProjectsCreateDirectoryRpc,
-  WsSkillsSearchRpc,
-  WsSkillsGetDetailRpc,
-  WsSkillsUninstallRpc,
+  WsProjectsStatPathRpc,
+  WsProjectsBrowseDirectoriesRpc,
+  WsProjectsScanAgentSessionsRpc,
   WsShellOpenInEditorRpc,
   WsGitStatusRpc,
+  WsGitDiffPreviewRpc,
   WsGitPullRpc,
   WsGitRunStackedActionRpc,
   WsGitResolvePullRequestRpc,
   WsGitPreparePullRequestThreadRpc,
   WsGitListBranchesRpc,
   WsGitCreateWorktreeRpc,
+  WsGitCreateWorktreeWithProgressRpc,
   WsGitRemoveWorktreeRpc,
   WsGitCreateBranchRpc,
   WsGitCheckoutRpc,
   WsGitInitRpc,
+  WsGitCloneRepositoryRpc,
   WsGitAddRemoteRpc,
   WsGitGitHubCliStatusRpc,
   WsGitGitHubCreateRepoRpc,
@@ -469,6 +579,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsTerminalCloseRpc,
   WsSubscribeOrchestrationDomainEventsRpc,
   WsSubscribeTerminalEventsRpc,
+  WsSubscribeTerminalMetadataRpc,
   WsSubscribeServerConfigRpc,
   WsSubscribeServerLifecycleRpc,
   WsSubscribeToolInputPreviewRpc,
@@ -476,5 +587,6 @@ export const WsRpcGroup = RpcGroup.make(
   WsOrchestrationDispatchCommandRpc,
   WsOrchestrationGetTurnDiffRpc,
   WsOrchestrationGetFullThreadDiffRpc,
+  WsOrchestrationGetTurnDiffFileContentsRpc,
   WsOrchestrationReplayEventsRpc,
 );

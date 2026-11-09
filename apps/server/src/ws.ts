@@ -1,36 +1,27 @@
+import { access as fsAccess, mkdir as fsMkdir } from "node:fs/promises";
+import { resolve as resolvePath } from "node:path";
+import { Cause, Effect, FileSystem, Layer, Option, Path, Queue, Ref, Schema, Stream } from "effect";
 import {
-  access as fsAccess,
-  lstat as fsLstat,
-  mkdir as fsMkdir,
-  readdir as fsReaddir,
-  readFile as fsReadFile,
-  realpath as fsRealpath,
-  rm as fsRm,
-  stat as fsStat,
-} from "node:fs/promises";
-import { homedir } from "node:os";
-import { join, resolve as resolvePath } from "node:path";
-import { Effect, Layer, Option, Queue, Ref, Schema, Stream } from "effect";
-import {
+  AgentSessionScanError,
   type GitActionProgressEvent,
+  type GitCloneRepositoryEvent,
   GitCommandError,
+  type GitCreateWorktreeProgressEvent,
   type GitManagerServiceError,
   OrchestrationDispatchCommandError,
   type OrchestrationEvent,
   OrchestrationGetFullThreadDiffError,
   OrchestrationGetSnapshotError,
   OrchestrationGetTurnDiffError,
+  OrchestrationGetTurnDiffFileContentsError,
   ORCHESTRATION_WS_METHODS,
+  ProjectBrowseDirectoriesError,
   ProjectSearchEntriesError,
   ProjectCreateDirectoryError,
   ProjectWriteFileError,
   ProviderItemId,
-  SkillsSearchError,
-  SkillDetailError,
-  SkillUninstallError,
-  type MergedSkill,
   OrchestrationReplayEventsError,
-  type TerminalEvent,
+  type TerminalMetadataStreamEvent,
   type ToolInputPreviewEvent,
   WS_METHODS,
   WsRpcGroup,
@@ -40,213 +31,81 @@ import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstab
 import { RpcSerialization, RpcServer } from "effect/unstable/rpc";
 
 import { CheckpointDiffQuery } from "./checkpointing/Services/CheckpointDiffQuery";
+import { makeTurnDiffFileContentsReader } from "./checkpointing/turnDiffFileContents";
+import {
+  capEventCheckpointFilesForWire,
+  capReadModelCheckpointFilesForWire,
+} from "./checkpointing/wireCheckpointFiles";
 import { ServerConfig } from "./config";
+import { cloneGitRepository } from "./git/gitClone";
+import { resolveGitHubCliStatus } from "./git/gitHubCliStatus";
 import { GitCore } from "./git/Services/GitCore";
 import { GitHubCli } from "./git/Services/GitHubCli";
 import { GitManager } from "./git/Services/GitManager";
 import { gitGitHubCreateRepoEffect } from "./githubRepoCreate";
+import { rejectRequestOrigin, validateAuthToken } from "./http";
+import { checkOtlpEndpoint } from "./diagnostics/OtlpEndpointCheck";
+import { makeProcessDiagnostics } from "./diagnostics/ProcessDiagnostics";
+import { readTraceDiagnostics } from "./diagnostics/TraceDiagnostics";
 import { Keybindings } from "./keybindings";
-import { Open, resolveAvailableEditors } from "./open";
+import {
+  isNetworkPath,
+  isPathInsideAnyRoot,
+  Open,
+  OpenError,
+  makeCachedEditorDiscovery,
+  resolveAvailableEditorsForConfig,
+} from "./open";
+import { resolveUserHomeDir } from "./os-jank";
+import {
+  subscribeBounded,
+  subscribeBoundedResumable,
+} from "./orchestration/BoundedLiveSubscription";
+import { isPrunedReplayError } from "./orchestration/Layers/OrchestrationEventMaintenance";
 import { normalizeDispatchCommand } from "./orchestration/Normalizer";
 import { OrchestrationEngineService } from "./orchestration/Services/OrchestrationEngine";
 import { ProjectionSnapshotQuery } from "./orchestration/Services/ProjectionSnapshotQuery";
+import * as EventLoopMonitor from "./observability/EventLoopMonitor";
 import {
   observeRpcEffect,
   observeRpcStream,
   observeRpcStreamEffect,
 } from "./observability/RpcInstrumentation";
+import { resolveAgentSessionHomes, scanAgentSessions } from "./project/AgentSessionScanner";
+import { ProjectConfigFileLoader } from "./project/Services/ProjectConfigFileLoader";
+import { userFacingDatabaseErrorMessage } from "./persistence/Errors";
+import { ClaudeSlashCommands } from "./provider/Services/ClaudeSlashCommands";
 import { ProviderRegistry } from "./provider/Services/ProviderRegistry";
 import { ProviderService } from "./provider/Services/ProviderService";
 import { ServerLifecycleEvents } from "./serverLifecycleEvents";
 import { ServerRuntimeStartup } from "./serverRuntimeStartup";
 import { ServerSettingsService } from "./serverSettings";
+import { awaitEditorDiscovery, makeServerConfigUpdateStream } from "./serverConfigStream";
 import { TerminalManager } from "./terminal/Services/Manager";
 import { WorkspaceEntries } from "./workspace/Services/WorkspaceEntries";
-import { WorkspaceFileSystem } from "./workspace/Services/WorkspaceFileSystem";
+import { browseDirectories } from "./workspace/browseDirectories";
+import { statPathKind } from "./workspace/statPathKind";
+import {
+  WorkspaceFileSystem,
+  WorkspaceFileSystemError,
+} from "./workspace/Services/WorkspaceFileSystem";
 import { WorkspacePathOutsideRootError } from "./workspace/Services/WorkspacePaths";
+import { wsDefectReporterLayer } from "./wsDefectReporter";
+import { withOutputWindow } from "./wsOutputWindow";
+import { terminalOutputStream } from "./wsTerminalOutputStream";
 
-// ---------------------------------------------------------------------------
-// Skills helpers
-// ---------------------------------------------------------------------------
-
-function parseSkillFrontmatter(content: string): {
-  name: string;
-  description: string;
-  version?: string | undefined;
-  allowedTools?: string[] | undefined;
-} {
-  const match = content.match(/^---\n([\s\S]*?)\n---/);
-  if (!match) return { name: "", description: "" };
-  const yaml = match[1]!;
-  const name = yaml.match(/^name:\s*(.+)$/m)?.[1]?.trim() ?? "";
-  // Handle both single-line and multi-line (|) descriptions
-  let description = "";
-  const descSingle = yaml.match(/^description:\s*(?!\|)(.+)$/m);
-  if (descSingle) {
-    description = descSingle[1]!.trim();
-  } else {
-    const descBlock = yaml.match(/^description:\s*\|\s*\n([\s\S]*?)(?=\n\S|\n*$)/m);
-    if (descBlock) {
-      description = descBlock[1]!
-        .split("\n")
-        .map((l) => l.trim())
-        .filter(Boolean)
-        .join(" ");
-    }
-  }
-  const version = yaml.match(/^version:\s*(.+)$/m)?.[1]?.trim();
-  const toolsMatch = yaml.match(/^allowed-tools:\s*\n((?:\s+-\s+.+\n?)*)/m);
-  const allowedTools = toolsMatch
-    ? toolsMatch[1]!
-        .split("\n")
-        .map((l) => l.replace(/^\s*-\s*/, "").trim())
-        .filter(Boolean)
-    : undefined;
-  return { name, description, version, allowedTools };
-}
-
-interface LocalSkill {
-  id: string;
-  name: string;
-  description: string;
-  localPath: string;
-  localSource: "global" | "project";
-  version?: string | undefined;
-  allowedTools?: string[] | undefined;
-}
-
-type SkillFrontmatter = ReturnType<typeof parseSkillFrontmatter>;
-
-interface SkillFileEntry {
-  realPath: string;
-  mtimeMs: number;
-  raw: string;
-  parsed: SkillFrontmatter;
-}
-
-// Cache parsed SKILL.md files keyed by canonical (realpath) path. Each entry
-// records the mtime of the canonical file so we can invalidate when the file
-// changes on disk. Without this, every WS skill list/detail call re-reads and
-// re-parses every SKILL.md, blocking the Effect runtime on synchronous fs.
-const skillFileCache = new Map<string, SkillFileEntry>();
-
-async function readSkillFileCached(absolutePath: string): Promise<SkillFileEntry | null> {
-  let realPath: string;
-  let mtimeMs: number;
-  try {
-    realPath = await fsRealpath(absolutePath);
-    mtimeMs = (await fsStat(realPath)).mtimeMs;
-  } catch {
-    return null;
-  }
-
-  const cached = skillFileCache.get(realPath);
-  if (cached && cached.mtimeMs === mtimeMs) {
-    return cached;
-  }
-
-  let raw: string;
-  try {
-    raw = await fsReadFile(realPath, "utf8");
-  } catch {
-    return null;
-  }
-
-  const entry: SkillFileEntry = {
-    realPath,
-    mtimeMs,
-    raw,
-    parsed: parseSkillFrontmatter(raw),
-  };
-  skillFileCache.set(realPath, entry);
-  return entry;
-}
-
-async function scanSkillsDir(root: string, source: "global" | "project"): Promise<LocalSkill[]> {
-  try {
-    await fsAccess(root);
-  } catch {
-    return [];
-  }
-  const results: LocalSkill[] = [];
-  const seenPaths = new Set<string>();
-
-  let entries: string[];
-  try {
-    entries = await fsReaddir(root);
-  } catch {
-    return [];
-  }
-
-  for (const entry of entries) {
-    const entryPath = join(root, entry);
-    let stat;
-    try {
-      stat = await fsLstat(entryPath);
-    } catch {
-      continue;
-    }
-
-    // Skip symlinks — we'll pick up the canonical version from group dirs
-    if (stat.isSymbolicLink()) continue;
-    if (!stat.isDirectory()) continue;
-
-    const skillMdPath = join(entryPath, "SKILL.md");
-    const file = await readSkillFileCached(skillMdPath);
-    if (file) {
-      if (seenPaths.has(file.realPath)) continue;
-      seenPaths.add(file.realPath);
-      const fm = file.parsed;
-      results.push({
-        id: fm.name || entry,
-        name: fm.name || entry,
-        description: fm.description,
-        localPath: entryPath,
-        localSource: source,
-        version: fm.version,
-        allowedTools: fm.allowedTools,
-      });
-    } else {
-      // Group directory — recurse one level
-      let subEntries: string[];
-      try {
-        subEntries = await fsReaddir(entryPath);
-      } catch {
-        continue;
-      }
-      for (const sub of subEntries) {
-        const subPath = join(entryPath, sub);
-        const subSkillMd = join(subPath, "SKILL.md");
-        const subFile = await readSkillFileCached(subSkillMd);
-        if (!subFile) continue;
-        if (seenPaths.has(subFile.realPath)) continue;
-        seenPaths.add(subFile.realPath);
-        const fm = subFile.parsed;
-        results.push({
-          id: fm.name || sub,
-          name: fm.name || sub,
-          description: fm.description,
-          localPath: subPath,
-          localSource: source,
-          version: fm.version,
-          allowedTools: fm.allowedTools,
-        });
-      }
-    }
-  }
-  return results;
-}
-
-function localSkillsToMerged(local: LocalSkill[]): MergedSkill[] {
-  return local.map((skill) => ({
-    id: skill.id,
-    name: skill.name,
-    description: skill.description,
-    installed: true,
-    localSource: skill.localSource,
-    localPath: skill.localPath,
-  }));
-}
+/**
+ * Starts consuming a lazily-subscribed (PubSub-backed) stream immediately and
+ * buffers its elements, so items published before the returned stream is first
+ * pulled are not lost. The consumer fiber lives in the caller's scope.
+ */
+export const subscribeEagerly = <A, E>(stream: Stream.Stream<A, E>) =>
+  Effect.gen(function* () {
+    const queue = yield* Queue.unbounded<A, E | Cause.Done>();
+    // startImmediately runs the fiber up to its first suspension, i.e. past PubSub.subscribe.
+    yield* Stream.runIntoQueue(stream, queue).pipe(Effect.forkScoped({ startImmediately: true }));
+    return Stream.fromQueue(queue);
+  });
 
 const WsRpcLayer = WsRpcGroup.toLayer(
   Effect.gen(function* () {
@@ -257,26 +116,37 @@ const WsRpcLayer = WsRpcGroup.toLayer(
     const open = yield* Open;
     const gitManager = yield* GitManager;
     const git = yield* GitCore;
+    const fileSystemService = yield* FileSystem.FileSystem;
+    const pathService = yield* Path.Path;
     const gitHubCli = yield* GitHubCli;
     const terminalManager = yield* TerminalManager;
     const providerRegistry = yield* ProviderRegistry;
     const providerService = yield* ProviderService;
+    const claudeSlashCommands = yield* ClaudeSlashCommands;
     const config = yield* ServerConfig;
     const lifecycleEvents = yield* ServerLifecycleEvents;
     const serverSettings = yield* ServerSettingsService;
     const startup = yield* ServerRuntimeStartup;
     const workspaceEntries = yield* WorkspaceEntries;
     const workspaceFileSystem = yield* WorkspaceFileSystem;
+    const projectConfigFileLoader = yield* ProjectConfigFileLoader;
+    const eventLoopMonitor = yield* EventLoopMonitor.EventLoopMonitor;
+    const processDiagnostics = makeProcessDiagnostics();
+    const readTurnDiffFileContents = makeTurnDiffFileContentsReader({
+      git,
+      projectionSnapshotQuery,
+    });
+
+    const discoverAvailableEditors = makeCachedEditorDiscovery();
+    // Warm the cache so the first config snapshot rarely hits the discovery timeout.
+    discoverAvailableEditors().catch(() => {});
 
     const loadServerConfig = Effect.gen(function* () {
       const keybindingsConfig = yield* keybindings.loadConfigState;
       const providers = yield* providerRegistry.getProviders;
       const settings = yield* serverSettings.getSettings;
-      const availableEditors = yield* Effect.tryPromise(() => resolveAvailableEditors()).pipe(
-        Effect.catch(() =>
-          Effect.succeed([] as ReadonlyArray<import("@piedpiper/contracts").EditorId>),
-        ),
-      );
+      const availableEditors = yield* resolveAvailableEditorsForConfig(discoverAvailableEditors);
+      const lastEventLoopStall = yield* eventLoopMonitor.latestNoticeableStall;
 
       return {
         cwd: config.cwd,
@@ -292,46 +162,41 @@ const WsRpcLayer = WsRpcGroup.toLayer(
           otlpTracesEnabled: config.otlpTracesUrl !== undefined,
           ...(config.otlpMetricsUrl !== undefined ? { otlpMetricsUrl: config.otlpMetricsUrl } : {}),
           otlpMetricsEnabled: config.otlpMetricsUrl !== undefined,
+          ...(config.otlpLogsUrl !== undefined ? { otlpLogsUrl: config.otlpLogsUrl } : {}),
+          otlpLogsEnabled: config.otlpLogsUrl !== undefined,
         },
         settings,
+        ...(lastEventLoopStall === undefined ? {} : { lastEventLoopStall }),
       };
     });
 
     /**
-     * Validate that an absolute path falls within a known project workspace root
-     * or one of the server's advisor directories. Prevents arbitrary filesystem
+     * Validate that an absolute path falls within a known project workspace root.
+     * Prevents arbitrary filesystem
      * access through the directory RPC handlers.
      */
-    const validatePathWithinWorkspaces = (inputPath: string) =>
+    const findContainingWorkspaceRoot = (inputPath: string) =>
       Effect.gen(function* () {
         const resolved = resolvePath(inputPath);
-        // Collect allowed root directories from server config
-        const allowedRoots: string[] = [
-          config.advisorsWorkspaceDir,
-          config.advisorToolsDir,
-          config.advisorSkillsDir,
-        ];
-        // Add all active project workspace roots from the projection read model
-        const snapshot = yield* projectionSnapshotQuery
-          .getSnapshot()
-          .pipe(Effect.orElseSucceed(() => ({ projects: [] as { workspaceRoot: string }[] })));
-        for (const project of snapshot.projects) {
-          if (project.workspaceRoot) {
-            allowedRoots.push(resolvePath(project.workspaceRoot));
-          }
+        // In-memory read model: avoids hydrating the full projection snapshot per call.
+        const readModel = yield* orchestrationEngine.getReadModel();
+        for (const project of readModel.projects.values()) {
+          if (project.deletedAt !== null || !project.workspaceRoot) continue;
+          const root = resolvePath(project.workspaceRoot);
+          // The resolved path must exactly equal or be a child of an allowed root
+          if (resolved === root || resolved.startsWith(root + "/")) return root;
         }
-        // The resolved path must exactly equal or be a child of an allowed root
-        const isAllowed = allowedRoots.some(
-          (root) => resolved === root || resolved.startsWith(root + "/"),
-        );
-        return isAllowed;
+        return null;
       });
+    const validatePathWithinWorkspaces = (inputPath: string) =>
+      findContainingWorkspaceRoot(inputPath).pipe(Effect.map((root) => root !== null));
 
     return WsRpcGroup.of({
       [ORCHESTRATION_WS_METHODS.getSnapshot]: (_input) =>
         observeRpcEffect(
           ORCHESTRATION_WS_METHODS.getSnapshot,
           projectionSnapshotQuery.getSnapshot().pipe(
+            Effect.map(capReadModelCheckpointFilesForWire),
             Effect.mapError(
               (cause) =>
                 new OrchestrationGetSnapshotError({
@@ -347,10 +212,45 @@ const WsRpcLayer = WsRpcGroup.toLayer(
           ORCHESTRATION_WS_METHODS.dispatchCommand,
           Effect.gen(function* () {
             const normalizedCommand = yield* normalizeDispatchCommand(command);
+            // Resolved before dispatch so the project's threads are known regardless of projection timing.
+            const deletedProjectThreadIds =
+              normalizedCommand.type === "project.delete"
+                ? yield* orchestrationEngine
+                    .getReadModel()
+                    .pipe(
+                      Effect.map((readModel) =>
+                        [...readModel.threads.values()]
+                          .filter(
+                            (thread) =>
+                              thread.projectId === normalizedCommand.projectId &&
+                              thread.deletedAt === null,
+                          )
+                          .map((thread) => thread.id),
+                      ),
+                    )
+                : [];
             const result = yield* startup.enqueueCommand(
               orchestrationEngine.dispatch(normalizedCommand),
             );
+            const deletedThreadIds =
+              normalizedCommand.type === "thread.delete"
+                ? [normalizedCommand.threadId]
+                : deletedProjectThreadIds;
+            yield* Effect.forEach(
+              deletedThreadIds,
+              (threadId) =>
+                terminalManager.close({ threadId, deleteHistory: true }).pipe(
+                  Effect.catch((error) =>
+                    Effect.logWarning("failed to close thread terminals after delete", {
+                      threadId,
+                      error: error.message,
+                    }),
+                  ),
+                ),
+              { discard: true },
+            );
             if (normalizedCommand.type === "thread.archive") {
+              // The provider session itself is stopped by ProviderSessionReaper on `thread.archived`.
               yield* terminalManager.close({ threadId: normalizedCommand.threadId }).pipe(
                 Effect.catch((error) =>
                   Effect.logWarning("failed to close thread terminals after archive", {
@@ -367,7 +267,8 @@ const WsRpcLayer = WsRpcGroup.toLayer(
                 return cause;
               }
               const detail =
-                cause instanceof Error ? cause.message : typeof cause === "string" ? cause : null;
+                userFacingDatabaseErrorMessage(cause) ??
+                (cause instanceof Error ? cause.message : typeof cause === "string" ? cause : null);
               return new OrchestrationDispatchCommandError({
                 message: detail ?? "Failed to dispatch orchestration command",
                 cause,
@@ -404,6 +305,20 @@ const WsRpcLayer = WsRpcGroup.toLayer(
           ),
           { "rpc.aggregate": "orchestration" },
         ),
+      [ORCHESTRATION_WS_METHODS.getTurnDiffFileContents]: (input) =>
+        observeRpcEffect(
+          ORCHESTRATION_WS_METHODS.getTurnDiffFileContents,
+          readTurnDiffFileContents(input).pipe(
+            Effect.mapError(
+              (cause) =>
+                new OrchestrationGetTurnDiffFileContentsError({
+                  message: "Failed to load file contents",
+                  cause,
+                }),
+            ),
+          ),
+          { "rpc.aggregate": "orchestration" },
+        ),
       [ORCHESTRATION_WS_METHODS.replayEvents]: (input) =>
         observeRpcEffect(
           ORCHESTRATION_WS_METHODS.replayEvents,
@@ -412,7 +327,7 @@ const WsRpcLayer = WsRpcGroup.toLayer(
               clamp(input.fromSequenceExclusive, { maximum: Number.MAX_SAFE_INTEGER, minimum: 0 }),
             ),
           ).pipe(
-            Effect.map((events) => Array.from(events)),
+            Effect.map((events) => Array.from(events, capEventCheckpointFilesForWire)),
             Effect.mapError(
               (cause) =>
                 new OrchestrationReplayEventsError({
@@ -424,71 +339,83 @@ const WsRpcLayer = WsRpcGroup.toLayer(
           { "rpc.aggregate": "orchestration" },
         ),
       [WS_METHODS.subscribeOrchestrationDomainEvents]: (_input) =>
-        observeRpcStreamEffect(
+        observeRpcStream(
           WS_METHODS.subscribeOrchestrationDomainEvents,
-          Effect.gen(function* () {
-            const snapshot = yield* orchestrationEngine.getReadModel();
-            const fromSequenceExclusive = snapshot.snapshotSequence;
-            const replayEvents: Array<OrchestrationEvent> = yield* Stream.runCollect(
-              orchestrationEngine.readEvents(fromSequenceExclusive),
-            ).pipe(
-              Effect.map((events) => Array.from(events)),
-              Effect.catch(() => Effect.succeed([] as Array<OrchestrationEvent>)),
-            );
-            const replayStream = Stream.fromIterable(replayEvents);
-            const source = Stream.merge(replayStream, orchestrationEngine.streamDomainEvents);
-            type SequenceState = {
-              readonly nextSequence: number;
-              readonly pendingBySequence: Map<number, OrchestrationEvent>;
-            };
-            const state = yield* Ref.make<SequenceState>({
-              nextSequence: fromSequenceExclusive + 1,
-              pendingBySequence: new Map<number, OrchestrationEvent>(),
-            });
+          Stream.unwrap(
+            Effect.gen(function* () {
+              // Subscribe before reading the snapshot so events published meanwhile are buffered.
+              // On overflow the stream re-subscribes and replays from the last delivered sequence.
+              const startLive = yield* subscribeBoundedResumable({
+                subscribe: orchestrationEngine.subscribeDomainEvents(),
+                sequenceOf: (event: OrchestrationEvent) => event.sequence,
+                // This RPC has no error schema; the client resubscribes on a defect, and __root
+                // then recovers from a snapshot once its own replay is refused.
+                replayAfter: (after) =>
+                  orchestrationEngine
+                    .readEvents(after)
+                    .pipe(
+                      Stream.catch((error) =>
+                        isPrunedReplayError(error) ? Stream.die(error) : Stream.empty,
+                      ),
+                    ),
+              });
+              const snapshot = yield* orchestrationEngine.getReadModel();
+              const fromSequenceExclusive = snapshot.snapshotSequence;
+              const source = startLive(fromSequenceExclusive);
+              type SequenceState = {
+                readonly nextSequence: number;
+                readonly pendingBySequence: Map<number, OrchestrationEvent>;
+              };
+              const state = yield* Ref.make<SequenceState>({
+                nextSequence: fromSequenceExclusive + 1,
+                pendingBySequence: new Map<number, OrchestrationEvent>(),
+              });
 
-            return source.pipe(
-              Stream.mapEffect((event) =>
-                Ref.modify(
-                  state,
-                  ({
-                    nextSequence,
-                    pendingBySequence,
-                  }): [Array<OrchestrationEvent>, SequenceState] => {
-                    if (event.sequence < nextSequence || pendingBySequence.has(event.sequence)) {
-                      return [[], { nextSequence, pendingBySequence }];
-                    }
-
-                    const updatedPending = new Map(pendingBySequence);
-                    updatedPending.set(event.sequence, event);
-
-                    // Safety valve: flush if too many events buffered out of order
-                    if (updatedPending.size > 1000) {
-                      const all = [...updatedPending.values()].toSorted(
-                        (a, b) => a.sequence - b.sequence,
-                      );
-                      const lastSeq = all.at(-1)?.sequence ?? nextSequence;
-                      return [all, { nextSequence: lastSeq + 1, pendingBySequence: new Map() }];
-                    }
-
-                    const emit: Array<OrchestrationEvent> = [];
-                    let expected = nextSequence;
-                    for (;;) {
-                      const expectedEvent = updatedPending.get(expected);
-                      if (!expectedEvent) {
-                        break;
+              return source.pipe(
+                Stream.mapEffect((event) =>
+                  Ref.modify(
+                    state,
+                    ({
+                      nextSequence,
+                      pendingBySequence,
+                    }): [Array<OrchestrationEvent>, SequenceState] => {
+                      if (event.sequence < nextSequence || pendingBySequence.has(event.sequence)) {
+                        return [[], { nextSequence, pendingBySequence }];
                       }
-                      emit.push(expectedEvent);
-                      updatedPending.delete(expected);
-                      expected += 1;
-                    }
 
-                    return [emit, { nextSequence: expected, pendingBySequence: updatedPending }];
-                  },
+                      const updatedPending = new Map(pendingBySequence);
+                      updatedPending.set(event.sequence, event);
+
+                      // Safety valve: flush if too many events buffered out of order
+                      if (updatedPending.size > 1000) {
+                        const all = [...updatedPending.values()].toSorted(
+                          (a, b) => a.sequence - b.sequence,
+                        );
+                        const lastSeq = all.at(-1)?.sequence ?? nextSequence;
+                        return [all, { nextSequence: lastSeq + 1, pendingBySequence: new Map() }];
+                      }
+
+                      const emit: Array<OrchestrationEvent> = [];
+                      let expected = nextSequence;
+                      for (;;) {
+                        const expectedEvent = updatedPending.get(expected);
+                        if (!expectedEvent) {
+                          break;
+                        }
+                        emit.push(expectedEvent);
+                        updatedPending.delete(expected);
+                        expected += 1;
+                      }
+
+                      return [emit, { nextSequence: expected, pendingBySequence: updatedPending }];
+                    },
+                  ),
                 ),
-              ),
-              Stream.flatMap((events) => Stream.fromIterable(events)),
-            );
-          }),
+                Stream.flatMap((events) => Stream.fromIterable(events)),
+                Stream.map(capEventCheckpointFilesForWire),
+              );
+            }),
+          ),
           { "rpc.aggregate": "orchestration" },
         ),
       [WS_METHODS.serverGetConfig]: (_input) =>
@@ -505,8 +432,17 @@ const WsRpcLayer = WsRpcGroup.toLayer(
         observeRpcEffect(
           WS_METHODS.serverUpsertKeybinding,
           Effect.gen(function* () {
-            const keybindingsConfig = yield* keybindings.upsertKeybindingRule(rule);
-            return { keybindings: keybindingsConfig, issues: [] };
+            yield* keybindings.upsertKeybindingRule(rule);
+            return yield* keybindings.getSnapshot;
+          }),
+          { "rpc.aggregate": "server" },
+        ),
+      [WS_METHODS.serverRemoveKeybinding]: (rule) =>
+        observeRpcEffect(
+          WS_METHODS.serverRemoveKeybinding,
+          Effect.gen(function* () {
+            yield* keybindings.removeKeybindingRule(rule);
+            return yield* keybindings.getSnapshot;
           }),
           { "rpc.aggregate": "server" },
         ),
@@ -518,6 +454,64 @@ const WsRpcLayer = WsRpcGroup.toLayer(
         observeRpcEffect(WS_METHODS.serverUpdateSettings, serverSettings.updateSettings(patch), {
           "rpc.aggregate": "server",
         }),
+      [WS_METHODS.serverGetTraceDiagnostics]: (_input) =>
+        observeRpcEffect(
+          WS_METHODS.serverGetTraceDiagnostics,
+          readTraceDiagnostics({
+            traceFilePath: config.serverTracePath,
+            maxFiles: config.traceMaxFiles,
+          }).pipe(Effect.provideService(FileSystem.FileSystem, fileSystemService)),
+          { "rpc.aggregate": "server" },
+        ),
+      [WS_METHODS.serverGetProcessDiagnostics]: (_input) =>
+        observeRpcEffect(WS_METHODS.serverGetProcessDiagnostics, processDiagnostics.read, {
+          "rpc.aggregate": "server",
+        }),
+      [WS_METHODS.serverSignalProcess]: (input) =>
+        observeRpcEffect(WS_METHODS.serverSignalProcess, processDiagnostics.signal(input), {
+          "rpc.aggregate": "server",
+        }),
+      // Endpoint URLs can carry API keys, so neither the URL nor the input joins the trace.
+      [WS_METHODS.serverCheckOtlpEndpoint]: (input) =>
+        observeRpcEffect(WS_METHODS.serverCheckOtlpEndpoint, checkOtlpEndpoint(input, config), {
+          "rpc.aggregate": "server",
+        }),
+      [WS_METHODS.providerListSlashCommands]: (input) =>
+        observeRpcEffect(
+          WS_METHODS.providerListSlashCommands,
+          input.provider === "claudeAgent"
+            ? claudeSlashCommands.list(input.cwd)
+            : Effect.succeed({ commands: [], pending: false }),
+          { "rpc.aggregate": "server" },
+        ),
+      [WS_METHODS.projectsScanAgentSessions]: (_input) =>
+        observeRpcEffect(
+          WS_METHODS.projectsScanAgentSessions,
+          Effect.gen(function* () {
+            const { providers } = yield* serverSettings.getSettings;
+            const readModel = yield* orchestrationEngine.getReadModel();
+            const homeDir = resolveUserHomeDir();
+            return yield* scanAgentSessions({
+              homeDir,
+              ...resolveAgentSessionHomes(providers, process.env, homeDir),
+              baseDir: config.baseDir,
+              worktreesDir: config.worktreesDir,
+              knownWorkspaceRoots: Array.from(readModel.projects.values())
+                // Archived roots stay out, so re-adding one can unarchive it through project.create.
+                .filter((project) => project.deletedAt === null && project.archivedAt == null)
+                .map((project) => project.workspaceRoot),
+            });
+          }).pipe(
+            Effect.mapError(
+              (cause) =>
+                new AgentSessionScanError({
+                  message: "Failed to scan for agent sessions",
+                  cause,
+                }),
+            ),
+          ),
+          { "rpc.aggregate": "workspace" },
+        ),
       [WS_METHODS.projectsSearchEntries]: (input) =>
         observeRpcEffect(
           WS_METHODS.projectsSearchEntries,
@@ -539,12 +533,50 @@ const WsRpcLayer = WsRpcGroup.toLayer(
             Effect.mapError((cause) => {
               const message = Schema.is(WorkspacePathOutsideRootError)(cause)
                 ? "Workspace file path must stay within the project root."
-                : "Failed to write workspace file";
+                : Schema.is(WorkspaceFileSystemError)(cause) &&
+                    cause.operation === "workspaceFileSystem.realpathTarget"
+                  ? "Workspace file path points through a symlink that cannot be resolved."
+                  : "Failed to write workspace file";
               return new ProjectWriteFileError({
                 message,
                 cause,
               });
             }),
+          ),
+          { "rpc.aggregate": "workspace" },
+        ),
+      [WS_METHODS.projectsReadConfigFile]: (input) =>
+        observeRpcEffect(
+          WS_METHODS.projectsReadConfigFile,
+          Effect.gen(function* () {
+            // Only known workspaces, so callers cannot read piedpiper.json from arbitrary directories.
+            const matchedRoot = yield* findContainingWorkspaceRoot(input.cwd);
+            if (matchedRoot === null) return { config: null };
+            // Contain symlinks to the registered root, so cwd=<root>/link -> /anywhere is refused.
+            const loaded = yield* projectConfigFileLoader.load(input.cwd, {
+              containmentRoot: matchedRoot,
+            });
+            return { config: Option.getOrNull(loaded) };
+          }),
+          { "rpc.aggregate": "workspace" },
+        ),
+      [WS_METHODS.projectsStatPath]: (input) =>
+        observeRpcEffect(WS_METHODS.projectsStatPath, statPathKind(input.path), {
+          "rpc.aggregate": "workspace",
+        }),
+      // No workspace-root check: browsing outside known roots is how a new project gets found.
+      [WS_METHODS.projectsBrowseDirectories]: (input) =>
+        observeRpcEffect(
+          WS_METHODS.projectsBrowseDirectories,
+          browseDirectories(input.partialPath).pipe(
+            Effect.provideService(Path.Path, pathService),
+            Effect.mapError(
+              (failure) =>
+                new ProjectBrowseDirectoriesError({
+                  message: failure.message,
+                  ...(failure.cause !== undefined ? { cause: failure.cause } : {}),
+                }),
+            ),
           ),
           { "rpc.aggregate": "workspace" },
         ),
@@ -585,117 +617,37 @@ const WsRpcLayer = WsRpcGroup.toLayer(
           }),
           { "rpc.aggregate": "workspace" },
         ),
-      [WS_METHODS.skillsSearch]: (input) =>
+      [WS_METHODS.shellOpenInEditor]: (input) =>
         observeRpcEffect(
-          WS_METHODS.skillsSearch,
-          Effect.tryPromise({
-            try: async () => {
-              const globalRoot = join(homedir(), ".claude", "skills");
-              const localSkills = await scanSkillsDir(globalRoot, "global");
-              let merged = localSkillsToMerged(localSkills);
-
-              if (input.query) {
-                const q = input.query.toLowerCase();
-                merged = merged.filter(
-                  (s) =>
-                    s.name.toLowerCase().includes(q) || s.description.toLowerCase().includes(q),
-                );
+          WS_METHODS.shellOpenInEditor,
+          Effect.gen(function* () {
+            if (isNetworkPath(input.cwd)) {
+              const readModel = yield* orchestrationEngine.getReadModel();
+              const roots: Array<string> = [];
+              for (const project of readModel.projects.values()) {
+                if (project.deletedAt === null) roots.push(project.workspaceRoot);
               }
-
-              const page = input.page ?? 1;
-              const pageSize = input.pageSize ?? 200;
-              const total = merged.length;
-              const start = (page - 1) * pageSize;
-              const paged = merged.slice(start, start + pageSize);
-
-              return { skills: paged, total, page, pageSize };
-            },
-            catch: (cause) =>
-              new SkillsSearchError({
-                message: "Failed to search skills",
-                cause,
-              }),
-          }),
-          { "rpc.aggregate": "skills" },
-        ),
-      [WS_METHODS.skillsGetDetail]: (input) =>
-        observeRpcEffect(
-          WS_METHODS.skillsGetDetail,
-          Effect.tryPromise({
-            try: async () => {
-              let name = input.id;
-              let description = "";
-              let localContent: string | undefined;
-              let version: string | undefined;
-              let allowedTools: string[] | undefined;
-
-              if (input.localPath) {
-                const skillMdPath = join(input.localPath, "SKILL.md");
-                const file = await readSkillFileCached(skillMdPath);
-                if (file) {
-                  const fm = file.parsed;
-                  name = fm.name || name;
-                  description = fm.description || description;
-                  version = fm.version;
-                  allowedTools = fm.allowedTools;
-                  localContent = file.raw
-                    .replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n*/, "")
-                    .replace(/<!--[\s\S]*?-->/g, "")
-                    .trim();
+              for (const thread of readModel.threads.values()) {
+                if (thread.deletedAt === null && thread.worktreePath) {
+                  roots.push(thread.worktreePath);
                 }
               }
-
-              return {
-                name,
-                description,
-                ...(localContent !== undefined ? { localContent } : {}),
-                ...(version !== undefined ? { version } : {}),
-                ...(allowedTools !== undefined ? { allowedTools } : {}),
-              };
-            },
-            catch: (cause) =>
-              new SkillDetailError({
-                message: "Failed to load skill detail",
-                cause,
-              }),
-          }),
-          { "rpc.aggregate": "skills" },
-        ),
-      [WS_METHODS.skillsUninstall]: (input) =>
-        observeRpcEffect(
-          WS_METHODS.skillsUninstall,
-          Effect.tryPromise({
-            try: async () => {
-              const skillPath = input.skillPath;
-              // Validate path is under ~/.claude/skills/
-              const globalRoot = join(homedir(), ".claude", "skills");
-              const resolved = await fsRealpath(skillPath);
-              if (!resolved.startsWith(globalRoot)) {
-                throw new Error("Cannot uninstall skills outside of ~/.claude/skills/");
+              if (!isPathInsideAnyRoot(input.cwd, roots)) {
+                return yield* new OpenError({
+                  message: "Refusing to open a network path outside the project.",
+                });
               }
-              // Delete the resolved path (not the original) to prevent TOCTOU
-              // symlink-swap attacks.
-              await fsRm(resolved, { recursive: true, force: true });
-              // Also remove the original symlink/entry if it still exists
-              try {
-                await fsRm(skillPath, { recursive: true, force: true });
-              } catch {}
-              return { removed: true };
-            },
-            catch: (cause) =>
-              new SkillUninstallError({
-                message: `Failed to uninstall skill: ${String(cause instanceof Error ? cause.message : cause)}`,
-                cause,
-              }),
+            }
+            return yield* open.openInEditor(input);
           }),
-          { "rpc.aggregate": "skills" },
+          { "rpc.aggregate": "workspace" },
         ),
-      [WS_METHODS.shellOpenInEditor]: (input) =>
-        observeRpcEffect(WS_METHODS.shellOpenInEditor, open.openInEditor(input), {
-          "rpc.aggregate": "workspace",
-        }),
       [WS_METHODS.gitStatus]: (input) =>
         observeRpcEffect(WS_METHODS.gitStatus, gitManager.status(input), {
+          "rpc.aggregate": "git",
+        }),
+      [WS_METHODS.gitDiffPreview]: (input) =>
+        observeRpcEffect(WS_METHODS.gitDiffPreview, git.diffPreview(input), {
           "rpc.aggregate": "git",
         }),
       [WS_METHODS.gitPull]: (input) =>
@@ -740,6 +692,27 @@ const WsRpcLayer = WsRpcGroup.toLayer(
         observeRpcEffect(WS_METHODS.gitCreateWorktree, git.createWorktree(input), {
           "rpc.aggregate": "git",
         }),
+      [WS_METHODS.gitCreateWorktreeWithProgress]: (input) =>
+        observeRpcStream(
+          WS_METHODS.gitCreateWorktreeWithProgress,
+          Stream.callback<GitCreateWorktreeProgressEvent, GitCommandError>((queue) =>
+            git
+              .createWorktree(input, {
+                onCheckoutProgress: (progress) =>
+                  Queue.offer(queue, { kind: "checkout_progress", ...progress }).pipe(
+                    Effect.asVoid,
+                  ),
+              })
+              .pipe(
+                Effect.flatMap((result) => Queue.offer(queue, { kind: "finished", result })),
+                Effect.matchCauseEffect({
+                  onFailure: (cause) => Queue.failCause(queue, cause),
+                  onSuccess: () => Queue.end(queue).pipe(Effect.asVoid),
+                }),
+              ),
+          ),
+          { "rpc.aggregate": "git" },
+        ),
       [WS_METHODS.gitRemoveWorktree]: (input) =>
         observeRpcEffect(WS_METHODS.gitRemoveWorktree, git.removeWorktree(input), {
           "rpc.aggregate": "git",
@@ -754,6 +727,24 @@ const WsRpcLayer = WsRpcGroup.toLayer(
         }),
       [WS_METHODS.gitInit]: (input) =>
         observeRpcEffect(WS_METHODS.gitInit, git.initRepo(input), { "rpc.aggregate": "git" }),
+      [WS_METHODS.gitCloneRepository]: (input) =>
+        observeRpcStream(
+          WS_METHODS.gitCloneRepository,
+          Stream.callback<GitCloneRepositoryEvent, GitCommandError>((queue) =>
+            cloneGitRepository(input, {
+              git,
+              onEvent: (event) => Queue.offer(queue, event).pipe(Effect.asVoid),
+            }).pipe(
+              Effect.provideService(FileSystem.FileSystem, fileSystemService),
+              Effect.provideService(Path.Path, pathService),
+              Effect.matchCauseEffect({
+                onFailure: (cause) => Queue.failCause(queue, cause),
+                onSuccess: () => Queue.end(queue).pipe(Effect.asVoid),
+              }),
+            ),
+          ),
+          { "rpc.aggregate": "git" },
+        ),
       [WS_METHODS.gitAddRemote]: (input) =>
         observeRpcEffect(
           WS_METHODS.gitAddRemote,
@@ -767,17 +758,9 @@ const WsRpcLayer = WsRpcGroup.toLayer(
           { "rpc.aggregate": "git" },
         ),
       [WS_METHODS.gitGitHubCliStatus]: (input) =>
-        observeRpcEffect(
-          WS_METHODS.gitGitHubCliStatus,
-          gitHubCli.execute({ cwd: input.cwd, args: ["auth", "status"] }).pipe(
-            Effect.map((result) => ({
-              installed: true,
-              authenticated: result.code === 0,
-            })),
-            Effect.catch(() => Effect.succeed({ installed: false, authenticated: false })),
-          ),
-          { "rpc.aggregate": "git" },
-        ),
+        observeRpcEffect(WS_METHODS.gitGitHubCliStatus, resolveGitHubCliStatus(input.cwd), {
+          "rpc.aggregate": "git",
+        }),
       [WS_METHODS.gitGitHubCreateRepo]: (input) =>
         observeRpcEffect(
           WS_METHODS.gitGitHubCreateRepo,
@@ -811,9 +794,17 @@ const WsRpcLayer = WsRpcGroup.toLayer(
       [WS_METHODS.subscribeTerminalEvents]: (_input) =>
         observeRpcStream(
           WS_METHODS.subscribeTerminalEvents,
-          Stream.callback<TerminalEvent>((queue) =>
+          terminalOutputStream(terminalManager.subscribe),
+          { "rpc.aggregate": "terminal" },
+        ),
+      [WS_METHODS.subscribeTerminalMetadata]: (_input) =>
+        observeRpcStream(
+          WS_METHODS.subscribeTerminalMetadata,
+          Stream.callback<TerminalMetadataStreamEvent>((queue) =>
             Effect.acquireRelease(
-              terminalManager.subscribe((event) => Queue.offer(queue, event)),
+              terminalManager.subscribeMetadata((event) =>
+                Queue.offer(queue, event).pipe(Effect.asVoid),
+              ),
               (unsubscribe) => Effect.sync(unsubscribe),
             ),
           ),
@@ -823,38 +814,19 @@ const WsRpcLayer = WsRpcGroup.toLayer(
         observeRpcStreamEffect(
           WS_METHODS.subscribeServerConfig,
           Effect.gen(function* () {
-            const keybindingsUpdates = keybindings.streamChanges.pipe(
-              Stream.map((event) => ({
-                version: 1 as const,
-                type: "keybindingsUpdated" as const,
-                payload: {
-                  issues: event.issues,
-                },
-              })),
-            );
-            const providerStatuses = providerRegistry.streamChanges.pipe(
-              Stream.map((providers) => ({
-                version: 1 as const,
-                type: "providerStatuses" as const,
-                payload: { providers },
-              })),
-            );
-            const settingsUpdates = serverSettings.streamChanges.pipe(
-              Stream.map((settings) => ({
-                version: 1 as const,
-                type: "settingsUpdated" as const,
-                payload: { settings },
-              })),
-            );
-
-            return Stream.concat(
-              Stream.make({
-                version: 1 as const,
-                type: "snapshot" as const,
-                config: yield* loadServerConfig,
-              }),
-              Stream.merge(keybindingsUpdates, Stream.merge(providerStatuses, settingsUpdates)),
-            );
+            // Subscribe before loading the snapshot so changes published meanwhile are kept.
+            const keybindingsChanges = yield* subscribeEagerly(keybindings.streamChanges);
+            const providerChanges = yield* subscribeEagerly(providerRegistry.streamChanges);
+            const settingsChanges = yield* subscribeEagerly(serverSettings.streamChanges);
+            const snapshotConfig = yield* loadServerConfig;
+            return makeServerConfigUpdateStream({
+              snapshotConfig,
+              keybindingsChanges,
+              providerChanges,
+              settingsChanges,
+              // A scan that outlasted the snapshot timeout still reaches the client when it ends.
+              lateAvailableEditors: awaitEditorDiscovery(discoverAvailableEditors),
+            });
           }),
           { "rpc.aggregate": "server" },
         ),
@@ -883,8 +855,11 @@ const WsRpcLayer = WsRpcGroup.toLayer(
             // pull. The subscription is scoped to the outer Effect, which the
             // RPC framework keeps alive for the duration of the stream
             // consumption.
-            const subscription = yield* providerService.subscribeToolInputPreview();
-            return Stream.fromSubscription(subscription).pipe(
+            // Overflow can leave a gap in the live preview text until tool.completed replaces it with the static preview.
+            const previewEvents = yield* subscribeBounded(
+              providerService.subscribeToolInputPreview(),
+            );
+            return previewEvents.pipe(
               Stream.filter((event): event is typeof event & { readonly type: "content.delta" } => {
                 if (!event.itemId) return false;
                 if (event.threadId !== input.threadId) return false;
@@ -920,28 +895,51 @@ const WsRpcLayer = WsRpcGroup.toLayer(
   }),
 );
 
+// A handler defect must fail only its own request: RpcServer's default sends a socket-level
+// Defect frame, and the client then fails every pending request and subscription on the socket.
+export const WS_RPC_SERVER_OPTIONS = {
+  spanPrefix: "ws.rpc",
+  spanAttributes: {
+    "rpc.transport": "websocket",
+    "rpc.system": "effect-rpc",
+  },
+  disableFatalDefects: true,
+} as const;
+
 export const websocketRpcRouteLayer = Layer.unwrap(
   Effect.gen(function* () {
-    const rpcWebSocketHttpEffect = yield* RpcServer.toHttpEffectWebsocket(WsRpcGroup, {
-      spanPrefix: "ws.rpc",
-      spanAttributes: {
-        "rpc.transport": "websocket",
-        "rpc.system": "effect-rpc",
-      },
-    }).pipe(Effect.provide(Layer.mergeAll(WsRpcLayer, RpcSerialization.layerJson)));
+    const rpcWebSocketHttpEffect = yield* Effect.gen(function* () {
+      const { protocol, httpEffect } = yield* RpcServer.makeProtocolWithHttpEffectWebsocket;
+      yield* RpcServer.make(WsRpcGroup, WS_RPC_SERVER_OPTIONS).pipe(
+        Effect.provideService(RpcServer.Protocol, withOutputWindow(protocol)),
+        Effect.forkScoped,
+      );
+      // @effect-diagnostics-next-line returnEffectInGen:off
+      return httpEffect;
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          // Request fibers run in the handlers' captured context, so the reporter is provided there.
+          WsRpcLayer.pipe(Layer.provide(wsDefectReporterLayer)),
+          RpcSerialization.layerJson,
+        ),
+      ),
+    );
     return HttpRouter.add(
       "GET",
       "/ws",
       Effect.gen(function* () {
         const request = yield* HttpServerRequest.HttpServerRequest;
         const config = yield* ServerConfig;
+        if (rejectRequestOrigin(request, config) !== undefined) {
+          return HttpServerResponse.text("Forbidden WebSocket origin", { status: 403 });
+        }
         if (config.authToken) {
           const url = HttpServerRequest.toURL(request);
           if (Option.isNone(url)) {
             return HttpServerResponse.text("Invalid WebSocket URL", { status: 400 });
           }
-          const token = url.value.searchParams.get("token");
-          if (token !== config.authToken) {
+          if (!validateAuthToken(request, config)) {
             return HttpServerResponse.text("Unauthorized WebSocket connection", { status: 401 });
           }
         }

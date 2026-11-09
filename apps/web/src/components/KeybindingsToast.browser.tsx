@@ -69,8 +69,23 @@ function createBaseServerConfig(): ServerConfig {
       defaultThreadEnvMode: "local" as const,
       textGenerationModelSelection: { provider: "codex" as const, model: "gpt-5.4-mini" },
       providers: {
-        codex: { enabled: true, binaryPath: "", homePath: "", customModels: [] },
-        claudeAgent: { enabled: true, binaryPath: "", customModels: [] },
+        codex: {
+          enabled: true,
+          binaryPath: "",
+          homePath: "",
+          customModels: [],
+          customModelDetails: [],
+          launchArgs: "",
+        },
+        claudeAgent: {
+          enabled: true,
+          binaryPath: "",
+          homePath: "",
+          customModels: [],
+          customModelDetails: [],
+          launchArgs: "",
+          autoCompactWindow: "",
+        },
       },
     },
   };
@@ -208,7 +223,7 @@ function sendServerConfigUpdatedPush(issues: ServerConfig["issues"]) {
   rpcHarness.emitStreamValue(WS_METHODS.subscribeServerConfig, {
     version: 1,
     type: "keybindingsUpdated",
-    payload: { issues },
+    payload: { keybindings: [], issues },
   });
 }
 

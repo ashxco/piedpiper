@@ -17,7 +17,10 @@ export interface GitHubPullRequestSummary {
   readonly url: string;
   readonly baseRefName: string;
   readonly headRefName: string;
+  /** The head commit; only `getPullRequest` asks for it. */
+  readonly headRefOid?: string;
   readonly state?: "open" | "closed" | "merged";
+  readonly isDraft?: boolean;
   readonly isCrossRepository?: boolean;
   readonly headRepositoryNameWithOwner?: string | null;
   readonly headRepositoryOwnerLogin?: string | null;
@@ -65,6 +68,8 @@ export interface GitHubCliShape {
   readonly getRepositoryCloneUrls: (input: {
     readonly cwd: string;
     readonly repository: string;
+    /** GitHub host (e.g. an Enterprise server) to resolve `repository` on; defaults to gh's own. */
+    readonly host?: string | undefined;
   }) => Effect.Effect<GitHubRepositoryCloneUrls, GitHubCliError>;
 
   /**
@@ -91,7 +96,6 @@ export interface GitHubCliShape {
   readonly checkoutPullRequest: (input: {
     readonly cwd: string;
     readonly reference: string;
-    readonly force?: boolean;
   }) => Effect.Effect<void, GitHubCliError>;
 }
 

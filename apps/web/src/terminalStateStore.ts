@@ -5,9 +5,9 @@
  * API constrained to store actions/selectors.
  */
 
-import type { TerminalEvent, ThreadId } from "@piedpiper/contracts";
+import type { TerminalEvent, TerminalSessionStatus, ThreadId } from "@piedpiper/contracts";
 import { create } from "zustand";
-import { createJSONStorage, persist } from "zustand/middleware";
+import { persist, type PersistStorage, type StorageValue } from "zustand/middleware";
 import { resolveStorage } from "./lib/storage";
 import {
   DEFAULT_THREAD_TERMINAL_HEIGHT,
@@ -16,13 +16,20 @@ import {
   type ThreadTerminalGroup,
 } from "./types";
 
+export type TerminalSplitDirection = "horizontal" | "vertical";
+
+// Absent splitDirection means side by side, so groups stored before stacking stay valid.
+export interface ThreadTerminalLayoutGroup extends ThreadTerminalGroup {
+  splitDirection?: TerminalSplitDirection;
+}
+
 interface ThreadTerminalState {
   terminalOpen: boolean;
   terminalHeight: number;
   terminalIds: string[];
   runningTerminalIds: string[];
   activeTerminalId: string;
-  terminalGroups: ThreadTerminalGroup[];
+  terminalGroups: ThreadTerminalLayoutGroup[];
   activeTerminalGroupId: string;
 }
 
@@ -36,7 +43,53 @@ const EMPTY_TERMINAL_EVENT_ENTRIES: ReadonlyArray<TerminalEventEntry> = [];
 const MAX_TERMINAL_EVENT_BUFFER = 200;
 
 function createTerminalStateStorage() {
-  return resolveStorage(typeof window !== "undefined" ? window.localStorage : undefined);
+  try {
+    return resolveStorage(typeof window !== "undefined" ? window.localStorage : undefined);
+  } catch {
+    // localStorage access can throw (sandboxed iframe, blocked site data).
+    return resolveStorage(undefined);
+  }
+}
+
+interface PersistedTerminalState {
+  terminalStateByThreadId: Record<ThreadId, ThreadTerminalState>;
+}
+
+/**
+ * JSON persist storage that skips serialization and the localStorage write while
+ * the persisted slice is referentially unchanged (e.g. terminal output chunks only
+ * touch the non-persisted event buffer).
+ */
+export function createTerminalStatePersistStorage(
+  baseStorage: ReturnType<typeof createTerminalStateStorage> = createTerminalStateStorage(),
+): PersistStorage<PersistedTerminalState> {
+  let lastPersistedSlice: PersistedTerminalState["terminalStateByThreadId"] | undefined;
+  const parse = (raw: string | null): StorageValue<PersistedTerminalState> | null =>
+    typeof raw === "string" ? (JSON.parse(raw) as StorageValue<PersistedTerminalState>) : null;
+  return {
+    getItem: (name) => {
+      const raw = baseStorage.getItem(name);
+      return raw instanceof Promise ? raw.then(parse) : parse(raw);
+    },
+    setItem: (name, value) => {
+      const slice = value.state.terminalStateByThreadId;
+      if (slice === lastPersistedSlice) {
+        return;
+      }
+      try {
+        baseStorage.setItem(name, JSON.stringify(value));
+        lastPersistedSlice = slice;
+      } catch (error) {
+        // Leave the guard unset so the next set() retries the write.
+        lastPersistedSlice = undefined;
+        console.warn("[terminalStateStore] failed to persist terminal state", error);
+      }
+    },
+    removeItem: (name) => {
+      lastPersistedSlice = undefined;
+      baseStorage.removeItem(name);
+    },
+  };
 }
 
 function normalizeTerminalIds(terminalIds: string[]): string[] {
@@ -71,7 +124,7 @@ function assignUniqueGroupId(baseId: string, usedGroupIds: Set<string>): string 
 }
 
 function findGroupIndexByTerminalId(
-  terminalGroups: ThreadTerminalGroup[],
+  terminalGroups: ThreadTerminalLayoutGroup[],
   terminalId: string,
 ): number {
   return terminalGroups.findIndex((group) => group.terminalIds.includes(terminalId));
@@ -81,13 +134,19 @@ function normalizeTerminalGroupIds(terminalIds: string[]): string[] {
   return [...new Set(terminalIds.map((id) => id.trim()).filter((id) => id.length > 0))];
 }
 
+function splitDirectionFields(
+  group: ThreadTerminalLayoutGroup,
+): Pick<ThreadTerminalLayoutGroup, "splitDirection"> {
+  return group.splitDirection === "vertical" ? { splitDirection: "vertical" } : {};
+}
+
 function normalizeTerminalGroups(
-  terminalGroups: ThreadTerminalGroup[],
+  terminalGroups: ThreadTerminalLayoutGroup[],
   terminalIds: string[],
-): ThreadTerminalGroup[] {
+): ThreadTerminalLayoutGroup[] {
   const validTerminalIdSet = new Set(terminalIds);
   const assignedTerminalIds = new Set<string>();
-  const nextGroups: ThreadTerminalGroup[] = [];
+  const nextGroups: ThreadTerminalLayoutGroup[] = [];
   const usedGroupIds = new Set<string>();
 
   for (const group of terminalGroups) {
@@ -107,6 +166,7 @@ function normalizeTerminalGroups(
     nextGroups.push({
       id: assignUniqueGroupId(baseGroupId, usedGroupIds),
       terminalIds: groupTerminalIds,
+      ...splitDirectionFields(group),
     });
   }
 
@@ -138,7 +198,10 @@ function arraysEqual(a: string[], b: string[]): boolean {
   return true;
 }
 
-function terminalGroupsEqual(left: ThreadTerminalGroup[], right: ThreadTerminalGroup[]): boolean {
+function terminalGroupsEqual(
+  left: ThreadTerminalLayoutGroup[],
+  right: ThreadTerminalLayoutGroup[],
+): boolean {
   if (left.length !== right.length) return false;
   for (let index = 0; index < left.length; index += 1) {
     const leftGroup = left[index];
@@ -146,6 +209,12 @@ function terminalGroupsEqual(left: ThreadTerminalGroup[], right: ThreadTerminalG
     if (!leftGroup || !rightGroup) return false;
     if (leftGroup.id !== rightGroup.id) return false;
     if (!arraysEqual(leftGroup.terminalIds, rightGroup.terminalIds)) return false;
+    if (
+      splitDirectionFields(leftGroup).splitDirection !==
+      splitDirectionFields(rightGroup).splitDirection
+    ) {
+      return false;
+    }
   }
   return true;
 }
@@ -238,10 +307,11 @@ function terminalEventBufferKey(threadId: ThreadId, terminalId: string): string 
   return `${threadId}\u0000${terminalId}`;
 }
 
-function copyTerminalGroups(groups: ThreadTerminalGroup[]): ThreadTerminalGroup[] {
+function copyTerminalGroups(groups: ThreadTerminalLayoutGroup[]): ThreadTerminalLayoutGroup[] {
   return groups.map((group) => ({
     id: group.id,
     terminalIds: [...group.terminalIds],
+    ...splitDirectionFields(group),
   }));
 }
 
@@ -249,6 +319,7 @@ function upsertTerminalIntoGroups(
   state: ThreadTerminalState,
   terminalId: string,
   mode: "split" | "new",
+  splitDirection: TerminalSplitDirection = "horizontal",
 ): ThreadTerminalState {
   const normalized = normalizeThreadTerminalState(state);
   if (!isValidTerminalId(terminalId)) {
@@ -322,6 +393,12 @@ function upsertTerminalIntoGroups(
       destinationGroup.terminalIds.push(terminalId);
     }
   }
+  // A group lays out along one axis, so the latest split sets it for every pane.
+  if (splitDirection === "vertical") {
+    destinationGroup.splitDirection = "vertical";
+  } else {
+    delete destinationGroup.splitDirection;
+  }
 
   return normalizeThreadTerminalState({
     ...normalized,
@@ -347,8 +424,12 @@ function setThreadTerminalHeight(state: ThreadTerminalState, height: number): Th
   return { ...normalized, terminalHeight: height };
 }
 
-function splitThreadTerminal(state: ThreadTerminalState, terminalId: string): ThreadTerminalState {
-  return upsertTerminalIntoGroups(state, terminalId, "split");
+function splitThreadTerminal(
+  state: ThreadTerminalState,
+  terminalId: string,
+  splitDirection: TerminalSplitDirection = "horizontal",
+): ThreadTerminalState {
+  return upsertTerminalIntoGroups(state, terminalId, "split", splitDirection);
 }
 
 function newThreadTerminal(state: ThreadTerminalState, terminalId: string): ThreadTerminalState {
@@ -391,9 +472,15 @@ function closeThreadTerminal(state: ThreadTerminalState, terminalId: string): Th
   }
 
   const closedTerminalIndex = normalized.terminalIds.indexOf(terminalId);
+  const groupTerminalIds =
+    normalized.terminalGroups.find((group) => group.terminalIds.includes(terminalId))
+      ?.terminalIds ?? [];
+  const groupIndex = groupTerminalIds.indexOf(terminalId);
   const nextActiveTerminalId =
     normalized.activeTerminalId === terminalId
-      ? (remainingTerminalIds[Math.min(closedTerminalIndex, remainingTerminalIds.length - 1)] ??
+      ? (groupTerminalIds[groupIndex + 1] ??
+        groupTerminalIds[groupIndex - 1] ??
+        remainingTerminalIds[Math.min(closedTerminalIndex, remainingTerminalIds.length - 1)] ??
         remainingTerminalIds[0] ??
         DEFAULT_THREAD_TERMINAL_ID)
       : normalized.activeTerminalId;
@@ -441,6 +528,39 @@ function setThreadTerminalActivity(
     runningTerminalIds.delete(terminalId);
   }
   return { ...normalized, runningTerminalIds: [...runningTerminalIds] };
+}
+
+// Replaces a thread's running set, keeping its identity when the members are unchanged.
+function reconcileThreadRunningTerminals(
+  state: ThreadTerminalState,
+  runningTerminalIds: readonly string[],
+): ThreadTerminalState {
+  const normalized = normalizeThreadTerminalState(state);
+  const next = normalizeRunningTerminalIds([...runningTerminalIds], normalized.terminalIds);
+  const current = new Set(normalized.runningTerminalIds);
+  if (next.length === current.size && next.every((id) => current.has(id))) {
+    return normalized;
+  }
+  return { ...normalized, runningTerminalIds: next };
+}
+
+export interface TerminalRunningSummary {
+  threadId: string;
+  terminalId: string;
+  status: TerminalSessionStatus;
+  hasRunningSubprocess: boolean;
+}
+
+export type TerminalRunningMetadataEvent =
+  | { type: "snapshot"; terminals: readonly TerminalRunningSummary[] }
+  | { type: "upsert"; terminal: TerminalRunningSummary }
+  | { type: "remove"; threadId: string; terminalId: string };
+
+// An exited session may still report its last subprocess state; it no longer runs anything.
+function isTerminalSummaryRunning(summary: TerminalRunningSummary): boolean {
+  return (
+    summary.hasRunningSubprocess && (summary.status === "running" || summary.status === "starting")
+  );
 }
 
 export function selectThreadTerminalState(
@@ -500,9 +620,17 @@ interface TerminalStateStoreState {
   terminalStateByThreadId: Record<ThreadId, ThreadTerminalState>;
   terminalEventEntriesByKey: Record<string, ReadonlyArray<TerminalEventEntry>>;
   nextTerminalEventId: number;
+  // Bumped when the terminal event stream reconnects; open viewports resume from a snapshot.
+  terminalResyncEpoch: number;
+  bumpTerminalResyncEpoch: () => void;
+  reconcileRunningTerminals: (
+    runningTerminalIdsByThreadId: Readonly<Record<string, readonly string[]>>,
+  ) => void;
+  applyTerminalMetadataEvent: (event: TerminalRunningMetadataEvent) => void;
   setTerminalOpen: (threadId: ThreadId, open: boolean) => void;
   setTerminalHeight: (threadId: ThreadId, height: number) => void;
   splitTerminal: (threadId: ThreadId, terminalId: string) => void;
+  splitTerminalVertical: (threadId: ThreadId, terminalId: string) => void;
   newTerminal: (threadId: ThreadId, terminalId: string) => void;
   setActiveTerminal: (threadId: ThreadId, terminalId: string) => void;
   closeTerminal: (threadId: ThreadId, terminalId: string) => void;
@@ -519,7 +647,7 @@ interface TerminalStateStoreState {
 
 export const useTerminalStateStore = create<TerminalStateStoreState>()(
   persist(
-    (set) => {
+    (set, get) => {
       const updateTerminal = (
         threadId: ThreadId,
         updater: (state: ThreadTerminalState) => ThreadTerminalState,
@@ -543,12 +671,57 @@ export const useTerminalStateStore = create<TerminalStateStoreState>()(
         terminalStateByThreadId: {},
         terminalEventEntriesByKey: {},
         nextTerminalEventId: 1,
+        terminalResyncEpoch: 0,
+        bumpTerminalResyncEpoch: () =>
+          set((state) => ({ terminalResyncEpoch: state.terminalResyncEpoch + 1 })),
+        reconcileRunningTerminals: (runningTerminalIdsByThreadId) =>
+          set((state) => {
+            let next = state.terminalStateByThreadId;
+            const threadIds = new Set([
+              ...Object.keys(next),
+              ...Object.keys(runningTerminalIdsByThreadId),
+            ]);
+            for (const threadId of threadIds) {
+              next = updateTerminalStateByThreadId(next, threadId as ThreadId, (threadState) =>
+                reconcileThreadRunningTerminals(
+                  threadState,
+                  runningTerminalIdsByThreadId[threadId] ?? [],
+                ),
+              );
+            }
+            return next === state.terminalStateByThreadId
+              ? state
+              : { terminalStateByThreadId: next };
+          }),
+        applyTerminalMetadataEvent: (event) => {
+          const { reconcileRunningTerminals, setTerminalActivity } = get();
+          if (event.type === "snapshot") {
+            const runningByThreadId: Record<string, string[]> = {};
+            for (const terminal of event.terminals) {
+              if (!isTerminalSummaryRunning(terminal)) continue;
+              (runningByThreadId[terminal.threadId] ??= []).push(terminal.terminalId);
+            }
+            reconcileRunningTerminals(runningByThreadId);
+            return;
+          }
+          if (event.type === "upsert") {
+            setTerminalActivity(
+              event.terminal.threadId as ThreadId,
+              event.terminal.terminalId,
+              isTerminalSummaryRunning(event.terminal),
+            );
+            return;
+          }
+          setTerminalActivity(event.threadId as ThreadId, event.terminalId, false);
+        },
         setTerminalOpen: (threadId, open) =>
           updateTerminal(threadId, (state) => setThreadTerminalOpen(state, open)),
         setTerminalHeight: (threadId, height) =>
           updateTerminal(threadId, (state) => setThreadTerminalHeight(state, height)),
         splitTerminal: (threadId, terminalId) =>
           updateTerminal(threadId, (state) => splitThreadTerminal(state, terminalId)),
+        splitTerminalVertical: (threadId, terminalId) =>
+          updateTerminal(threadId, (state) => splitThreadTerminal(state, terminalId, "vertical")),
         newTerminal: (threadId, terminalId) =>
           updateTerminal(threadId, (state) => newThreadTerminal(state, terminalId)),
         setActiveTerminal: (threadId, terminalId) =>
@@ -568,10 +741,12 @@ export const useTerminalStateStore = create<TerminalStateStoreState>()(
               id: state.nextTerminalEventId,
               event,
             };
+            // Subscribers diff buffers by reference/last id, so append onto a single copy.
             const nextEntries =
               currentEntries.length >= MAX_TERMINAL_EVENT_BUFFER
-                ? [...currentEntries.slice(1), nextEntry]
-                : [...currentEntries, nextEntry];
+                ? currentEntries.slice(1)
+                : currentEntries.slice();
+            nextEntries.push(nextEntry);
             return {
               terminalEventEntriesByKey: {
                 ...state.terminalEventEntriesByKey,
@@ -620,10 +795,14 @@ export const useTerminalStateStore = create<TerminalStateStoreState>()(
             if (!hasThreadState && !removedEventEntries) {
               return state;
             }
-            const next = { ...state.terminalStateByThreadId };
-            delete next[threadId];
+            // Keep the persisted slice's reference when only the event buffer changed.
+            let nextTerminalStateByThreadId = state.terminalStateByThreadId;
+            if (hasThreadState) {
+              nextTerminalStateByThreadId = { ...state.terminalStateByThreadId };
+              delete nextTerminalStateByThreadId[threadId];
+            }
             return {
-              terminalStateByThreadId: next,
+              terminalStateByThreadId: nextTerminalStateByThreadId,
               terminalEventEntriesByKey: nextTerminalEventEntriesByKey,
             };
           }),
@@ -642,12 +821,15 @@ export const useTerminalStateStore = create<TerminalStateStoreState>()(
               }
             }
             if (orphanedIds.length === 0 && !removedEventEntries) return state;
-            const next = { ...state.terminalStateByThreadId };
-            for (const id of orphanedIds) {
-              delete next[id as ThreadId];
+            let nextTerminalStateByThreadId = state.terminalStateByThreadId;
+            if (orphanedIds.length > 0) {
+              nextTerminalStateByThreadId = { ...state.terminalStateByThreadId };
+              for (const id of orphanedIds) {
+                delete nextTerminalStateByThreadId[id as ThreadId];
+              }
             }
             return {
-              terminalStateByThreadId: next,
+              terminalStateByThreadId: nextTerminalStateByThreadId,
               terminalEventEntriesByKey: nextTerminalEventEntriesByKey,
             };
           }),
@@ -656,10 +838,24 @@ export const useTerminalStateStore = create<TerminalStateStoreState>()(
     {
       name: TERMINAL_STATE_STORAGE_KEY,
       version: 1,
-      storage: createJSONStorage(createTerminalStateStorage),
-      partialize: (state) => ({
+      storage: createTerminalStatePersistStorage(),
+      partialize: (state): PersistedTerminalState => ({
         terminalStateByThreadId: state.terminalStateByThreadId,
       }),
     },
   ),
 );
+
+/**
+ * Handler for the terminal event stream's `subscribed` frames: the first only confirms the initial
+ * connection, every later one means events may have been missed, so open viewports must resync.
+ */
+export function createTerminalStreamSubscribedHandler(
+  onResync: () => void = () => useTerminalStateStore.getState().bumpTerminalResyncEpoch(),
+): () => void {
+  let subscribedBefore = false;
+  return () => {
+    if (subscribedBefore) onResync();
+    subscribedBefore = true;
+  };
+}

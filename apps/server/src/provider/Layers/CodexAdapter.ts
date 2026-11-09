@@ -7,26 +7,46 @@
  * @module CodexAdapterLive
  */
 import {
+  type ModelSelection,
   type ProviderEvent,
   type ProviderRuntimeEvent,
   ProviderSendTurnInput,
+  type ThreadId,
 } from "@piedpiper/contracts";
 import { Effect, FileSystem, Layer, Queue, ServiceMap, Stream } from "effect";
 
 import {
+  type ProviderAdapterError,
   ProviderAdapterProcessError,
   ProviderAdapterRequestError,
   ProviderAdapterValidationError,
 } from "../Errors.ts";
 import { CodexAdapter, type CodexAdapterShape } from "../Services/CodexAdapter.ts";
+import type { ProviderGoalRequest } from "../Services/ProviderAdapter.ts";
 import {
   CodexAppServerManager,
   type CodexAppServerStartSessionInput,
 } from "../../codexAppServerManager.ts";
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
+import {
+  makeCodexGeneratedImageTracker,
+  persistCodexGeneratedImage,
+  withCodexGeneratedImageAttachment,
+} from "../../codex/generatedImages.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
-import { PROVIDER, mapToRuntimeEvents, toMessage, toRequestError } from "./CodexAdapterHelpers.ts";
+import {
+  PROVIDER,
+  resolveCodexServiceTier,
+  makeCodexCompactionDeduper,
+  makeCodexFileChangeTracker,
+  makeCodexRetryStreakTracker,
+  mapToRuntimeEvents,
+  toMessage,
+  toRequestError,
+} from "./CodexAdapterHelpers.ts";
+import { makeCodexUsageLimitTracker } from "./CodexUsageLimits.ts";
+import { resolveCodexLaunchArgs } from "../codexLaunchArgs.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 
 export interface CodexAdapterLiveOptions {
@@ -35,6 +55,14 @@ export interface CodexAdapterLiveOptions {
   readonly nativeEventLogPath?: string;
   readonly nativeEventLogger?: EventNdjsonLogger;
 }
+
+const withCodexServiceTier = (
+  modelSelection: ModelSelection | undefined,
+): { readonly serviceTier?: string | null } => {
+  if (modelSelection?.provider !== "codex") return {};
+  const serviceTier = resolveCodexServiceTier(modelSelection.options);
+  return serviceTier === undefined ? {} : { serviceTier };
+};
 
 const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
   options?: CodexAdapterLiveOptions,
@@ -92,20 +120,21 @@ const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       );
       const binaryPath = codexSettings.binaryPath;
       const homePath = codexSettings.homePath;
+      const launchArgs = resolveCodexLaunchArgs(codexSettings.launchArgs);
       const managerInput: CodexAppServerStartSessionInput = {
         threadId: input.threadId,
         provider: "codex",
-        ...(input.cwd !== undefined ? { cwd: input.cwd } : {}),
+        // The server's cwd can differ from the launch directory: `piedpiper <path>`.
+        cwd: input.cwd ?? serverConfig.cwd,
         ...(input.resumeCursor !== undefined ? { resumeCursor: input.resumeCursor } : {}),
         runtimeMode: input.runtimeMode,
         binaryPath,
         ...(homePath ? { homePath } : {}),
+        ...(launchArgs ? { launchArgs } : {}),
         ...(input.modelSelection?.provider === "codex"
           ? { model: input.modelSelection.model }
           : {}),
-        ...(input.modelSelection?.provider === "codex" && input.modelSelection.options?.fastMode
-          ? { serviceTier: "fast" }
-          : {}),
+        ...withCodexServiceTier(input.modelSelection),
       };
 
       return yield* Effect.tryPromise({
@@ -136,26 +165,40 @@ const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         new Error(`Invalid attachment id '${attachment.id}'.`),
       );
     }
-    const bytes = yield* fileSystem.readFile(attachmentPath).pipe(
+    const fileInfo = yield* fileSystem.stat(attachmentPath).pipe(
+      Effect.catchIf(
+        (cause) => cause.reason._tag === "NotFound",
+        () => Effect.succeed(null),
+      ),
       Effect.mapError(
         (cause) =>
           new ProviderAdapterRequestError({
             provider: PROVIDER,
             method: "turn/start",
-            detail: toMessage(cause, "Failed to read attachment file."),
+            detail: toMessage(cause, "Failed to stat attachment file."),
             cause,
           }),
       ),
     );
+    if (fileInfo?.type !== "File") {
+      return yield* toRequestError(
+        input.threadId,
+        "turn/start",
+        new Error(`Attachment file for '${attachment.id}' was not found.`),
+      );
+    }
+    // Pass images by path so turn/start does not carry a base64 copy; the
+    // app-server reads the file itself.
     return {
-      type: "image" as const,
-      url: `data:${attachment.mimeType};base64,${Buffer.from(bytes).toString("base64")}`,
+      type: "localImage" as const,
+      path: attachmentPath,
     };
   });
 
   const sendTurn: CodexAdapterShape["sendTurn"] = Effect.fn("sendTurn")(function* (input) {
+    // Codex only takes images; ProviderService already put a PDF's path in the input text.
     const codexAttachments = yield* Effect.forEach(
-      input.attachments ?? [],
+      (input.attachments ?? []).filter((attachment) => attachment.type === "image"),
       (attachment) => resolveAttachment(input, attachment),
       { concurrency: 1 },
     );
@@ -172,9 +215,7 @@ const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           input.modelSelection.options?.reasoningEffort !== undefined
             ? { effort: input.modelSelection.options.reasoningEffort }
             : {}),
-          ...(input.modelSelection?.provider === "codex" && input.modelSelection.options?.fastMode
-            ? { serviceTier: "fast" }
-            : {}),
+          ...withCodexServiceTier(input.modelSelection),
           ...(input.interactionMode !== undefined
             ? { interactionMode: input.interactionMode }
             : {}),
@@ -191,10 +232,18 @@ const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     );
   });
 
+  const generatedImages = makeCodexGeneratedImageTracker();
+
   const interruptTurn: CodexAdapterShape["interruptTurn"] = (threadId, turnId) =>
     Effect.tryPromise({
-      try: () => manager.interruptTurn(threadId, turnId),
-      catch: (cause) => toRequestError(threadId, "turn/interrupt", cause),
+      try: () => {
+        generatedImages.interruptRequested(threadId);
+        return manager.interruptTurn(threadId, turnId);
+      },
+      catch: (cause) => {
+        generatedImages.interruptFailed(threadId);
+        return toRequestError(threadId, "turn/interrupt", cause);
+      },
     });
 
   const readThread: CodexAdapterShape["readThread"] = (threadId) =>
@@ -230,6 +279,24 @@ const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     );
   };
 
+  const compactThread = (threadId: ThreadId): Effect.Effect<void, ProviderAdapterError> =>
+    Effect.tryPromise({
+      try: () => manager.compactThread(threadId),
+      catch: (cause) => toRequestError(threadId, "thread/compact/start", cause),
+    });
+
+  const runGoalRequest = (threadId: ThreadId, request: ProviderGoalRequest) =>
+    Effect.tryPromise({
+      try: () => manager.runGoalRequest(threadId, request),
+      catch: (cause) => toRequestError(threadId, `thread/goal/${request.type}`, cause),
+    });
+
+  const canRollbackThread = (threadId: ThreadId): Effect.Effect<boolean, ProviderAdapterError> =>
+    Effect.tryPromise({
+      try: () => manager.canRollbackThread(threadId),
+      catch: (cause) => toRequestError(threadId, "thread/read", cause),
+    });
+
   const respondToRequest: CodexAdapterShape["respondToRequest"] = (threadId, requestId, decision) =>
     Effect.tryPromise({
       try: () => manager.respondToRequest(threadId, requestId, decision),
@@ -263,6 +330,10 @@ const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     });
 
   const runtimeEventQueue = yield* Queue.unbounded<ProviderRuntimeEvent>();
+  const usageLimits = makeCodexUsageLimitTracker();
+  const fileChanges = makeCodexFileChangeTracker();
+  const compactions = makeCodexCompactionDeduper();
+  const retryStreaks = makeCodexRetryStreakTracker();
 
   const writeNativeEvent = Effect.fn("writeNativeEvent")(function* (event: ProviderEvent) {
     if (!nativeEventLogger) {
@@ -271,11 +342,47 @@ const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     yield* nativeEventLogger.write(event, event.threadId);
   });
 
+  // Never fails: the image's work row still completes when the copy does not.
+  const storeGeneratedImage = (threadId: ThreadId, savedPath: string) =>
+    persistCodexGeneratedImage({
+      fileSystem,
+      attachmentsDir: serverConfig.attachmentsDir,
+      threadId,
+      savedPath,
+    }).pipe(
+      Effect.tap((attachment) =>
+        attachment
+          ? Effect.void
+          : Effect.logWarning("ignoring unusable Codex generated image", { threadId }),
+      ),
+      Effect.catchCause((cause) =>
+        Effect.logWarning("failed to store Codex generated image", { threadId, cause }).pipe(
+          Effect.as(undefined),
+        ),
+      ),
+    );
+
   const registerListener = Effect.fn("registerListener")(function* () {
     const services = yield* Effect.services<never>();
     const listenerEffect = Effect.fn("listener")(function* (event: ProviderEvent) {
       yield* writeNativeEvent(event);
-      const runtimeEvents = mapToRuntimeEvents(event, event.threadId);
+      const generatedImagePath = generatedImages.observe(event);
+      const mappedEvents = retryStreaks.apply(
+        event,
+        compactions.apply(
+          event,
+          usageLimits.apply(
+            event,
+            mapToRuntimeEvents(event, event.threadId, fileChanges.observe(event)),
+          ),
+        ),
+      );
+      const generatedImage = generatedImagePath
+        ? yield* storeGeneratedImage(event.threadId, generatedImagePath)
+        : undefined;
+      const runtimeEvents = generatedImage
+        ? withCodexGeneratedImageAttachment(mappedEvents, generatedImage)
+        : mappedEvents;
       if (runtimeEvents.length === 0) {
         yield* Effect.logDebug("ignoring unhandled Codex provider event", {
           method: event.method,
@@ -287,8 +394,18 @@ const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       }
       yield* Queue.offerAll(runtimeEventQueue, runtimeEvents);
     });
-    const listener = (event: ProviderEvent) =>
-      listenerEffect(event).pipe(Effect.runPromiseWith(services));
+    // Storing an image is async, and the turn's later events must not overtake it.
+    const inFlightByThread = new Map<string, Promise<void>>();
+    const listener = (event: ProviderEvent) => {
+      const threadKey = String(event.threadId);
+      const run = () => listenerEffect(event).pipe(Effect.runPromiseWith(services));
+      const previous = inFlightByThread.get(threadKey);
+      const current: Promise<void> = (previous ? previous.then(run, run) : run()).finally(() => {
+        if (inFlightByThread.get(threadKey) === current) inFlightByThread.delete(threadKey);
+      });
+      inFlightByThread.set(threadKey, current);
+      return current;
+    };
     manager.on("event", listener);
     return listener;
   });
@@ -312,6 +429,9 @@ const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     startSession,
     sendTurn,
     interruptTurn,
+    compactThread,
+    runGoalRequest,
+    canRollbackThread,
     readThread,
     rollbackThread,
     respondToRequest,
@@ -321,7 +441,9 @@ const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     hasSession,
     stopAll,
     streamEvents: Stream.fromQueue(runtimeEventQueue),
-  } satisfies CodexAdapterShape;
+  } satisfies CodexAdapterShape & {
+    readonly compactThread: (threadId: ThreadId) => Effect.Effect<void, ProviderAdapterError>;
+  };
 });
 
 export const CodexAdapterLive = Layer.effect(CodexAdapter, makeCodexAdapter());

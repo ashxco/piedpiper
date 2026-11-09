@@ -21,7 +21,9 @@ import {
 } from "./lib/composerAttachmentNormalization";
 import {
   type DraftThreadEnvMode,
+  type PersistedComposerDraftStoreState,
   PersistedComposerDraftStoreStorage,
+  isPersistedRuntimeMode,
   migratePersistedComposerDraftStoreState,
   normalizeCurrentPersistedComposerDraftStoreState,
   partializeComposerDraftStoreState,
@@ -34,13 +36,15 @@ import {
 } from "./lib/composerModelNormalization";
 import {
   type TerminalContextDraft,
+  clampTerminalContextText,
   ensureInlineTerminalContextPlaceholders,
   normalizeTerminalContextText,
 } from "./lib/terminalContext";
+import { useReviewCommentDraftStore } from "./reviewCommentDraftStore";
 import { DEFAULT_INTERACTION_MODE, DEFAULT_RUNTIME_MODE } from "./types";
 import { create } from "zustand";
-import { createJSONStorage, persist } from "zustand/middleware";
-import { createDebouncedStorage, createMemoryStorage } from "./lib/storage";
+import { persist, type PersistStorage, type StorageValue } from "zustand/middleware";
+import { createDeferredStorage, createMemoryStorage } from "./lib/storage";
 import { getDefaultServerModel } from "./providerModels";
 import { type UnifiedSettings } from "@piedpiper/contracts/settings";
 
@@ -51,10 +55,37 @@ const COMPOSER_DRAFT_STORAGE_VERSION = 3;
 
 const COMPOSER_PERSIST_DEBOUNCE_MS = 300;
 
-const composerDebouncedStorage = createDebouncedStorage(
+// Persist writes capture the immutable state and only walk/serialize it when the debounce fires.
+type ComposerPersistState =
+  | { capturedState: ComposerDraftStoreState }
+  | PersistedComposerDraftStoreState;
+
+const composerDebouncedStorage = createDeferredStorage<StorageValue<ComposerPersistState>>(
   typeof localStorage !== "undefined" ? localStorage : createMemoryStorage(),
+  (value) =>
+    JSON.stringify({
+      state:
+        "capturedState" in value.state
+          ? partializeComposerDraftStoreState(value.state.capturedState)
+          : value.state,
+      version: value.version,
+    }),
   COMPOSER_PERSIST_DEBOUNCE_MS,
 );
+
+const composerPersistStorage: PersistStorage<ComposerPersistState> = {
+  getItem: (name) => {
+    // localStorage and the in-memory fallback are both synchronous.
+    const raw = composerDebouncedStorage.getItem(name);
+    if (typeof raw !== "string") {
+      return null;
+    }
+    // `migrate`/`merge` normalize the parsed value from unknown, like zustand's createJSONStorage.
+    return JSON.parse(raw) as StorageValue<ComposerPersistState>;
+  },
+  setItem: (name, value) => composerDebouncedStorage.setItem(name, value),
+  removeItem: (name) => composerDebouncedStorage.removeItem(name),
+};
 
 // Flush pending composer draft writes before page unload to prevent data loss.
 if (typeof window !== "undefined") {
@@ -83,6 +114,8 @@ export interface DraftThreadState {
   branch: string | null;
   worktreePath: string | null;
   envMode: DraftThreadEnvMode;
+  /** Set while the first send is in flight (e.g. creating a worktree); such drafts are not reused for new threads. */
+  promoting?: boolean;
 }
 
 interface ProjectDraftThread extends DraftThreadState {
@@ -95,7 +128,10 @@ export interface ComposerDraftStoreState {
   projectDraftThreadIdByProjectId: Record<ProjectId, ThreadId>;
   stickyModelSelectionByProvider: Partial<Record<ProviderKind, ModelSelection>>;
   stickyActiveProvider: ProviderKind | null;
-  getDraftThreadByProjectId: (projectId: ProjectId) => ProjectDraftThread | null;
+  getDraftThreadByProjectId: (
+    projectId: ProjectId,
+    options?: { includePromoting?: boolean },
+  ) => ProjectDraftThread | null;
   getDraftThread: (threadId: ThreadId) => DraftThreadState | null;
   setProjectDraftThreadId: (
     projectId: ProjectId,
@@ -124,6 +160,10 @@ export interface ComposerDraftStoreState {
   clearProjectDraftThreadId: (projectId: ProjectId) => void;
   clearProjectDraftThreadById: (projectId: ProjectId, threadId: ThreadId) => void;
   clearDraftThread: (threadId: ThreadId) => void;
+  /** Marks a draft whose first send is in flight; clearing it re-maps the draft to its project when unmapped. */
+  setDraftThreadPromoting: (threadId: ThreadId, promoting: boolean) => void;
+  /** Drops draft-thread metadata and project mapping once the server owns the thread; keeps composer content. */
+  finalizePromotedDraftThread: (threadId: ThreadId) => void;
   setStickyModelSelection: (modelSelection: ModelSelection | null | undefined) => void;
   setPrompt: (threadId: ThreadId, prompt: string) => void;
   setTerminalContexts: (threadId: ThreadId, contexts: TerminalContextDraft[]) => void;
@@ -242,8 +282,9 @@ function composerImageDedupKey(image: ComposerImageAttachment): string {
   return `${image.mimeType}\u0000${image.sizeBytes}\u0000${image.name}`;
 }
 
+// With the text: terminal ids are reused, so a closed term-2's lines 1-5 are not a new term-2's.
 function terminalContextDedupKey(context: TerminalContextDraft): string {
-  return `${context.terminalId}\u0000${context.lineStart}\u0000${context.lineEnd}`;
+  return `${context.terminalId}\u0000${context.lineStart}\u0000${context.lineEnd}\u0000${context.text}`;
 }
 
 function normalizeTerminalContextForThread(
@@ -264,7 +305,7 @@ function normalizeTerminalContextForThread(
     terminalLabel,
     lineStart,
     lineEnd,
-    text: normalizeTerminalContextText(context.text),
+    text: clampTerminalContextText(normalizeTerminalContextText(context.text)),
   };
 }
 
@@ -306,6 +347,32 @@ function shouldRemoveDraft(draft: ComposerThreadDraftState): boolean {
   );
 }
 
+function hasUserComposerContent(draft: ComposerThreadDraftState): boolean {
+  return (
+    draft.prompt.length > 0 ||
+    draft.images.length > 0 ||
+    draft.persistedAttachments.length > 0 ||
+    draft.terminalContexts.length > 0
+  );
+}
+
+function removeDraftThreadReferences(
+  state: Pick<
+    ComposerDraftStoreState,
+    "draftThreadsByThreadId" | "projectDraftThreadIdByProjectId"
+  >,
+  threadId: ThreadId,
+): Pick<ComposerDraftStoreState, "draftThreadsByThreadId" | "projectDraftThreadIdByProjectId"> {
+  const projectDraftThreadIdByProjectId = Object.fromEntries(
+    Object.entries(state.projectDraftThreadIdByProjectId).filter(
+      ([, draftThreadId]) => draftThreadId !== threadId,
+    ),
+  ) as Record<ProjectId, ThreadId>;
+  const { [threadId]: _removedDraftThread, ...draftThreadsByThreadId } =
+    state.draftThreadsByThreadId;
+  return { draftThreadsByThreadId, projectDraftThreadIdByProjectId };
+}
+
 export function deriveEffectiveComposerModelState(input: {
   draft:
     | Pick<ComposerThreadDraftState, "modelSelectionByProvider" | "activeProvider">
@@ -323,7 +390,7 @@ export function deriveEffectiveComposerModelState(input: {
       input.selectedProvider,
     ) ?? getDefaultServerModel(input.providers, input.selectedProvider);
   const activeSelection = input.draft?.modelSelectionByProvider?.[input.selectedProvider];
-  const selectedModel = activeSelection?.model
+  const resolvedModel = activeSelection?.model
     ? resolveAppModelSelection(
         input.selectedProvider,
         input.settings,
@@ -331,6 +398,13 @@ export function deriveEffectiveComposerModelState(input: {
         activeSelection.model,
       )
     : baseModel;
+  // The welcome thread is created with a model an old CLI cannot run; its first send would fail.
+  const isUpdateRequired = input.providers
+    .find((provider) => provider.provider === input.selectedProvider)
+    ?.updateRequiredModels?.some((model) => model.slug === resolvedModel);
+  const selectedModel = isUpdateRequired
+    ? getDefaultServerModel(input.providers, input.selectedProvider)
+    : resolvedModel;
   const modelOptions =
     modelSelectionByProviderToOptions(input.draft?.modelSelectionByProvider) ??
     providerModelOptionsFromSelection(input.threadModelSelection) ??
@@ -418,7 +492,7 @@ export const useComposerDraftStore = create<ComposerDraftStoreState>()(
       projectDraftThreadIdByProjectId: {},
       stickyModelSelectionByProvider: {},
       stickyActiveProvider: null,
-      getDraftThreadByProjectId: (projectId) => {
+      getDraftThreadByProjectId: (projectId, options) => {
         if (projectId.length === 0) {
           return null;
         }
@@ -428,6 +502,9 @@ export const useComposerDraftStore = create<ComposerDraftStoreState>()(
         }
         const draftThread = get().draftThreadsByThreadId[threadId];
         if (!draftThread || draftThread.projectId !== projectId) {
+          return null;
+        }
+        if (draftThread.promoting && options?.includePromoting !== true) {
           return null;
         }
         return {
@@ -469,6 +546,7 @@ export const useComposerDraftStore = create<ComposerDraftStoreState>()(
             envMode:
               options?.envMode ??
               (nextWorktreePath ? "worktree" : (existingThread?.envMode ?? "local")),
+            ...(existingThread?.promoting ? { promoting: true } : {}),
           };
           const hasSameProjectMapping = previousThreadIdForProject === threadId;
           const hasSameDraftThread =
@@ -495,6 +573,7 @@ export const useComposerDraftStore = create<ComposerDraftStoreState>()(
           if (
             previousThreadIdForProject &&
             previousThreadIdForProject !== threadId &&
+            !state.draftThreadsByThreadId[previousThreadIdForProject]?.promoting &&
             !Object.values(nextProjectDraftThreadIdByProjectId).includes(previousThreadIdForProject)
           ) {
             delete nextDraftThreadsByThreadId[previousThreadIdForProject];
@@ -539,6 +618,7 @@ export const useComposerDraftStore = create<ComposerDraftStoreState>()(
             worktreePath: nextWorktreePath,
             envMode:
               options.envMode ?? (nextWorktreePath ? "worktree" : (existing.envMode ?? "local")),
+            ...(existing.promoting ? { promoting: true } : {}),
           };
           const isUnchanged =
             nextDraftThread.projectId === existing.projectId &&
@@ -585,7 +665,11 @@ export const useComposerDraftStore = create<ComposerDraftStoreState>()(
             ...state.draftThreadsByThreadId,
           };
           let nextDraftsByThreadId = state.draftsByThreadId;
-          if (!Object.values(restProjectMappings).includes(threadId)) {
+          // A promoting draft still owns the in-flight send; only its project mapping is dropped.
+          if (
+            !state.draftThreadsByThreadId[threadId]?.promoting &&
+            !Object.values(restProjectMappings).includes(threadId)
+          ) {
             delete nextDraftThreadsByThreadId[threadId];
             if (state.draftsByThreadId[threadId] !== undefined) {
               nextDraftsByThreadId = { ...state.draftsByThreadId };
@@ -614,7 +698,11 @@ export const useComposerDraftStore = create<ComposerDraftStoreState>()(
             ...state.draftThreadsByThreadId,
           };
           let nextDraftsByThreadId = state.draftsByThreadId;
-          if (!Object.values(restProjectMappings).includes(threadId)) {
+          // A promoting draft still owns the in-flight send; only its project mapping is dropped.
+          if (
+            !state.draftThreadsByThreadId[threadId]?.promoting &&
+            !Object.values(restProjectMappings).includes(threadId)
+          ) {
             delete nextDraftThreadsByThreadId[threadId];
             if (state.draftsByThreadId[threadId] !== undefined) {
               nextDraftsByThreadId = { ...state.draftsByThreadId };
@@ -632,6 +720,7 @@ export const useComposerDraftStore = create<ComposerDraftStoreState>()(
         if (threadId.length === 0) {
           return;
         }
+        useReviewCommentDraftStore.getState().clearComments(threadId);
         const existing = get().draftsByThreadId[threadId];
         if (existing) {
           for (const image of existing.images) {
@@ -647,20 +736,65 @@ export const useComposerDraftStore = create<ComposerDraftStoreState>()(
           if (!hasDraftThread && !hasProjectMapping && !hasComposerDraft) {
             return state;
           }
-          const nextProjectDraftThreadIdByProjectId = Object.fromEntries(
-            Object.entries(state.projectDraftThreadIdByProjectId).filter(
-              ([, draftThreadId]) => draftThreadId !== threadId,
-            ),
-          ) as Record<ProjectId, ThreadId>;
-          const { [threadId]: _removedDraftThread, ...restDraftThreadsByThreadId } =
-            state.draftThreadsByThreadId;
           const { [threadId]: _removedComposerDraft, ...restDraftsByThreadId } =
             state.draftsByThreadId;
           return {
+            ...removeDraftThreadReferences(state, threadId),
             draftsByThreadId: restDraftsByThreadId,
-            draftThreadsByThreadId: restDraftThreadsByThreadId,
-            projectDraftThreadIdByProjectId: nextProjectDraftThreadIdByProjectId,
           };
+        });
+      },
+      setDraftThreadPromoting: (threadId, promoting) => {
+        if (threadId.length === 0) {
+          return;
+        }
+        set((state) => {
+          const existing = state.draftThreadsByThreadId[threadId];
+          if (!existing || Boolean(existing.promoting) === promoting) {
+            return state;
+          }
+          const { promoting: _previous, ...rest } = existing;
+          const nextDraftThread: DraftThreadState = promoting ? { ...rest, promoting: true } : rest;
+          const draftThreadsByThreadId = {
+            ...state.draftThreadsByThreadId,
+            [threadId]: nextDraftThread,
+          };
+          if (
+            promoting ||
+            state.projectDraftThreadIdByProjectId[existing.projectId] !== undefined
+          ) {
+            return { draftThreadsByThreadId };
+          }
+          return {
+            draftThreadsByThreadId,
+            projectDraftThreadIdByProjectId: {
+              ...state.projectDraftThreadIdByProjectId,
+              [existing.projectId]: threadId,
+            },
+          };
+        });
+      },
+      finalizePromotedDraftThread: (threadId) => {
+        if (threadId.length === 0) {
+          return;
+        }
+        set((state) => {
+          const hasDraftThread = state.draftThreadsByThreadId[threadId] !== undefined;
+          const hasProjectMapping = Object.values(state.projectDraftThreadIdByProjectId).includes(
+            threadId,
+          );
+          if (!hasDraftThread && !hasProjectMapping) {
+            return state;
+          }
+          const composerDraft = state.draftsByThreadId[threadId];
+          const references = removeDraftThreadReferences(state, threadId);
+          if (composerDraft === undefined || hasUserComposerContent(composerDraft)) {
+            return references;
+          }
+          // The server thread already carries the model/mode selection, so a content-free record is dropped.
+          const { [threadId]: _removedComposerDraft, ...restDraftsByThreadId } =
+            state.draftsByThreadId;
+          return { ...references, draftsByThreadId: restDraftsByThreadId };
         });
       },
       setStickyModelSelection: (modelSelection) => {
@@ -669,9 +803,15 @@ export const useComposerDraftStore = create<ComposerDraftStoreState>()(
           if (!normalized) {
             return state;
           }
+          // A model-only pick keeps the remembered traits (effort, thinking, fast mode).
+          const current = state.stickyModelSelectionByProvider[normalized.provider];
+          const nextSelection: ModelSelection =
+            normalized.options === undefined && current?.options
+              ? { ...normalized, options: current.options }
+              : normalized;
           const nextMap: Partial<Record<ProviderKind, ModelSelection>> = {
             ...state.stickyModelSelectionByProvider,
-            [normalized.provider]: normalized,
+            [normalized.provider]: nextSelection,
           };
           if (Equal.equals(state.stickyModelSelectionByProvider, nextMap)) {
             return state.stickyActiveProvider === normalized.provider
@@ -953,8 +1093,7 @@ export const useComposerDraftStore = create<ComposerDraftStoreState>()(
         if (threadId.length === 0) {
           return;
         }
-        const nextRuntimeMode =
-          runtimeMode === "approval-required" || runtimeMode === "full-access" ? runtimeMode : null;
+        const nextRuntimeMode = isPersistedRuntimeMode(runtimeMode) ? runtimeMode : null;
         set((state) => {
           const existing = state.draftsByThreadId[threadId];
           if (!existing && nextRuntimeMode === null) {
@@ -1286,9 +1425,9 @@ export const useComposerDraftStore = create<ComposerDraftStoreState>()(
     {
       name: COMPOSER_DRAFT_STORAGE_KEY,
       version: COMPOSER_DRAFT_STORAGE_VERSION,
-      storage: createJSONStorage(() => composerDebouncedStorage),
+      storage: composerPersistStorage,
       migrate: migratePersistedComposerDraftStoreState,
-      partialize: partializeComposerDraftStoreState,
+      partialize: (state): ComposerPersistState => ({ capturedState: state }),
       merge: (persistedState, currentState) => {
         const normalizedPersisted =
           normalizeCurrentPersistedComposerDraftStoreState(persistedState);
@@ -1347,8 +1486,10 @@ export function useEffectiveComposerModelState(input: {
 }
 
 /**
- * Clear a draft thread once the server has materialized the same thread id.
+ * Finalize a draft thread once the server has materialized the same thread id.
  *
+ * Only the draft-thread record and project mapping are dropped; composer content
+ * for the thread id is kept so text typed right after the first send survives.
  * Use the single-thread helper for live `thread.created` events and the
  * iterable helper for bootstrap/recovery paths that discover multiple server
  * threads at once.
@@ -1357,11 +1498,118 @@ export function clearPromotedDraftThread(threadId: ThreadId): void {
   if (!useComposerDraftStore.getState().getDraftThread(threadId)) {
     return;
   }
-  useComposerDraftStore.getState().clearDraftThread(threadId);
+  useComposerDraftStore.getState().finalizePromotedDraftThread(threadId);
 }
 
 export function clearPromotedDraftThreads(serverThreadIds: Iterable<ThreadId>): void {
   for (const threadId of serverThreadIds) {
     clearPromotedDraftThread(threadId);
+  }
+}
+
+/** True when the thread's composer draft holds a prompt, images, attachments or terminal contexts. */
+export function composerDraftHasUserContent(threadId: ThreadId): boolean {
+  const draft = useComposerDraftStore.getState().draftsByThreadId[threadId];
+  return draft !== undefined && hasUserComposerContent(draft);
+}
+
+export function selectThreadHasUnsentDraft(
+  state: Pick<ComposerDraftStoreState, "draftsByThreadId">,
+  threadId: ThreadId,
+): boolean {
+  const draft = state.draftsByThreadId[threadId];
+  return draft !== undefined && hasUserComposerContent(draft);
+}
+
+/** Reactive unsent-draft flag; a boolean so callers re-render only when a draft appears or disappears. */
+export function useThreadHasUnsentDraft(threadId: ThreadId): boolean {
+  return useComposerDraftStore((state) => selectThreadHasUnsentDraft(state, threadId));
+}
+
+/** Discards a thread's unsent composer content (not its model settings), revoking image previews. */
+export function discardComposerDraftContent(threadId: ThreadId): void {
+  const store = useComposerDraftStore.getState();
+  const draft = store.draftsByThreadId[threadId];
+  if (!draft) return;
+  for (const image of draft.images) {
+    revokeObjectPreviewUrl(image.previewUrl);
+  }
+  store.clearComposerContent(threadId);
+}
+
+/**
+ * Moves a failed first send out of a server thread that is being rolled back.
+ *
+ * The rollback's `thread.deleted` event clears every draft keyed by the deleted id, so
+ * the composer draft (settings plus anything typed since) moves to a fresh draft thread
+ * for the project, and `restore` (the unsent message) is put back there.
+ */
+export function moveFailedFirstSendToDraftThread(input: {
+  fromThreadId: ThreadId;
+  toThreadId: ThreadId;
+  projectId: ProjectId;
+  draftThread: Omit<DraftThreadState, "projectId">;
+  restore: {
+    prompt: string;
+    images: ReadonlyArray<ComposerImageAttachment>;
+    terminalContexts: ReadonlyArray<TerminalContextDraft>;
+  } | null;
+}): void {
+  const { fromThreadId, toThreadId, projectId, draftThread, restore } = input;
+  if (fromThreadId === toThreadId || toThreadId.length === 0) return;
+  // The rollback's thread.deleted clears the old id's comments too, so they move with the draft.
+  const reviewComments = useReviewCommentDraftStore.getState();
+  reviewComments.restoreComments(toThreadId, reviewComments.commentsByThreadId[fromThreadId] ?? []);
+  reviewComments.clearComments(fromThreadId);
+  useComposerDraftStore.setState((state) => {
+    const existing = state.draftsByThreadId[fromThreadId];
+    if (existing === undefined) return state;
+    const { [fromThreadId]: _moved, ...rest } = state.draftsByThreadId;
+    return {
+      draftsByThreadId: {
+        ...rest,
+        [toThreadId]: {
+          ...existing,
+          terminalContexts: normalizeTerminalContextsForThread(
+            toThreadId,
+            existing.terminalContexts,
+          ),
+        },
+      },
+    };
+  });
+  const store = useComposerDraftStore.getState();
+  const mappedThreadId = store.projectDraftThreadIdByProjectId[projectId];
+  if (mappedThreadId === undefined || mappedThreadId === fromThreadId) {
+    store.setProjectDraftThreadId(projectId, toThreadId, {
+      createdAt: draftThread.createdAt,
+      runtimeMode: draftThread.runtimeMode,
+      interactionMode: draftThread.interactionMode,
+      branch: draftThread.branch,
+      worktreePath: draftThread.worktreePath,
+      envMode: draftThread.envMode,
+    });
+  } else {
+    // Another draft (e.g. opened during the send) owns the project mapping; remapping would delete it.
+    useComposerDraftStore.setState((state) => ({
+      draftThreadsByThreadId: {
+        ...state.draftThreadsByThreadId,
+        [toThreadId]: {
+          projectId,
+          createdAt: draftThread.createdAt,
+          runtimeMode: draftThread.runtimeMode,
+          interactionMode: draftThread.interactionMode,
+          branch: draftThread.branch,
+          worktreePath: draftThread.worktreePath,
+          envMode: draftThread.envMode,
+        },
+      },
+    }));
+  }
+  if (!restore) return;
+  store.setPrompt(toThreadId, restore.prompt);
+  if (restore.images.length > 0) store.addImages(toThreadId, [...restore.images]);
+  if (restore.terminalContexts.length > 0) {
+    store.addTerminalContexts(toThreadId, [...restore.terminalContexts]);
   }
 }

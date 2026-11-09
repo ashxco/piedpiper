@@ -1,3 +1,4 @@
+import * as path from "node:path";
 import { defineConfig, mergeConfig } from "vitest/config";
 
 import baseConfig from "../../vitest.config";
@@ -6,6 +7,7 @@ export default mergeConfig(
   baseConfig,
   defineConfig({
     test: {
+      setupFiles: [path.resolve(import.meta.dirname, "src/testUtils/gitConfig.setup.ts")],
       // The server suite exercises sqlite, git, temp worktrees, and orchestration
       // runtimes heavily. Running files in parallel introduces load-sensitive flakes.
       fileParallelism: false,

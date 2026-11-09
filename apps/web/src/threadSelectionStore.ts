@@ -36,6 +36,34 @@ interface ThreadSelectionStore extends ThreadSelectionState {
 
 const EMPTY_SET = new Set<ThreadId>();
 
+/** Clear completed deletions and missing threads, retaining failed or unprocessed threads. */
+export function getThreadIdsToDeselectAfterDelete(
+  selectedThreadIds: readonly ThreadId[],
+  deletedThreadIds: ReadonlySet<ThreadId>,
+  hasThread: (threadId: ThreadId) => boolean,
+): ThreadId[] {
+  return selectedThreadIds.filter((id) => deletedThreadIds.has(id) || !hasThread(id));
+}
+
+/** Delete threads one by one, continuing past failures and remembering the first error. */
+export async function deleteThreadsSequentially(
+  threadIds: readonly ThreadId[],
+  deleteOne: (threadId: ThreadId, deletedThreadIds: ReadonlySet<ThreadId>) => Promise<void>,
+): Promise<{ deletedThreadIds: Set<ThreadId>; firstError: unknown }> {
+  // Only discount batch members after their deletions succeed.
+  const deletedThreadIds = new Set<ThreadId>();
+  let firstError: unknown = null;
+  for (const threadId of threadIds) {
+    try {
+      await deleteOne(threadId, deletedThreadIds);
+      deletedThreadIds.add(threadId);
+    } catch (error) {
+      firstError ??= error ?? new Error("An error occurred.");
+    }
+  }
+  return { deletedThreadIds, firstError };
+}
+
 export const useThreadSelectionStore = create<ThreadSelectionStore>((set, get) => ({
   selectedThreadIds: EMPTY_SET,
   anchorThreadId: null,

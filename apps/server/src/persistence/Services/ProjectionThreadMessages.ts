@@ -14,7 +14,7 @@ import {
   TurnId,
   IsoDateTime,
 } from "@piedpiper/contracts";
-import { Schema, ServiceMap } from "effect";
+import { Schema, ServiceMap, Struct } from "effect";
 import type { Option } from "effect";
 import type { Effect } from "effect";
 
@@ -32,6 +32,12 @@ export const ProjectionThreadMessage = Schema.Struct({
   updatedAt: IsoDateTime,
 });
 export type ProjectionThreadMessage = typeof ProjectionThreadMessage.Type;
+
+export const AppendStreamingProjectionThreadMessage = Schema.Struct(
+  Struct.omit(ProjectionThreadMessage.fields, ["isStreaming"]),
+);
+export type AppendStreamingProjectionThreadMessage =
+  typeof AppendStreamingProjectionThreadMessage.Type;
 
 export const ListProjectionThreadMessagesInput = Schema.Struct({
   threadId: ThreadId,
@@ -59,6 +65,14 @@ export interface ProjectionThreadMessageRepositoryShape {
    */
   readonly upsert: (
     message: ProjectionThreadMessage,
+  ) => Effect.Effect<void, ProjectionRepositoryError>;
+
+  /**
+   * Insert a streaming message or append text to its existing row in SQL,
+   * keeping `created_at` and existing attachments unless new ones are given.
+   */
+  readonly appendStreaming: (
+    message: AppendStreamingProjectionThreadMessage,
   ) => Effect.Effect<void, ProjectionRepositoryError>;
 
   /**

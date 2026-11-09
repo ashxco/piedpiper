@@ -19,23 +19,25 @@ import {
   mapTurnDiffSummary,
   sidebarThreadSummariesEqual,
 } from "./lib/storeDataMapping";
+import { appendLiveCommandOutput, LIVE_COMMAND_OUTPUT_FIELD } from "./lib/liveCommandOutput";
 import {
-  MAX_THREAD_ACTIVITIES,
   MAX_THREAD_CHECKPOINTS,
   MAX_THREAD_MESSAGES,
   MAX_THREAD_PROPOSED_PLANS,
+  appendThreadActivity,
   appendThreadIdByProjectId,
   buildLatestTurn,
   buildThreadIdsByProjectId,
   checkpointStatusToLatestTurnState,
-  compareActivities,
+  readActivityProviderItemId,
   rebindTurnDiffSummariesForAssistantMessage,
   removeThreadIdByProjectId,
   retainThreadActivitiesAfterRevert,
   retainThreadMessagesAfterRevert,
   retainThreadProposedPlansAfterRevert,
+  settledTurnStateForSessionStatus,
   updateProject,
-  updateThread,
+  upsertStreamedMessage,
 } from "./lib/storeUpdateHelpers";
 import {
   type Project,
@@ -68,25 +70,41 @@ const initialState: AppState = {
 
 // ── State transition helpers ─────────────────────────────────────────
 
+function isSessionRunningTurn(thread: Thread, turnId: string | null): boolean {
+  return (
+    thread.session?.orchestrationStatus === "running" && thread.session.activeTurnId === turnId
+  );
+}
+
 function updateThreadState(
   state: AppState,
   threadId: ThreadId,
   updater: (thread: Thread) => Thread,
+  upsertedMessageId?: Thread["messages"][number]["id"],
 ): AppState {
-  let updatedThread: Thread | null = null;
-  const threads = updateThread(state.threads, threadId, (thread) => {
-    const nextThread = updater(thread);
-    if (nextThread !== thread) {
-      updatedThread = nextThread;
-    }
-    return nextThread;
-  });
-  if (threads === state.threads || updatedThread === null) {
+  const index = state.threads.findIndex((thread) => thread.id === threadId);
+  const previousThread = index === -1 ? undefined : state.threads[index];
+  if (previousThread === undefined) {
     return state;
   }
+  const updatedThread = updater(previousThread);
+  if (updatedThread === previousThread) {
+    return state;
+  }
+  const threads = state.threads.slice();
+  threads[index] = updatedThread;
 
-  const nextSummary = buildSidebarThreadSummary(updatedThread);
   const previousSummary = state.sidebarThreadsById[threadId];
+  const nextSummary = buildSidebarThreadSummary(
+    updatedThread,
+    previousSummary === undefined
+      ? undefined
+      : {
+          previousThread,
+          previousSummary,
+          ...(upsertedMessageId !== undefined ? { upsertedMessageId } : {}),
+        },
+  );
   const sidebarThreadsById = sidebarThreadSummariesEqual(previousSummary, nextSummary)
     ? state.sidebarThreadsById
     : {
@@ -119,6 +137,7 @@ export function applyToolInputPreviewBatch(
   }
 
   let nextPreviews: Record<string, Record<string, ToolInputStream>> | null = null;
+  let completedItemKeys: Set<string> | null = null;
   for (const event of batch) {
     if (!event.itemId) continue;
     const threadId = event.threadId;
@@ -126,7 +145,25 @@ export function applyToolInputPreviewBatch(
     const source = nextPreviews ?? state.toolInputPreviews;
     const threadBucket = source[threadId];
     const existing = threadBucket?.[itemId];
-    const text = existing ? `${existing.text}${event.delta}` : event.delta;
+    if (existing === undefined) {
+      // rAF-buffered deltas can land after tool.completed cleared the entry;
+      // re-creating it would show a truncated tail in place of the static preview.
+      const key = `${threadId}\u0000${itemId}`;
+      if (completedItemKeys?.has(key) || isToolItemCompleted(state, threadId, itemId)) {
+        (completedItemKeys ??= new Set()).add(key);
+        continue;
+      }
+    }
+    // Bash streams its command preview under the same item id; live output replaces that text.
+    const text =
+      event.fieldName === LIVE_COMMAND_OUTPUT_FIELD
+        ? appendLiveCommandOutput(
+            existing?.fieldName === LIVE_COMMAND_OUTPUT_FIELD ? existing.text : "",
+            event.delta,
+          )
+        : existing
+          ? `${existing.text}${event.delta}`
+          : event.delta;
     const updatedAt = Date.now();
     // Sticky: meta fields (filePath, oldString) may not be present on every
     // delta — keep whatever the most recent event provided, or fall back to
@@ -155,6 +192,18 @@ export function applyToolInputPreviewBatch(
   }
 
   return { ...state, toolInputPreviews: nextPreviews };
+}
+
+function isToolItemCompleted(state: AppState, threadId: string, itemId: string): boolean {
+  const thread = state.threads.find((entry) => entry.id === threadId);
+  if (thread === undefined) return false;
+  for (let index = thread.activities.length - 1; index >= 0; index -= 1) {
+    const activity = thread.activities[index]!;
+    if (activity.kind === "tool.completed" && readActivityProviderItemId(activity) === itemId) {
+      return true;
+    }
+  }
+  return false;
 }
 
 export function clearThreadPreviews(state: AppState, threadId: string): AppState {
@@ -214,8 +263,10 @@ export function applyOrchestrationEvent(state: AppState, event: OrchestrationEve
         workspaceRoot: event.payload.workspaceRoot,
         defaultModelSelection: event.payload.defaultModelSelection,
         scripts: event.payload.scripts,
+        faviconPath: event.payload.faviconPath ?? null,
         createdAt: event.payload.createdAt,
         updatedAt: event.payload.updatedAt,
+        archivedAt: null,
         deletedAt: null,
       });
       const projects =
@@ -241,6 +292,10 @@ export function applyOrchestrationEvent(state: AppState, event: OrchestrationEve
           : {}),
         ...(event.payload.scripts !== undefined
           ? { scripts: mapProjectScripts(event.payload.scripts) }
+          : {}),
+        ...(event.payload.archivedAt !== undefined ? { archivedAt: event.payload.archivedAt } : {}),
+        ...(event.payload.faviconPath !== undefined
+          ? { faviconPath: event.payload.faviconPath }
           : {}),
         updatedAt: event.payload.updatedAt,
       }));
@@ -442,94 +497,96 @@ export function applyOrchestrationEvent(state: AppState, event: OrchestrationEve
     }
 
     case "thread.message-sent": {
-      return updateThreadState(state, event.payload.threadId, (thread) => {
-        const message = mapMessage({
-          id: event.payload.messageId,
-          role: event.payload.role,
-          text: event.payload.text,
-          ...(event.payload.attachments !== undefined
-            ? { attachments: event.payload.attachments }
-            : {}),
-          turnId: event.payload.turnId,
-          streaming: event.payload.streaming,
-          createdAt: event.payload.createdAt,
-          updatedAt: event.payload.updatedAt,
-        });
-        const existingMessage = thread.messages.find((entry) => entry.id === message.id);
-        const messages = existingMessage
-          ? thread.messages.map((entry) =>
-              entry.id !== message.id
-                ? entry
-                : {
-                    ...entry,
-                    text: message.streaming
-                      ? `${entry.text}${message.text}`
-                      : message.text.length > 0
-                        ? message.text
-                        : entry.text,
-                    streaming: message.streaming,
-                    ...(message.turnId !== undefined ? { turnId: message.turnId } : {}),
-                    ...(message.streaming
-                      ? entry.completedAt !== undefined
-                        ? { completedAt: entry.completedAt }
-                        : {}
-                      : message.completedAt !== undefined
-                        ? { completedAt: message.completedAt }
-                        : {}),
-                    ...(message.attachments !== undefined
-                      ? { attachments: message.attachments }
-                      : {}),
-                  },
-            )
-          : [...thread.messages, message];
-        const cappedMessages = messages.slice(-MAX_THREAD_MESSAGES);
-        const turnDiffSummaries =
-          event.payload.role === "assistant" && event.payload.turnId !== null
-            ? rebindTurnDiffSummariesForAssistantMessage(
-                thread.turnDiffSummaries,
-                event.payload.turnId,
-                event.payload.messageId,
-              )
-            : thread.turnDiffSummaries;
-        const latestTurn: Thread["latestTurn"] =
-          event.payload.role === "assistant" &&
-          event.payload.turnId !== null &&
-          (thread.latestTurn === null || thread.latestTurn.turnId === event.payload.turnId)
-            ? buildLatestTurn({
-                previous: thread.latestTurn,
-                turnId: event.payload.turnId,
-                state: event.payload.streaming
-                  ? "running"
-                  : thread.latestTurn?.state === "interrupted"
-                    ? "interrupted"
-                    : thread.latestTurn?.state === "error"
-                      ? "error"
-                      : "completed",
-                requestedAt:
-                  thread.latestTurn?.turnId === event.payload.turnId
-                    ? thread.latestTurn.requestedAt
-                    : event.payload.createdAt,
-                startedAt:
-                  thread.latestTurn?.turnId === event.payload.turnId
-                    ? (thread.latestTurn.startedAt ?? event.payload.createdAt)
-                    : event.payload.createdAt,
-                sourceProposedPlan: thread.pendingSourceProposedPlan,
-                completedAt: event.payload.streaming
-                  ? thread.latestTurn?.turnId === event.payload.turnId
-                    ? (thread.latestTurn.completedAt ?? null)
-                    : null
-                  : event.payload.updatedAt,
-                assistantMessageId: event.payload.messageId,
-              })
-            : thread.latestTurn;
-        return {
-          ...thread,
-          messages: cappedMessages,
-          turnDiffSummaries,
-          latestTurn,
-          updatedAt: event.occurredAt,
-        };
-      });
+      return updateThreadState(
+        state,
+        event.payload.threadId,
+        (thread) => {
+          const message = mapMessage({
+            id: event.payload.messageId,
+            role: event.payload.role,
+            text: event.payload.text,
+            ...(event.payload.attachments !== undefined
+              ? { attachments: event.payload.attachments }
+              : {}),
+            turnId: event.payload.turnId,
+            streaming: event.payload.streaming,
+            createdAt: event.payload.createdAt,
+            updatedAt: event.payload.updatedAt,
+          });
+          const cappedMessages = upsertStreamedMessage(thread.messages, message);
+          // A late image must not take the turn's pointers from the reply.
+          const isAttachmentOnly =
+            event.payload.text.trim().length === 0 && (event.payload.attachments?.length ?? 0) > 0;
+          // The server keeps the first pointer on any turn, so an older turn's summary stays put too.
+          const keepsTurnReply =
+            isAttachmentOnly &&
+            (thread.latestTurn?.turnId === event.payload.turnId
+              ? thread.latestTurn.assistantMessageId !== null
+              : thread.turnDiffSummaries.some(
+                  (summary) =>
+                    summary.turnId === event.payload.turnId &&
+                    summary.assistantMessageId !== undefined,
+                ));
+          const turnDiffSummaries =
+            event.payload.role === "assistant" && event.payload.turnId !== null && !keepsTurnReply
+              ? rebindTurnDiffSummariesForAssistantMessage(
+                  thread.turnDiffSummaries,
+                  event.payload.turnId,
+                  event.payload.messageId,
+                )
+              : thread.turnDiffSummaries;
+          // A finished message only settles the turn once the session stops running it.
+          const settlesTurn =
+            !event.payload.streaming && !isSessionRunningTurn(thread, event.payload.turnId);
+          // Checked before streaming: a failed turn's buffered text still arrives after the failure.
+          const stickyState =
+            thread.latestTurn?.turnId === event.payload.turnId &&
+            (thread.latestTurn.state === "error" || thread.latestTurn.state === "interrupted")
+              ? thread.latestTurn.state
+              : null;
+          const latestTurn: Thread["latestTurn"] =
+            event.payload.role === "assistant" &&
+            event.payload.turnId !== null &&
+            (thread.latestTurn === null || thread.latestTurn.turnId === event.payload.turnId)
+              ? buildLatestTurn({
+                  previous: thread.latestTurn,
+                  turnId: event.payload.turnId,
+                  state: stickyState ?? (settlesTurn ? "completed" : "running"),
+                  requestedAt:
+                    thread.latestTurn?.turnId === event.payload.turnId
+                      ? thread.latestTurn.requestedAt
+                      : event.payload.createdAt,
+                  startedAt:
+                    thread.latestTurn?.turnId === event.payload.turnId
+                      ? (thread.latestTurn.startedAt ?? event.payload.createdAt)
+                      : event.payload.createdAt,
+                  sourceProposedPlan: thread.pendingSourceProposedPlan,
+                  completedAt:
+                    stickyState !== null
+                      ? (thread.latestTurn?.completedAt ?? event.payload.updatedAt)
+                      : settlesTurn
+                        ? isAttachmentOnly
+                          ? (thread.latestTurn?.completedAt ?? event.payload.updatedAt)
+                          : event.payload.updatedAt
+                        : thread.latestTurn?.turnId === event.payload.turnId
+                          ? (thread.latestTurn.completedAt ?? null)
+                          : null,
+                  assistantMessageId:
+                    keepsTurnReply && thread.latestTurn?.assistantMessageId
+                      ? thread.latestTurn.assistantMessageId
+                      : event.payload.messageId,
+                })
+              : thread.latestTurn;
+          return {
+            ...thread,
+            messages: cappedMessages,
+            turnDiffSummaries,
+            latestTurn,
+            updatedAt: event.occurredAt,
+          };
+        },
+        event.payload.messageId,
+      );
     }
 
     case "thread.session-set": {
@@ -538,6 +595,7 @@ export function applyOrchestrationEvent(state: AppState, event: OrchestrationEve
         sessionStatus === "stopped" || sessionStatus === "error"
           ? clearThreadPreviews(state, event.payload.threadId)
           : state;
+      const settledTurnState = settledTurnStateForSessionStatus(sessionStatus);
       return updateThreadState(baseState, event.payload.threadId, (thread) => ({
         ...thread,
         session: mapSession(event.payload.session),
@@ -563,7 +621,13 @@ export function applyOrchestrationEvent(state: AppState, event: OrchestrationEve
                     : null,
                 sourceProposedPlan: thread.pendingSourceProposedPlan,
               })
-            : thread.latestTurn,
+            : thread.latestTurn?.state === "running" && settledTurnState !== null
+              ? {
+                  ...thread.latestTurn,
+                  state: settledTurnState,
+                  completedAt: event.payload.session.updatedAt,
+                }
+              : thread.latestTurn,
         updatedAt: event.occurredAt,
       }));
     }
@@ -615,6 +679,15 @@ export function applyOrchestrationEvent(state: AppState, event: OrchestrationEve
           checkpointRef: event.payload.checkpointRef,
           status: event.payload.status,
           files: event.payload.files,
+          ...(event.payload.filesTotal === undefined
+            ? {}
+            : { filesTotal: event.payload.filesTotal }),
+          ...(event.payload.additionsTotal === undefined
+            ? {}
+            : { additionsTotal: event.payload.additionsTotal }),
+          ...(event.payload.deletionsTotal === undefined
+            ? {}
+            : { deletionsTotal: event.payload.deletionsTotal }),
           assistantMessageId: event.payload.assistantMessageId,
           completedAt: event.payload.completedAt,
         });
@@ -634,12 +707,21 @@ export function applyOrchestrationEvent(state: AppState, event: OrchestrationEve
               (right.checkpointTurnCount ?? Number.MAX_SAFE_INTEGER),
           )
           .slice(-MAX_THREAD_CHECKPOINTS);
+        // A checkpoint taken mid-run is recorded, but only the session ending settles the turn.
         const latestTurn =
-          thread.latestTurn === null || thread.latestTurn.turnId === event.payload.turnId
+          !isSessionRunningTurn(thread, event.payload.turnId) &&
+          (thread.latestTurn === null || thread.latestTurn.turnId === event.payload.turnId)
             ? buildLatestTurn({
                 previous: thread.latestTurn,
                 turnId: event.payload.turnId,
-                state: checkpointStatusToLatestTurnState(event.payload.status),
+                state:
+                  thread.latestTurn?.turnId === event.payload.turnId &&
+                  (thread.latestTurn.state === "error" ||
+                    (thread.latestTurn.state === "interrupted" &&
+                      // A "missing" placeholder diff also maps to "interrupted"; let the real capture replace it.
+                      existing?.status !== "missing"))
+                    ? thread.latestTurn.state
+                    : checkpointStatusToLatestTurnState(event.payload.status),
                 requestedAt: thread.latestTurn?.requestedAt ?? event.payload.completedAt,
                 startedAt: thread.latestTurn?.startedAt ?? event.payload.completedAt,
                 completedAt: event.payload.completedAt,
@@ -710,19 +792,20 @@ export function applyOrchestrationEvent(state: AppState, event: OrchestrationEve
     }
 
     case "thread.activity-appended": {
-      return updateThreadState(state, event.payload.threadId, (thread) => {
-        const activities = [
-          ...thread.activities.filter((activity) => activity.id !== event.payload.activity.id),
-          { ...event.payload.activity },
-        ]
-          .toSorted(compareActivities)
-          .slice(-MAX_THREAD_ACTIVITIES);
-        return {
-          ...thread,
-          activities,
-          updatedAt: event.occurredAt,
-        };
-      });
+      const activity = event.payload.activity;
+      // The timeline falls back to the activity's static preview once the tool
+      // completes, so the live stream entry would only pile up across turns.
+      const completedItemId =
+        activity.kind === "tool.completed" ? readActivityProviderItemId(activity) : null;
+      const baseState =
+        completedItemId === null
+          ? state
+          : clearItemPreview(state, event.payload.threadId, completedItemId);
+      return updateThreadState(baseState, event.payload.threadId, (thread) => ({
+        ...thread,
+        activities: appendThreadActivity(thread.activities, activity),
+        updatedAt: event.occurredAt,
+      }));
     }
 
     case "thread.approval-response-requested":
@@ -776,11 +859,34 @@ interface AppStore extends AppState {
   applyOrchestrationEvents: (events: ReadonlyArray<OrchestrationEvent>) => void;
   setError: (threadId: ThreadId, error: string | null) => void;
   setThreadBranch: (threadId: ThreadId, branch: string | null, worktreePath: string | null) => void;
-  markThreadUserRenamed: (threadId: ThreadId) => void;
+  /** Pass the title: while the flag is set, the rename's own event is dropped like any other. */
+  markThreadUserRenamed: (threadId: ThreadId, title?: string) => void;
+  clearThreadUserRenamed: (threadId: ThreadId) => void;
   applyToolInputPreviewBatch: (batch: ReadonlyArray<ToolInputPreviewEvent>) => void;
   clearThreadPreviews: (threadId: string) => void;
   clearItemPreview: (threadId: string, itemId: string) => void;
 }
+
+/**
+ * Rebuilds the summaries still showing a live background task, so the silence bound applies in a
+ * client left open: nothing else re-derives a thread that has stopped getting events.
+ */
+export function refreshLiveBackgroundTaskSummaries(state: AppState): AppState {
+  let sidebarThreadsById = state.sidebarThreadsById;
+  for (const thread of state.threads) {
+    const previous = state.sidebarThreadsById[thread.id];
+    if (previous?.hasLiveBackgroundTask !== true) continue;
+    const next = buildSidebarThreadSummary(thread);
+    if (sidebarThreadSummariesEqual(previous, next)) continue;
+    if (sidebarThreadsById === state.sidebarThreadsById) {
+      sidebarThreadsById = { ...state.sidebarThreadsById };
+    }
+    sidebarThreadsById[thread.id] = next;
+  }
+  return sidebarThreadsById === state.sidebarThreadsById ? state : { ...state, sidebarThreadsById };
+}
+
+const BACKGROUND_TASK_REFRESH_INTERVAL_MS = 5 * 60 * 1_000;
 
 export const useStore = create<AppStore>((set) => ({
   ...initialState,
@@ -790,11 +896,35 @@ export const useStore = create<AppStore>((set) => ({
   setError: (threadId, error) => set((state) => setError(state, threadId, error)),
   setThreadBranch: (threadId, branch, worktreePath) =>
     set((state) => setThreadBranch(state, threadId, branch, worktreePath)),
-  markThreadUserRenamed: (threadId) =>
-    set((state) => ({
-      userRenamedThreadIds: new Set(state.userRenamedThreadIds).add(threadId),
-    })),
+  markThreadUserRenamed: (threadId, title) =>
+    set((state) => {
+      const renamed =
+        title === undefined
+          ? state
+          : updateThreadState(state, threadId, (thread) =>
+              thread.title === title ? thread : { ...thread, title },
+            );
+      return {
+        ...renamed,
+        userRenamedThreadIds: new Set(state.userRenamedThreadIds).add(threadId),
+      };
+    }),
+  clearThreadUserRenamed: (threadId) =>
+    set((state) => {
+      if (!state.userRenamedThreadIds.has(threadId)) return state;
+      const userRenamedThreadIds = new Set(state.userRenamedThreadIds);
+      userRenamedThreadIds.delete(threadId);
+      return { userRenamedThreadIds };
+    }),
   applyToolInputPreviewBatch: (batch) => set((state) => applyToolInputPreviewBatch(state, batch)),
   clearThreadPreviews: (threadId) => set((state) => clearThreadPreviews(state, threadId)),
   clearItemPreview: (threadId, itemId) => set((state) => clearItemPreview(state, threadId, itemId)),
 }));
+
+/** Coarse on purpose; returns the stop function. */
+export function startLiveBackgroundTaskRefresh(): () => void {
+  const timer = setInterval(() => {
+    useStore.setState((state) => refreshLiveBackgroundTaskSummaries(state));
+  }, BACKGROUND_TASK_REFRESH_INTERVAL_MS);
+  return () => clearInterval(timer);
+}

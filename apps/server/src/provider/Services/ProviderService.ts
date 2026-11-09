@@ -28,7 +28,11 @@ import { ServiceMap } from "effect";
 import type { Effect, PubSub, Scope, Stream } from "effect";
 
 import type { ProviderServiceError } from "../Errors.ts";
-import type { ProviderAdapterCapabilities } from "./ProviderAdapter.ts";
+import type {
+  ProviderAdapterCapabilities,
+  ProviderGoalRequest,
+  ProviderGoalResponse,
+} from "./ProviderAdapter.ts";
 
 /**
  * ProviderServiceShape - Service API for provider session and turn orchestration.
@@ -85,11 +89,28 @@ export interface ProviderServiceShape {
   readonly listSessions: () => Effect.Effect<ReadonlyArray<ProviderSession>>;
 
   /**
+   * Count background tasks the session's adapter still tracks as running;
+   * 0 when the adapter does not report them.
+   */
+  readonly countLiveBackgroundTasks?: (input: {
+    readonly threadId: ThreadId;
+    readonly provider: ProviderKind;
+  }) => Effect.Effect<number>;
+
+  /**
    * Read static capabilities for a provider adapter.
    */
   readonly getCapabilities: (
     provider: ProviderKind,
   ) => Effect.Effect<ProviderAdapterCapabilities, ProviderServiceError>;
+
+  /**
+   * Whether a rollback can work, so a revert refuses before it changes any files. True when the
+   * provider has no such check.
+   */
+  readonly canRollbackConversation: (input: {
+    readonly threadId: ThreadId;
+  }) => Effect.Effect<boolean, ProviderServiceError>;
 
   /**
    * Roll back provider conversation state by a number of turns.
@@ -98,6 +119,17 @@ export interface ProviderServiceShape {
     readonly threadId: ThreadId;
     readonly numTurns: number;
   }) => Effect.Effect<void, ProviderServiceError>;
+
+  /** Start provider-native context compaction; fails when the provider has none. */
+  readonly compactThread: (input: {
+    readonly threadId: ThreadId;
+  }) => Effect.Effect<void, ProviderServiceError>;
+
+  /** One call to the provider's native goal API; fails when the provider has none. */
+  readonly runGoalRequest: (input: {
+    readonly threadId: ThreadId;
+    readonly request: ProviderGoalRequest;
+  }) => Effect.Effect<ProviderGoalResponse, ProviderServiceError>;
 
   /**
    * Canonical provider runtime event stream.

@@ -113,4 +113,33 @@ describe("ChangedFilesTree", () => {
       }
     },
   );
+
+  it.each([
+    { allDirectoriesExpanded: true, expected: 'aria-expanded="true"' },
+    { allDirectoriesExpanded: false, expected: 'aria-expanded="false"' },
+  ])(
+    "announces folder state and gives rows a focus ring when expanded=$allDirectoriesExpanded",
+    ({ allDirectoriesExpanded, expected }) => {
+      const markup = renderToStaticMarkup(
+        <ChangedFilesTree
+          turnId={TurnId.makeUnsafe("turn-1")}
+          files={[
+            { path: "README.md", additions: 1, deletions: 0 },
+            { path: "src/a.ts", additions: 1, deletions: 0 },
+          ]}
+          allDirectoriesExpanded={allDirectoriesExpanded}
+          resolvedTheme="light"
+          onOpenTurnDiff={() => {}}
+        />,
+      );
+
+      expect(markup.match(/aria-expanded=/g)).toHaveLength(1);
+      expect(markup).toContain(expected);
+      const buttons = markup.match(/<button[^>]*>/g) ?? [];
+      expect(buttons.length).toBeGreaterThanOrEqual(2);
+      for (const button of buttons) {
+        expect(button).toContain("focus-visible:ring-2");
+      }
+    },
+  );
 });

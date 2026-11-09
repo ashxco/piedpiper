@@ -2,13 +2,41 @@
 
 import { Dialog as DialogPrimitive } from "@base-ui/react/dialog";
 import { XIcon } from "lucide-react";
+import { type ComponentProps, createContext, type ReactNode, use, useState } from "react";
 import { cn } from "~/lib/utils";
 import { Button } from "~/components/ui/button";
 import { ScrollArea } from "~/components/ui/scroll-area";
 
 const DialogCreateHandle = DialogPrimitive.createHandle;
 
-const Dialog = DialogPrimitive.Root;
+const ControlledOpenContext = createContext<boolean | undefined>(undefined);
+
+function RetainedWhileClosed({ open, children }: { open: boolean; children: ReactNode }) {
+  const controlledOpen = use(ControlledOpenContext);
+  const isOpen = open && controlledOpen !== false;
+  const [retained, setRetained] = useState(children);
+  if (isOpen && retained !== children) {
+    setRetained(children);
+  }
+  return isOpen ? children : retained;
+}
+
+// Keeps the last open content on screen while the exit animation plays.
+function renderRetainedPopup(props: ComponentProps<"div">, state: { open: boolean }) {
+  return (
+    <div {...props}>
+      <RetainedWhileClosed open={state.open}>{props.children}</RetainedWhileClosed>
+    </div>
+  );
+}
+
+function Dialog<Payload>(props: DialogPrimitive.Root.Props<Payload>) {
+  return (
+    <ControlledOpenContext value={props.open}>
+      <DialogPrimitive.Root {...props} />
+    </ControlledOpenContext>
+  );
+}
 
 const DialogPortal = DialogPrimitive.Portal;
 
@@ -37,7 +65,7 @@ function DialogViewport({ className, ...props }: DialogPrimitive.Viewport.Props)
   return (
     <DialogPrimitive.Viewport
       className={cn(
-        "fixed inset-0 z-50 grid grid-rows-[1fr_auto_3fr] justify-items-center p-4",
+        "fixed inset-0 z-50 grid grid-rows-[1fr_auto_3fr] justify-items-center p-4 [-webkit-app-region:no-drag]",
         className,
       )}
       data-slot="dialog-viewport"
@@ -70,6 +98,7 @@ function DialogPopup({
             className,
           )}
           data-slot="dialog-popup"
+          render={renderRetainedPopup}
           {...props}
         >
           {children}
@@ -126,7 +155,7 @@ function DialogFooter({
 function DialogTitle({ className, ...props }: DialogPrimitive.Title.Props) {
   return (
     <DialogPrimitive.Title
-      className={cn("font-heading font-semibold text-xl leading-none", className)}
+      className={cn("wrap-anywhere font-heading font-semibold text-xl leading-snug", className)}
       data-slot="dialog-title"
       {...props}
     />
@@ -163,6 +192,8 @@ function DialogPanel({
 }
 
 export {
+  ControlledOpenContext,
+  renderRetainedPopup,
   DialogCreateHandle,
   Dialog,
   DialogTrigger,

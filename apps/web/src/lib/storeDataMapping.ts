@@ -1,4 +1,6 @@
 import {
+  type ChatAttachment as ContractChatAttachment,
+  type ChatFileAttachment as ContractChatFileAttachment,
   type OrchestrationCheckpointSummary,
   type OrchestrationMessage,
   type OrchestrationProposedPlan,
@@ -7,16 +9,27 @@ import {
   type OrchestrationThread,
   type OrchestrationReadModel,
   type ProviderKind,
+  USAGE_LIMIT_RESUME_MESSAGE_ID_PREFIX,
 } from "@piedpiper/contracts";
 import { withResolvedModelSlug } from "@piedpiper/shared/model";
 
+import { appendAuthToken } from "../rpc/authToken";
 import {
   derivePendingApprovals,
   derivePendingUserInputs,
   findLatestProposedPlan,
   hasActionableProposedPlan,
+  isPendingUserInputAwaitingUser,
 } from "../session-logic";
-import { type ChatMessage, type Project, type SidebarThreadSummary, type Thread } from "../types";
+import {
+  type ChatAttachment,
+  type ChatMessage,
+  type Project,
+  type SidebarThreadSummary,
+  type Thread,
+} from "../types";
+import { deriveHasLiveBackgroundTask } from "./backgroundTaskLiveness";
+import { isRestartContinuationMessageId } from "./restartContinuation";
 
 function toLegacySessionStatus(
   status: OrchestrationSessionStatus,
@@ -67,7 +80,9 @@ function resolveWsHttpOrigin(): string {
 
 function toAttachmentPreviewUrl(rawUrl: string): string {
   if (rawUrl.startsWith("/")) {
-    return `${resolveWsHttpOrigin()}${rawUrl}`;
+    // `<img>` requests cannot set headers and desktop mode writes no auth
+    // cookie, so the token travels as a query parameter.
+    return appendAuthToken(`${resolveWsHttpOrigin()}${rawUrl}`);
   }
   return rawUrl;
 }
@@ -94,15 +109,25 @@ export function mapSession(session: OrchestrationSession): Thread["session"] {
   };
 }
 
-export function mapMessage(message: OrchestrationMessage): ChatMessage {
-  const attachments = message.attachments?.map((attachment) => ({
-    type: "image" as const,
+export function mapMessageAttachment(
+  attachment: ContractChatAttachment | ContractChatFileAttachment,
+): ChatAttachment {
+  const fields = {
     id: attachment.id,
     name: attachment.name,
     mimeType: attachment.mimeType,
     sizeBytes: attachment.sizeBytes,
+  };
+  if (attachment.type === "file") return { type: "file", ...fields };
+  return {
+    type: "image",
+    ...fields,
     previewUrl: toAttachmentPreviewUrl(attachmentPreviewRoutePath(attachment.id)),
-  }));
+  };
+}
+
+export function mapMessage(message: OrchestrationMessage): ChatMessage {
+  const attachments = message.attachments?.map(mapMessageAttachment);
 
   return {
     id: message.id,
@@ -141,6 +166,13 @@ export function mapTurnDiffSummary(
     checkpointTurnCount: checkpoint.checkpointTurnCount,
     checkpointRef: checkpoint.checkpointRef,
     files: checkpoint.files.map((file) => ({ ...file })),
+    ...(checkpoint.filesTotal === undefined ? {} : { filesTotal: checkpoint.filesTotal }),
+    ...(checkpoint.additionsTotal === undefined
+      ? {}
+      : { additionsTotal: checkpoint.additionsTotal }),
+    ...(checkpoint.deletionsTotal === undefined
+      ? {}
+      : { deletionsTotal: checkpoint.deletionsTotal }),
   };
 }
 
@@ -180,17 +212,28 @@ export function mapProject(project: OrchestrationReadModel["projects"][number]):
       : null,
     createdAt: project.createdAt,
     updatedAt: project.updatedAt,
+    archivedAt: project.archivedAt ?? null,
+    faviconPath: project.faviconPath ?? null,
     scripts: mapProjectScripts(project.scripts),
   };
 }
 
+/** False for what the server sent itself: a restart continuation or a usage-limit resume. */
+function isManualUserMessage(message: Thread["messages"][number]): boolean {
+  return (
+    !isRestartContinuationMessageId(message.id) &&
+    !message.id.startsWith(USAGE_LIMIT_RESUME_MESSAGE_ID_PREFIX)
+  );
+}
+
 export function getLatestUserMessageAt(
   messages: ReadonlyArray<Thread["messages"][number]>,
+  counts?: (message: Thread["messages"][number]) => boolean,
 ): string | null {
   let latestUserMessageAt: string | null = null;
 
   for (const message of messages) {
-    if (message.role !== "user") {
+    if (message.role !== "user" || counts?.(message) === false) {
       continue;
     }
     if (latestUserMessageAt === null || message.createdAt > latestUserMessageAt) {
@@ -201,7 +244,125 @@ export function getLatestUserMessageAt(
   return latestUserMessageAt;
 }
 
-export function buildSidebarThreadSummary(thread: Thread): SidebarThreadSummary {
+export interface SidebarThreadSummaryReuse {
+  previousThread: Thread;
+  previousSummary: SidebarThreadSummary;
+  /** Set when the update only upserted this message, so latestUserMessageAt can fold it in. */
+  upsertedMessageId?: Thread["messages"][number]["id"];
+}
+
+function foldLatestUserMessageAt(
+  previous: SidebarThreadSummaryReuse,
+  messages: Thread["messages"],
+  options?: {
+    readonly latest: string | null;
+    readonly counts: (message: Thread["messages"][number]) => boolean;
+  },
+): string | null | undefined {
+  const tail = messages.at(-1);
+  const previousMessages = previous.previousThread.messages;
+  if (
+    previous.upsertedMessageId === undefined ||
+    tail === undefined ||
+    tail.id !== previous.upsertedMessageId ||
+    // The retention cap evicted the head, which may have held the latest user message.
+    (previousMessages.length > 0 && previousMessages[0] !== messages[0])
+  ) {
+    return undefined;
+  }
+  const latest = options ? options.latest : previous.previousSummary.latestUserMessageAt;
+  return tail.role === "user" &&
+    (options?.counts(tail) ?? true) &&
+    (latest === null || tail.createdAt > latest)
+    ? tail.createdAt
+    : latest;
+}
+
+/**
+ * Build the sidebar projection of a thread. With `reuse`, derived fields whose
+ * source arrays are reference-identical to the previous thread are copied from
+ * the previous summary, so a streaming message delta never re-sorts activities
+ * or re-scans proposed plans.
+ */
+export function buildSidebarThreadSummary(
+  thread: Thread,
+  reuse?: SidebarThreadSummaryReuse,
+): SidebarThreadSummary {
+  const previous =
+    reuse !== undefined &&
+    reuse.previousThread.id === thread.id &&
+    reuse.previousSummary.id === thread.id
+      ? reuse
+      : undefined;
+  const foldedLatestUserMessageAt =
+    previous === undefined
+      ? undefined
+      : previous.previousThread.messages === thread.messages
+        ? previous.previousSummary.latestUserMessageAt
+        : foldLatestUserMessageAt(previous, thread.messages);
+  const latestUserMessageAt =
+    foldedLatestUserMessageAt === undefined
+      ? getLatestUserMessageAt(thread.messages)
+      : foldedLatestUserMessageAt;
+  const previousManualUserMessageAt =
+    previous === undefined
+      ? undefined
+      : previous.previousThread.messages === thread.messages
+        ? previous.previousSummary.latestManualUserMessageAt
+        : foldLatestUserMessageAt(previous, thread.messages, {
+            latest: previous.previousSummary.latestManualUserMessageAt ?? null,
+            counts: isManualUserMessage,
+          });
+  const latestManualUserMessageAt =
+    previousManualUserMessageAt === undefined
+      ? getLatestUserMessageAt(thread.messages, isManualUserMessage)
+      : previousManualUserMessageAt;
+  const reusePendingFlags =
+    previous !== undefined && previous.previousThread.activities === thread.activities;
+  const sessionIsWorking =
+    thread.session?.orchestrationStatus === "running" ||
+    thread.session?.orchestrationStatus === "starting";
+  // A settled session leaves a message-mode question waiting on the user, with the same activities.
+  const reusePendingInput =
+    reusePendingFlags &&
+    previous !== undefined &&
+    previous.previousThread.session?.orchestrationStatus === thread.session?.orchestrationStatus;
+  const hasPendingApprovals =
+    reusePendingFlags && previous !== undefined
+      ? previous.previousSummary.hasPendingApprovals
+      : derivePendingApprovals(thread.activities).length > 0;
+  const awaitedUserInputs =
+    reusePendingInput && previous !== undefined
+      ? null
+      : derivePendingUserInputs(thread.activities).filter((question) =>
+          isPendingUserInputAwaitingUser(question, sessionIsWorking),
+        );
+  const hasPendingUserInput =
+    awaitedUserInputs === null
+      ? (previous as SidebarThreadSummaryReuse).previousSummary.hasPendingUserInput
+      : awaitedUserInputs.length > 0;
+  const pendingUserInputAt =
+    awaitedUserInputs === null
+      ? (previous as SidebarThreadSummaryReuse).previousSummary.pendingUserInputAt
+      : awaitedUserInputs.reduce<string | null>(
+          (latest, question) =>
+            latest === null || question.createdAt > latest ? question.createdAt : latest,
+          null,
+        );
+  // The result depends on the provider, and a session can arrive after its activities.
+  const hasLiveBackgroundTask =
+    reusePendingFlags &&
+    previous !== undefined &&
+    previous.previousThread.session?.provider === thread.session?.provider
+      ? previous.previousSummary.hasLiveBackgroundTask === true
+      : deriveHasLiveBackgroundTask(thread.activities, thread.session?.provider, Date.now());
+  const latestTurnId = thread.latestTurn?.turnId ?? null;
+  const actionablePlan =
+    previous !== undefined &&
+    previous.previousThread.proposedPlans === thread.proposedPlans &&
+    (previous.previousThread.latestTurn?.turnId ?? null) === latestTurnId
+      ? previous.previousSummary.hasActionableProposedPlan
+      : hasActionableProposedPlan(findLatestProposedPlan(thread.proposedPlans, latestTurnId));
   return {
     id: thread.id,
     projectId: thread.projectId,
@@ -214,12 +375,13 @@ export function buildSidebarThreadSummary(thread: Thread): SidebarThreadSummary 
     latestTurn: thread.latestTurn,
     branch: thread.branch,
     worktreePath: thread.worktreePath,
-    latestUserMessageAt: getLatestUserMessageAt(thread.messages),
-    hasPendingApprovals: derivePendingApprovals(thread.activities).length > 0,
-    hasPendingUserInput: derivePendingUserInputs(thread.activities).length > 0,
-    hasActionableProposedPlan: hasActionableProposedPlan(
-      findLatestProposedPlan(thread.proposedPlans, thread.latestTurn?.turnId ?? null),
-    ),
+    latestUserMessageAt,
+    latestManualUserMessageAt,
+    hasPendingApprovals,
+    hasPendingUserInput,
+    pendingUserInputAt,
+    hasActionableProposedPlan: actionablePlan,
+    hasLiveBackgroundTask,
   };
 }
 
@@ -241,9 +403,12 @@ export function sidebarThreadSummariesEqual(
     left.branch === right.branch &&
     left.worktreePath === right.worktreePath &&
     left.latestUserMessageAt === right.latestUserMessageAt &&
+    left.latestManualUserMessageAt === right.latestManualUserMessageAt &&
     left.hasPendingApprovals === right.hasPendingApprovals &&
     left.hasPendingUserInput === right.hasPendingUserInput &&
-    left.hasActionableProposedPlan === right.hasActionableProposedPlan
+    left.pendingUserInputAt === right.pendingUserInputAt &&
+    left.hasActionableProposedPlan === right.hasActionableProposedPlan &&
+    left.hasLiveBackgroundTask === right.hasLiveBackgroundTask
   );
 }
 

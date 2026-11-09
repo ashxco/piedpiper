@@ -1,10 +1,17 @@
 import {
   type GitActionProgressEvent,
+  type GitCloneRepositoryEvent,
+  type GitCloneRepositoryInput,
+  type GitCreateWorktreeInput,
+  type GitCreateWorktreeProgressEvent,
+  type GitCreateWorktreeResult,
   type GitRunStackedActionInput,
   type GitRunStackedActionResult,
   type NativeApi,
   ORCHESTRATION_WS_METHODS,
   type ServerSettingsPatch,
+  type TerminalEvent,
+  type TerminalEventStreamItem,
   type ThreadId,
   type ToolInputPreviewEvent,
   WS_METHODS,
@@ -37,6 +44,13 @@ interface GitRunStackedActionOptions {
   readonly onProgress?: (event: GitActionProgressEvent) => void;
 }
 
+interface GitCreateWorktreeWithProgressOptions {
+  readonly onProgress?:
+    | ((progress: Extract<GitCreateWorktreeProgressEvent, { kind: "checkout_progress" }>) => void)
+    | undefined;
+  readonly signal?: AbortSignal | undefined;
+}
+
 export interface WsRpcClient {
   readonly dispose: () => Promise<void>;
   readonly terminal: {
@@ -46,38 +60,56 @@ export interface WsRpcClient {
     readonly clear: RpcUnaryMethod<typeof WS_METHODS.terminalClear>;
     readonly restart: RpcUnaryMethod<typeof WS_METHODS.terminalRestart>;
     readonly close: RpcUnaryMethod<typeof WS_METHODS.terminalClose>;
-    readonly onEvent: RpcStreamMethod<typeof WS_METHODS.subscribeTerminalEvents>;
+    readonly onEvent: (
+      listener: (event: TerminalEvent) => void,
+      options?: { readonly onSubscribed?: () => void },
+    ) => () => void;
+    readonly onMetadata: RpcStreamMethod<typeof WS_METHODS.subscribeTerminalMetadata>;
   };
   readonly projects: {
     readonly searchEntries: RpcUnaryMethod<typeof WS_METHODS.projectsSearchEntries>;
     readonly writeFile: RpcUnaryMethod<typeof WS_METHODS.projectsWriteFile>;
+    readonly readConfigFile: RpcUnaryMethod<typeof WS_METHODS.projectsReadConfigFile>;
     readonly checkDirectoryExists: RpcUnaryMethod<typeof WS_METHODS.projectsCheckDirectoryExists>;
+    readonly statPath: RpcUnaryMethod<typeof WS_METHODS.projectsStatPath>;
     readonly createDirectory: RpcUnaryMethod<typeof WS_METHODS.projectsCreateDirectory>;
-  };
-  readonly skills: {
-    readonly search: RpcUnaryMethod<typeof WS_METHODS.skillsSearch>;
-    readonly getDetail: RpcUnaryMethod<typeof WS_METHODS.skillsGetDetail>;
-    readonly uninstall: RpcUnaryMethod<typeof WS_METHODS.skillsUninstall>;
+    readonly browseDirectories: RpcUnaryMethod<typeof WS_METHODS.projectsBrowseDirectories>;
+    readonly scanAgentSessions: RpcUnaryNoArgMethod<typeof WS_METHODS.projectsScanAgentSessions>;
   };
   readonly shell: {
     readonly openInEditor: (input: {
       readonly cwd: Parameters<NativeApi["shell"]["openInEditor"]>[0];
       readonly editor: Parameters<NativeApi["shell"]["openInEditor"]>[1];
+      readonly reveal?: boolean;
     }) => ReturnType<NativeApi["shell"]["openInEditor"]>;
   };
   readonly git: {
     readonly pull: RpcUnaryMethod<typeof WS_METHODS.gitPull>;
     readonly status: RpcUnaryMethod<typeof WS_METHODS.gitStatus>;
+    readonly diffPreview: RpcUnaryMethod<typeof WS_METHODS.gitDiffPreview>;
     readonly runStackedAction: (
       input: GitRunStackedActionInput,
       options?: GitRunStackedActionOptions,
     ) => Promise<GitRunStackedActionResult>;
     readonly listBranches: RpcUnaryMethod<typeof WS_METHODS.gitListBranches>;
     readonly createWorktree: RpcUnaryMethod<typeof WS_METHODS.gitCreateWorktree>;
+    readonly createWorktreeWithProgress: (
+      input: GitCreateWorktreeInput,
+      options?: GitCreateWorktreeWithProgressOptions,
+    ) => Promise<GitCreateWorktreeResult>;
     readonly removeWorktree: RpcUnaryMethod<typeof WS_METHODS.gitRemoveWorktree>;
     readonly createBranch: RpcUnaryMethod<typeof WS_METHODS.gitCreateBranch>;
     readonly checkout: RpcUnaryMethod<typeof WS_METHODS.gitCheckout>;
     readonly init: RpcUnaryMethod<typeof WS_METHODS.gitInit>;
+    readonly cloneRepository: (
+      input: GitCloneRepositoryInput,
+      options?: {
+        readonly onProgress?: (
+          progress: Extract<GitCloneRepositoryEvent, { kind: "progress" }>,
+        ) => void;
+        readonly signal?: AbortSignal;
+      },
+    ) => Promise<{ readonly destinationPath: string }>;
     readonly addRemote: RpcUnaryMethod<typeof WS_METHODS.gitAddRemote>;
     readonly gitHubCliStatus: RpcUnaryMethod<typeof WS_METHODS.gitGitHubCliStatus>;
     readonly gitHubCreateRepo: RpcUnaryMethod<typeof WS_METHODS.gitGitHubCreateRepo>;
@@ -89,11 +121,19 @@ export interface WsRpcClient {
   readonly server: {
     readonly getConfig: RpcUnaryNoArgMethod<typeof WS_METHODS.serverGetConfig>;
     readonly refreshProviders: RpcUnaryNoArgMethod<typeof WS_METHODS.serverRefreshProviders>;
+    readonly listProviderSlashCommands: RpcUnaryMethod<typeof WS_METHODS.providerListSlashCommands>;
     readonly upsertKeybinding: RpcUnaryMethod<typeof WS_METHODS.serverUpsertKeybinding>;
+    readonly removeKeybinding: RpcUnaryMethod<typeof WS_METHODS.serverRemoveKeybinding>;
     readonly getSettings: RpcUnaryNoArgMethod<typeof WS_METHODS.serverGetSettings>;
     readonly updateSettings: (
       patch: ServerSettingsPatch,
     ) => ReturnType<RpcUnaryMethod<typeof WS_METHODS.serverUpdateSettings>>;
+    readonly getTraceDiagnostics: RpcUnaryNoArgMethod<typeof WS_METHODS.serverGetTraceDiagnostics>;
+    readonly getProcessDiagnostics: RpcUnaryNoArgMethod<
+      typeof WS_METHODS.serverGetProcessDiagnostics
+    >;
+    readonly signalProcess: RpcUnaryMethod<typeof WS_METHODS.serverSignalProcess>;
+    readonly checkOtlpEndpoint: RpcUnaryMethod<typeof WS_METHODS.serverCheckOtlpEndpoint>;
     readonly subscribeConfig: RpcStreamMethod<typeof WS_METHODS.subscribeServerConfig>;
     readonly subscribeLifecycle: RpcStreamMethod<typeof WS_METHODS.subscribeServerLifecycle>;
   };
@@ -102,6 +142,9 @@ export interface WsRpcClient {
     readonly dispatchCommand: RpcUnaryMethod<typeof ORCHESTRATION_WS_METHODS.dispatchCommand>;
     readonly getTurnDiff: RpcUnaryMethod<typeof ORCHESTRATION_WS_METHODS.getTurnDiff>;
     readonly getFullThreadDiff: RpcUnaryMethod<typeof ORCHESTRATION_WS_METHODS.getFullThreadDiff>;
+    readonly getTurnDiffFileContents: RpcUnaryMethod<
+      typeof ORCHESTRATION_WS_METHODS.getTurnDiffFileContents
+    >;
     readonly replayEvents: RpcUnaryMethod<typeof ORCHESTRATION_WS_METHODS.replayEvents>;
     readonly onDomainEvent: RpcStreamMethod<typeof WS_METHODS.subscribeOrchestrationDomainEvents>;
     readonly onToolInputPreview: (
@@ -136,25 +179,37 @@ export function createWsRpcClient(transport = new WsTransport()): WsRpcClient {
       clear: (input) => transport.request((client) => client[WS_METHODS.terminalClear](input)),
       restart: (input) => transport.request((client) => client[WS_METHODS.terminalRestart](input)),
       close: (input) => transport.request((client) => client[WS_METHODS.terminalClose](input)),
-      onEvent: (listener) =>
-        transport.subscribe((client) => client[WS_METHODS.subscribeTerminalEvents]({}), listener),
+      onEvent: (listener, options) =>
+        transport.subscribe<TerminalEventStreamItem>(
+          (client) => client[WS_METHODS.subscribeTerminalEvents]({}),
+          (item) => {
+            if (item.type === "subscribed") {
+              options?.onSubscribed?.();
+            } else {
+              listener(item);
+            }
+          },
+        ),
+      onMetadata: (listener) =>
+        transport.subscribe((client) => client[WS_METHODS.subscribeTerminalMetadata]({}), listener),
     },
     projects: {
       searchEntries: (input) =>
         transport.request((client) => client[WS_METHODS.projectsSearchEntries](input)),
       writeFile: (input) =>
         transport.request((client) => client[WS_METHODS.projectsWriteFile](input)),
+      readConfigFile: (input) =>
+        transport.request((client) => client[WS_METHODS.projectsReadConfigFile](input)),
       checkDirectoryExists: (input) =>
         transport.request((client) => client[WS_METHODS.projectsCheckDirectoryExists](input)),
+      statPath: (input) =>
+        transport.request((client) => client[WS_METHODS.projectsStatPath](input)),
       createDirectory: (input) =>
         transport.request((client) => client[WS_METHODS.projectsCreateDirectory](input)),
-    },
-    skills: {
-      search: (input) => transport.request((client) => client[WS_METHODS.skillsSearch](input)),
-      getDetail: (input) =>
-        transport.request((client) => client[WS_METHODS.skillsGetDetail](input)),
-      uninstall: (input) =>
-        transport.request((client) => client[WS_METHODS.skillsUninstall](input)),
+      browseDirectories: (input) =>
+        transport.request((client) => client[WS_METHODS.projectsBrowseDirectories](input)),
+      scanAgentSessions: () =>
+        transport.request((client) => client[WS_METHODS.projectsScanAgentSessions]({})),
     },
     shell: {
       openInEditor: (input) =>
@@ -163,6 +218,8 @@ export function createWsRpcClient(transport = new WsTransport()): WsRpcClient {
     git: {
       pull: (input) => transport.request((client) => client[WS_METHODS.gitPull](input)),
       status: (input) => transport.request((client) => client[WS_METHODS.gitStatus](input)),
+      diffPreview: (input) =>
+        transport.request((client) => client[WS_METHODS.gitDiffPreview](input)),
       runStackedAction: async (input, options) => {
         let result: GitRunStackedActionResult | null = null;
 
@@ -186,12 +243,60 @@ export function createWsRpcClient(transport = new WsTransport()): WsRpcClient {
         transport.request((client) => client[WS_METHODS.gitListBranches](input)),
       createWorktree: (input) =>
         transport.request((client) => client[WS_METHODS.gitCreateWorktree](input)),
+      createWorktreeWithProgress: async (input, options) => {
+        let result: GitCreateWorktreeResult | null = null;
+
+        try {
+          await transport.requestStream(
+            (client) => client[WS_METHODS.gitCreateWorktreeWithProgress](input),
+            (event) => {
+              if (event.kind === "checkout_progress") {
+                options?.onProgress?.(event);
+              } else {
+                result = event.result;
+              }
+            },
+            { signal: options?.signal },
+          );
+        } catch (error) {
+          // A received `finished` wins over a late abort, or the worktree and its branch are orphaned.
+          if (result) return result;
+          throw error;
+        }
+
+        if (result) {
+          return result;
+        }
+
+        throw new Error("Worktree creation stream completed without a final result.");
+      },
       removeWorktree: (input) =>
         transport.request((client) => client[WS_METHODS.gitRemoveWorktree](input)),
       createBranch: (input) =>
         transport.request((client) => client[WS_METHODS.gitCreateBranch](input)),
       checkout: (input) => transport.request((client) => client[WS_METHODS.gitCheckout](input)),
       init: (input) => transport.request((client) => client[WS_METHODS.gitInit](input)),
+      cloneRepository: async (input, options) => {
+        let destinationPath: string | null = null;
+
+        await transport.requestStream(
+          (client) => client[WS_METHODS.gitCloneRepository](input),
+          (event) => {
+            if (event.kind === "finished") {
+              destinationPath = event.destinationPath;
+            } else {
+              options?.onProgress?.(event);
+            }
+          },
+          options?.signal ? { signal: options.signal } : undefined,
+        );
+
+        if (destinationPath === null) {
+          throw new Error("Clone stream completed without a final result.");
+        }
+
+        return { destinationPath };
+      },
       addRemote: (input) => transport.request((client) => client[WS_METHODS.gitAddRemote](input)),
       gitHubCliStatus: (input) =>
         transport.request((client) => client[WS_METHODS.gitGitHubCliStatus](input)),
@@ -206,11 +311,23 @@ export function createWsRpcClient(transport = new WsTransport()): WsRpcClient {
       getConfig: () => transport.request((client) => client[WS_METHODS.serverGetConfig]({})),
       refreshProviders: () =>
         transport.request((client) => client[WS_METHODS.serverRefreshProviders]({})),
+      listProviderSlashCommands: (input) =>
+        transport.request((client) => client[WS_METHODS.providerListSlashCommands](input)),
       upsertKeybinding: (input) =>
         transport.request((client) => client[WS_METHODS.serverUpsertKeybinding](input)),
+      removeKeybinding: (input) =>
+        transport.request((client) => client[WS_METHODS.serverRemoveKeybinding](input)),
       getSettings: () => transport.request((client) => client[WS_METHODS.serverGetSettings]({})),
       updateSettings: (patch) =>
         transport.request((client) => client[WS_METHODS.serverUpdateSettings]({ patch })),
+      getTraceDiagnostics: () =>
+        transport.request((client) => client[WS_METHODS.serverGetTraceDiagnostics]({})),
+      getProcessDiagnostics: () =>
+        transport.request((client) => client[WS_METHODS.serverGetProcessDiagnostics]({})),
+      signalProcess: (input) =>
+        transport.request((client) => client[WS_METHODS.serverSignalProcess](input)),
+      checkOtlpEndpoint: (input) =>
+        transport.request((client) => client[WS_METHODS.serverCheckOtlpEndpoint](input)),
       subscribeConfig: (listener) =>
         transport.subscribe((client) => client[WS_METHODS.subscribeServerConfig]({}), listener),
       subscribeLifecycle: (listener) =>
@@ -225,6 +342,10 @@ export function createWsRpcClient(transport = new WsTransport()): WsRpcClient {
         transport.request((client) => client[ORCHESTRATION_WS_METHODS.getTurnDiff](input)),
       getFullThreadDiff: (input) =>
         transport.request((client) => client[ORCHESTRATION_WS_METHODS.getFullThreadDiff](input)),
+      getTurnDiffFileContents: (input) =>
+        transport.request((client) =>
+          client[ORCHESTRATION_WS_METHODS.getTurnDiffFileContents](input),
+        ),
       replayEvents: (input) =>
         transport
           .request((client) => client[ORCHESTRATION_WS_METHODS.replayEvents](input))

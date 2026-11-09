@@ -6,7 +6,13 @@
  *
  * @module ProjectionProjectRepository
  */
-import { IsoDateTime, ModelSelection, ProjectId, ProjectScript } from "@piedpiper/contracts";
+import {
+  IsoDateTime,
+  ModelSelection,
+  ProjectFaviconPath,
+  ProjectId,
+  ProjectScript,
+} from "@piedpiper/contracts";
 import { Option, Schema, ServiceMap } from "effect";
 import type { Effect } from "effect";
 
@@ -20,6 +26,8 @@ export const ProjectionProject = Schema.Struct({
   scripts: Schema.Array(ProjectScript),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
+  archivedAt: Schema.NullOr(IsoDateTime),
+  faviconPath: Schema.NullOr(ProjectFaviconPath),
   deletedAt: Schema.NullOr(IsoDateTime),
 });
 export type ProjectionProject = typeof ProjectionProject.Type;

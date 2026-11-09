@@ -2,8 +2,9 @@
  * KeyedCoalescingWorker - A keyed worker that keeps only the latest value per key.
  *
  * Enqueues for an active or already-queued key are merged atomically instead of
- * creating duplicate queued items. `drainKey()` resolves only when that key has
- * no queued, pending, or active work left.
+ * creating duplicate queued items. Each batch yields to other queued keys before
+ * processing newer updates. `drainKey()` resolves only when that key has no
+ * queued, pending, or active work left.
  *
  * @module KeyedCoalescingWorker
  */
@@ -33,28 +34,8 @@ export const makeKeyedCoalescingWorker = <K, V, E, R>(options: {
       activeKeys: new Set(),
     });
 
-    const processKey = (key: K, value: V): Effect.Effect<void, E, R> =>
-      options.process(key, value).pipe(
-        Effect.flatMap(() =>
-          TxRef.modify(stateRef, (state) => {
-            const nextValue = state.latestByKey.get(key);
-            if (nextValue === undefined) {
-              const activeKeys = new Set(state.activeKeys);
-              activeKeys.delete(key);
-              return [null, { ...state, activeKeys }] as const;
-            }
-
-            const latestByKey = new Map(state.latestByKey);
-            latestByKey.delete(key);
-            return [nextValue, { ...state, latestByKey }] as const;
-          }).pipe(Effect.tx),
-        ),
-        Effect.flatMap((nextValue) =>
-          nextValue === null ? Effect.void : processKey(key, nextValue),
-        ),
-      );
-
-    const cleanupFailedKey = (key: K): Effect.Effect<void> =>
+    // Return a dirty key to the queue tail after each batch so a busy key cannot starve others.
+    const completeKey = (key: K): Effect.Effect<void> =>
       TxRef.modify(stateRef, (state) => {
         const activeKeys = new Set(state.activeKeys);
         activeKeys.delete(key);
@@ -67,10 +48,11 @@ export const makeKeyedCoalescingWorker = <K, V, E, R>(options: {
 
         return [false, { ...state, activeKeys }] as const;
       }).pipe(
-        Effect.tx,
         Effect.flatMap((shouldRequeue) =>
           shouldRequeue ? TxQueue.offer(queue, key) : Effect.void,
         ),
+        Effect.tx,
+        Effect.asVoid,
       );
 
     yield* TxQueue.take(queue).pipe(
@@ -98,8 +80,9 @@ export const makeKeyedCoalescingWorker = <K, V, E, R>(options: {
       Effect.flatMap((item) =>
         item === null
           ? Effect.void
-          : processKey(item.key, item.value).pipe(
-              Effect.catchCause(() => cleanupFailedKey(item.key)),
+          : options.process(item.key, item.value).pipe(
+              Effect.catchCause(() => Effect.void),
+              Effect.ensuring(completeKey(item.key)),
             ),
       ),
       Effect.forever,

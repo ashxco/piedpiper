@@ -8,6 +8,7 @@ import {
   hasContextWindowOption,
   hasEffortLevel,
   isClaudeUltrathinkPrompt,
+  isLegacyBuiltInModel,
   normalizeClaudeModelOptionsWithCapabilities,
   normalizeCodexModelOptionsWithCapabilities,
   normalizeModelSlug,
@@ -49,7 +50,8 @@ const claudeCaps: ModelCapabilities = {
 describe("normalizeModelSlug", () => {
   it("maps known aliases to canonical slugs", () => {
     expect(normalizeModelSlug("5.3")).toBe("gpt-5.3-codex");
-    expect(normalizeModelSlug("sonnet", "claudeAgent")).toBe("claude-sonnet-4-6");
+    expect(normalizeModelSlug("sonnet", "claudeAgent")).toBe("claude-sonnet-5-5");
+    expect(normalizeModelSlug("sonnet-4.6", "claudeAgent")).toBe("claude-sonnet-4-6");
   });
 
   it("returns null for empty or missing values", () => {
@@ -78,11 +80,11 @@ describe("resolveSelectableModel", () => {
   it("resolves exact slugs, labels, and aliases", () => {
     const options = [
       { slug: "gpt-5.3-codex", name: "GPT-5.3 Codex" },
-      { slug: "claude-sonnet-4-6", name: "Claude Sonnet 4.6" },
+      { slug: "claude-sonnet-5-5", name: "Claude Sonnet 5.5" },
     ];
     expect(resolveSelectableModel("codex", "gpt-5.3-codex", options)).toBe("gpt-5.3-codex");
     expect(resolveSelectableModel("codex", "gpt-5.3 codex", options)).toBe("gpt-5.3-codex");
-    expect(resolveSelectableModel("claudeAgent", "sonnet", options)).toBe("claude-sonnet-4-6");
+    expect(resolveSelectableModel("claudeAgent", "sonnet", options)).toBe("claude-sonnet-5-5");
   });
 });
 
@@ -242,6 +244,116 @@ describe("normalize*ModelOptionsWithCapabilities", () => {
     });
   });
 
+  describe("Codex service tier", () => {
+    const tieredCaps: ModelCapabilities = {
+      ...codexCaps,
+      serviceTierOptions: [
+        { value: "default", label: "Standard", isDefault: true },
+        { value: "fast", label: "Fast" },
+        { value: "flex", label: "Flex" },
+      ],
+    };
+
+    it("keeps a tier the model offers", () => {
+      expect(
+        normalizeCodexModelOptionsWithCapabilities(tieredCaps, { serviceTier: "flex" }),
+      ).toEqual({ reasoningEffort: "high", serviceTier: "flex" });
+    });
+
+    it("treats priority as fast and default as the Standard row", () => {
+      for (const serviceTier of ["priority", "default"]) {
+        expect(
+          normalizeCodexModelOptionsWithCapabilities(tieredCaps, { serviceTier })?.serviceTier,
+        ).toBe(serviceTier);
+      }
+    });
+
+    it("turns a tier the model lacks into an explicit Standard, which later turns also keep", () => {
+      expect(
+        normalizeCodexModelOptionsWithCapabilities(tieredCaps, { serviceTier: "ultrafast" }),
+      ).toEqual({ reasoningEffort: "high", serviceTier: null });
+    });
+
+    it("keeps an explicit Standard", () => {
+      expect(
+        normalizeCodexModelOptionsWithCapabilities(tieredCaps, { serviceTier: null })?.serviceTier,
+      ).toBeNull();
+    });
+
+    it("keeps only Standard and fast on a model known by the fast boolean alone", () => {
+      const normalize = (serviceTier: string | null) =>
+        normalizeCodexModelOptionsWithCapabilities(codexCaps, { serviceTier })?.serviceTier;
+      expect(normalize(null)).toBeNull();
+      expect(normalize("fast")).toBe("fast");
+      expect(normalize("flex")).toBeNull();
+    });
+
+    it("resets a stored tier on a model without fast or a tier list", () => {
+      const caps = { ...codexCaps, supportsFastMode: false };
+      expect(
+        normalizeCodexModelOptionsWithCapabilities(caps, { serviceTier: "fast" })?.serviceTier,
+      ).toBeNull();
+      expect(
+        normalizeCodexModelOptionsWithCapabilities(caps, { serviceTier: null })?.serviceTier,
+      ).toBeUndefined();
+    });
+
+    it("resets the tier when the older fastMode flag reaches a model without Fast", () => {
+      const withoutFast = { ...codexCaps, supportsFastMode: false };
+      expect(normalizeCodexModelOptionsWithCapabilities(withoutFast, { fastMode: true })).toEqual({
+        reasoningEffort: "high",
+        serviceTier: null,
+      });
+      const ultrafastOnly: ModelCapabilities = {
+        ...withoutFast,
+        serviceTierOptions: [
+          { value: "default", label: "Standard", isDefault: true },
+          { value: "ultrafast", label: "Ultrafast" },
+        ],
+      };
+      expect(normalizeCodexModelOptionsWithCapabilities(ultrafastOnly, { fastMode: true })).toEqual(
+        { reasoningEffort: "high", serviceTier: null },
+      );
+    });
+
+    it("keeps a chosen tier over the older fastMode flag on a model without Fast", () => {
+      const ultrafastOnly: ModelCapabilities = {
+        ...codexCaps,
+        supportsFastMode: false,
+        serviceTierOptions: [{ value: "ultrafast", label: "Ultrafast" }],
+      };
+      expect(
+        normalizeCodexModelOptionsWithCapabilities(ultrafastOnly, {
+          fastMode: true,
+          serviceTier: "ultrafast",
+        }),
+      ).toEqual({ reasoningEffort: "high", serviceTier: "ultrafast" });
+    });
+
+    it("does not add a tier for an unset or false fastMode on a model without Fast", () => {
+      const withoutFast = { ...codexCaps, supportsFastMode: false };
+      expect(normalizeCodexModelOptionsWithCapabilities(withoutFast, { fastMode: false })).toEqual({
+        reasoningEffort: "high",
+      });
+      expect(normalizeCodexModelOptionsWithCapabilities(withoutFast, {})).toEqual({
+        reasoningEffort: "high",
+      });
+    });
+
+    it("leaves the older fastMode option unchanged", () => {
+      expect(normalizeCodexModelOptionsWithCapabilities(codexCaps, { fastMode: true })).toEqual({
+        reasoningEffort: "high",
+        fastMode: true,
+      });
+      expect(
+        normalizeCodexModelOptionsWithCapabilities(tieredCaps, {
+          fastMode: false,
+          serviceTier: "ultrafast",
+        }),
+      ).toEqual({ reasoningEffort: "high", fastMode: false, serviceTier: null });
+    });
+  });
+
   it("preserves the default Claude context window explicitly", () => {
     expect(
       normalizeClaudeModelOptionsWithCapabilities(
@@ -280,5 +392,39 @@ describe("normalize*ModelOptionsWithCapabilities", () => {
     ).toEqual({
       thinking: true,
     });
+  });
+
+  it("keeps ultracode, on or off, only for models that support it", () => {
+    const unsupported = { ...claudeCaps, contextWindowOptions: [] };
+    const supported = { ...unsupported, supportsUltracode: true };
+    expect(
+      normalizeClaudeModelOptionsWithCapabilities(supported, { effort: "high", ultracode: true }),
+    ).toEqual({ effort: "high", ultracode: true });
+    expect(
+      normalizeClaudeModelOptionsWithCapabilities(supported, { effort: "high", ultracode: false }),
+    ).toEqual({ effort: "high", ultracode: false });
+    expect(
+      normalizeClaudeModelOptionsWithCapabilities(unsupported, { effort: "high", ultracode: true }),
+    ).toEqual({ effort: "high" });
+  });
+});
+
+describe("isLegacyBuiltInModel", () => {
+  it("keeps only the current model families out of the legacy group", () => {
+    expect(
+      ["claude-opus-5-5", "claude-fable-5-1", "claude-opus-4-6", "claude-haiku-4-5"].map((slug) =>
+        isLegacyBuiltInModel("claudeAgent", slug),
+      ),
+    ).toEqual([false, false, true, true]);
+    expect(
+      ["gpt-6-astra", "gpt-6.1-sol", "gpt-5.4", "gpt-5.3-codex"].map((slug) =>
+        isLegacyBuiltInModel("codex", slug),
+      ),
+    ).toEqual([false, false, true, true]);
+  });
+
+  it("keeps models a provider lists that Pied Piper does not know yet in the main list", () => {
+    expect(isLegacyBuiltInModel("codex", "gpt-6.2-sol")).toBe(false);
+    expect(isLegacyBuiltInModel("claudeAgent", "claude-opus-5-6")).toBe(false);
   });
 });

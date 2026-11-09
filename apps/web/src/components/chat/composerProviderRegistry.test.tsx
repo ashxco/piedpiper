@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ServerProviderModel } from "@piedpiper/contracts";
 import { getComposerProviderState } from "./composerProviderRegistry";
+import { readPromptUltrathink } from "./TraitsPicker";
 
 const CODEX_MODELS: ReadonlyArray<ServerProviderModel> = [
   {
@@ -415,5 +416,14 @@ describe("getComposerProviderState", () => {
     });
 
     expect(state.modelOptionsForDispatch).not.toHaveProperty("fastMode");
+  });
+});
+
+describe("readPromptUltrathink", () => {
+  it("tells the Ultrathink prefix apart from the word in the body", () => {
+    expect(readPromptUltrathink("Fix the bug")).toBe("none");
+    expect(readPromptUltrathink("Ultrathink:\nFix the bug")).toBe("prefix");
+    expect(readPromptUltrathink("please ultrathink about the bug")).toBe("body");
+    expect(readPromptUltrathink("Ultrathink:\nultrathink harder")).toBe("body");
   });
 });

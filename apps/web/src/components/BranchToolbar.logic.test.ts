@@ -1,11 +1,21 @@
 import type { GitBranch } from "@piedpiper/contracts";
 import { describe, expect, it } from "vitest";
 import {
+  branchMismatchKey,
   dedupeRemoteBranchesWithLocalMatches,
+  dismissBranchMismatchForSession,
+  isBranchMismatchDismissedForSession,
+  isContextMenuPress,
+  resolveLocalCheckoutBranchMismatch,
+  resolveThreadBranchUpdateForNextTurn,
+  shouldShowBranchMismatchNotice,
   deriveLocalBranchNameFromRemoteRef,
+  isSameOrAncestorPath,
   resolveBranchSelectionTarget,
   resolveDraftEnvModeAfterBranchChange,
   resolveBranchToolbarValue,
+  resolveWorktreeBaseBranchSeed,
+  sanitizeNewRefName,
   shouldIncludeBranchPickerItem,
 } from "./BranchToolbar.logic";
 
@@ -199,7 +209,63 @@ describe("dedupeRemoteBranchesWithLocalMatches", () => {
   });
 });
 
+describe("resolveWorktreeBaseBranchSeed", () => {
+  const input = {
+    branchQuery: "",
+    branches: [
+      { name: "feature", isDefault: false },
+      { name: "main", isDefault: true },
+    ],
+    currentGitBranch: "feature",
+    isPending: false,
+    isPlaceholderData: false,
+  };
+
+  it("prefers the default branch over the checked-out one", () => {
+    expect(resolveWorktreeBaseBranchSeed(input)).toBe("main");
+  });
+
+  it("uses a remote-only default ref", () => {
+    expect(
+      resolveWorktreeBaseBranchSeed({
+        ...input,
+        branches: [{ name: "origin/main", isDefault: true }],
+      }),
+    ).toBe("origin/main");
+  });
+
+  it("stays on the current branch when no default is known or the list failed", () => {
+    expect(
+      resolveWorktreeBaseBranchSeed({
+        ...input,
+        branches: [{ name: "feature", isDefault: false }],
+      }),
+    ).toBe("feature");
+    expect(resolveWorktreeBaseBranchSeed({ ...input, branches: [] })).toBe("feature");
+  });
+
+  it("waits while the unfiltered list is unknown", () => {
+    expect(resolveWorktreeBaseBranchSeed({ ...input, isPending: true })).toBeNull();
+    expect(resolveWorktreeBaseBranchSeed({ ...input, isPlaceholderData: true })).toBeNull();
+    expect(resolveWorktreeBaseBranchSeed({ ...input, branchQuery: "fea" })).toBeNull();
+  });
+});
+
 describe("resolveBranchSelectionTarget", () => {
+  it("stays in the worktree when picking a remote default ref", () => {
+    expect(
+      resolveBranchSelectionTarget({
+        activeProjectCwd: "/repo",
+        activeWorktreePath: "/repo/.piedpiper/worktrees/feature-a",
+        branch: { isDefault: true, isRemote: true, worktreePath: null },
+      }),
+    ).toEqual({
+      checkoutCwd: "/repo/.piedpiper/worktrees/feature-a",
+      nextWorktreePath: "/repo/.piedpiper/worktrees/feature-a",
+      reuseExistingWorktree: false,
+    });
+  });
+
   it("reuses an existing secondary worktree for the selected branch", () => {
     expect(
       resolveBranchSelectionTarget({
@@ -269,6 +335,95 @@ describe("resolveBranchSelectionTarget", () => {
   });
 });
 
+describe("resolveBranchSelectionTarget in a subfolder project", () => {
+  it("keeps the thread in the project folder when picking the main checkout's branch", () => {
+    expect(
+      resolveBranchSelectionTarget({
+        activeProjectCwd: "/repo/packages/app",
+        activeWorktreePath: null,
+        branch: { isDefault: false, worktreePath: "/repo" },
+      }),
+    ).toEqual({
+      checkoutCwd: "/repo",
+      nextWorktreePath: null,
+      reuseExistingWorktree: true,
+    });
+  });
+
+  it("still moves into a real linked worktree", () => {
+    expect(
+      resolveBranchSelectionTarget({
+        activeProjectCwd: "/repo/packages/app",
+        activeWorktreePath: null,
+        branch: { isDefault: false, worktreePath: "/repo/.piedpiper/worktrees/feature-b" },
+      }),
+    ).toEqual({
+      checkoutCwd: "/repo/.piedpiper/worktrees/feature-b",
+      nextWorktreePath: "/repo/.piedpiper/worktrees/feature-b",
+      reuseExistingWorktree: true,
+    });
+  });
+});
+
+describe("resolveBranchSelectionTarget with a known checkout root", () => {
+  it("moves to the main checkout when the project lives inside a linked worktree", () => {
+    expect(
+      resolveBranchSelectionTarget({
+        activeProjectCwd: "/repo/nested-checkout/packages/app",
+        activeProjectCheckoutRoot: "/repo/nested-checkout",
+        activeWorktreePath: null,
+        branch: { isDefault: true, worktreePath: "/repo" },
+      }),
+    ).toEqual({
+      checkoutCwd: "/repo",
+      nextWorktreePath: "/repo",
+      reuseExistingWorktree: true,
+    });
+  });
+
+  it("treats the project's own checkout root as home, falling back to the ancestor check", () => {
+    for (const [activeProjectCwd, activeWorktreePath, activeProjectCheckoutRoot] of [
+      ["/repo", "/repo/.piedpiper/worktrees/feature-a", "/repo"],
+      ["/repo/packages/app", "/repo/.piedpiper/worktrees/feature-a", "/repo"],
+      ["/repo/packages/app", null, "/repo/"],
+      ["/repo/packages/app", "/repo/.piedpiper/worktrees/feature-a", undefined],
+      ["/repo/packages/app", null, undefined],
+    ] as const) {
+      expect(
+        resolveBranchSelectionTarget({
+          activeProjectCwd,
+          activeProjectCheckoutRoot,
+          activeWorktreePath,
+          branch: { isDefault: true, worktreePath: "/repo" },
+        }),
+      ).toEqual({
+        checkoutCwd: "/repo",
+        nextWorktreePath: null,
+        reuseExistingWorktree: true,
+      });
+    }
+  });
+});
+
+describe("isSameOrAncestorPath", () => {
+  it("matches the same path and parent directories", () => {
+    expect(isSameOrAncestorPath("/repo", "/repo")).toBe(true);
+    expect(isSameOrAncestorPath("/repo/", "/repo/packages/app")).toBe(true);
+    expect(isSameOrAncestorPath("/", "/repo")).toBe(true);
+  });
+
+  it("rejects siblings that share a name prefix and descendants", () => {
+    expect(isSameOrAncestorPath("/repo", "/repository/app")).toBe(false);
+    expect(isSameOrAncestorPath("/repo/packages/app", "/repo")).toBe(false);
+  });
+
+  it("normalizes Windows separators and drive letter casing", () => {
+    expect(isSameOrAncestorPath("C:\\Repo", "c:/Repo/packages/app")).toBe(true);
+    expect(isSameOrAncestorPath("C:\\Repo\\", "C:\\Repo")).toBe(true);
+    expect(isSameOrAncestorPath("C:\\Repo", "D:\\Repo\\app")).toBe(false);
+  });
+});
+
 describe("shouldIncludeBranchPickerItem", () => {
   it("keeps the synthetic checkout PR item visible for gh pr checkout input", () => {
     expect(
@@ -301,5 +456,165 @@ describe("shouldIncludeBranchPickerItem", () => {
         checkoutPullRequestItemValue: "__checkout_pull_request__:1359",
       }),
     ).toBe(false);
+  });
+});
+
+describe("shouldIncludeBranchPickerItem with a spaced query", () => {
+  const base = { createBranchItemValue: null, checkoutPullRequestItemValue: null };
+
+  it("surfaces an existing ref matching the sanitized query", () => {
+    expect(
+      shouldIncludeBranchPickerItem({
+        ...base,
+        itemValue: "new-branch",
+        normalizedQuery: "new branch",
+      }),
+    ).toBe(true);
+  });
+
+  it("surfaces a ref from a partial query containing a space", () => {
+    expect(
+      shouldIncludeBranchPickerItem({
+        ...base,
+        itemValue: "hello-world",
+        normalizedQuery: "hello w",
+      }),
+    ).toBe(true);
+  });
+
+  it("excludes refs matching neither the raw nor the sanitized query", () => {
+    expect(
+      shouldIncludeBranchPickerItem({ ...base, itemValue: "main", normalizedQuery: "new branch" }),
+    ).toBe(false);
+  });
+});
+
+describe("sanitizeNewRefName", () => {
+  it("replaces whitespace runs with a single dash and trims the ends", () => {
+    expect(sanitizeNewRefName("fix login bug")).toBe("fix-login-bug");
+    expect(sanitizeNewRefName("new   branch")).toBe("new-branch");
+    expect(sanitizeNewRefName("  new branch  ")).toBe("new-branch");
+    expect(sanitizeNewRefName("new\tbranch")).toBe("new-branch");
+  });
+
+  it("preserves non-ASCII whitespace that git accepts", () => {
+    expect(sanitizeNewRefName("new\u00a0branch")).toBe("new\u00a0branch");
+  });
+
+  it("keeps slashes, case and dashes the user typed", () => {
+    expect(sanitizeNewRefName("Feature/New Thing")).toBe("Feature/New-Thing");
+    expect(sanitizeNewRefName("new - branch")).toBe("new---branch");
+    expect(sanitizeNewRefName("foo--bar")).toBe("foo--bar");
+  });
+
+  it("returns an empty string for whitespace-only input", () => {
+    expect(sanitizeNewRefName("   ")).toBe("");
+  });
+});
+
+describe("resolveLocalCheckoutBranchMismatch", () => {
+  const base = {
+    effectiveEnvMode: "local" as const,
+    activeWorktreePath: null,
+    activeThreadBranch: "feature/a",
+    currentGitBranch: "main",
+  };
+
+  it("reports a local thread whose branch differs from the checkout", () => {
+    expect(resolveLocalCheckoutBranchMismatch(base)).toEqual({
+      threadBranch: "feature/a",
+      currentBranch: "main",
+    });
+  });
+
+  it("ignores worktree threads, matching branches and unknown branches", () => {
+    expect(
+      resolveLocalCheckoutBranchMismatch({ ...base, activeWorktreePath: "/repo/.wt/a" }),
+    ).toBeNull();
+    expect(
+      resolveLocalCheckoutBranchMismatch({ ...base, effectiveEnvMode: "worktree" }),
+    ).toBeNull();
+    expect(
+      resolveLocalCheckoutBranchMismatch({ ...base, currentGitBranch: "feature/a" }),
+    ).toBeNull();
+    expect(resolveLocalCheckoutBranchMismatch({ ...base, activeThreadBranch: null })).toBeNull();
+    expect(resolveLocalCheckoutBranchMismatch({ ...base, currentGitBranch: null })).toBeNull();
+  });
+});
+
+describe("resolveThreadBranchUpdateForNextTurn", () => {
+  it("records the current checkout with a compare-and-set on the old branch", () => {
+    expect(
+      resolveThreadBranchUpdateForNextTurn({
+        threadBranch: "feature/a",
+        threadWorktreePath: null,
+        currentGitBranch: "main",
+      }),
+    ).toEqual({ branch: "main", worktreePath: null, expectedBranch: "feature/a" });
+  });
+
+  it("skips worktree threads, detached HEAD and unchanged branches", () => {
+    const base = { threadBranch: "feature/a", threadWorktreePath: null, currentGitBranch: "main" };
+    expect(
+      resolveThreadBranchUpdateForNextTurn({ ...base, threadWorktreePath: "/repo/.wt/a" }),
+    ).toBeNull();
+    expect(resolveThreadBranchUpdateForNextTurn({ ...base, currentGitBranch: null })).toBeNull();
+    expect(
+      resolveThreadBranchUpdateForNextTurn({ ...base, currentGitBranch: "feature/a" }),
+    ).toBeNull();
+  });
+});
+
+describe("branch mismatch notice visibility", () => {
+  const mismatch = { threadBranch: "feature/a", currentBranch: "main" };
+
+  it("keys a mismatch by thread and both branches", () => {
+    expect(branchMismatchKey("t1", mismatch)).toBe("t1:feature/a:main");
+    expect(branchMismatchKey(null, mismatch)).toBeNull();
+    expect(branchMismatchKey("t1", null)).toBeNull();
+  });
+
+  it("waits for composer content, then stays until dismissed", () => {
+    const base = {
+      hasMismatch: true,
+      isDismissed: false,
+      composerHasContent: false,
+      wasShownForCurrentMismatch: false,
+    };
+    expect(shouldShowBranchMismatchNotice(base)).toBe(false);
+    expect(shouldShowBranchMismatchNotice({ ...base, composerHasContent: true })).toBe(true);
+    expect(shouldShowBranchMismatchNotice({ ...base, wasShownForCurrentMismatch: true })).toBe(
+      true,
+    );
+    expect(
+      shouldShowBranchMismatchNotice({ ...base, composerHasContent: true, isDismissed: true }),
+    ).toBe(false);
+    expect(
+      shouldShowBranchMismatchNotice({ ...base, composerHasContent: true, hasMismatch: false }),
+    ).toBe(false);
+  });
+
+  it("remembers dismissals for the session", () => {
+    expect(isBranchMismatchDismissedForSession("t2:x:y")).toBe(false);
+    dismissBranchMismatchForSession("t2:x:y");
+    expect(isBranchMismatchDismissedForSession("t2:x:y")).toBe(true);
+    expect(isBranchMismatchDismissedForSession(null)).toBe(false);
+  });
+});
+
+describe("isContextMenuPress", () => {
+  it("treats any non-primary button as a context menu press", () => {
+    expect(isContextMenuPress({ button: 2, ctrlKey: false }, "Win32")).toBe(true);
+    expect(isContextMenuPress({ button: 1, ctrlKey: false }, "MacIntel")).toBe(true);
+  });
+
+  it("treats ctrl-left-click as one only on macOS", () => {
+    expect(isContextMenuPress({ button: 0, ctrlKey: true }, "MacIntel")).toBe(true);
+    expect(isContextMenuPress({ button: 0, ctrlKey: true }, "Win32")).toBe(false);
+    expect(isContextMenuPress({ button: 0, ctrlKey: true }, "Linux x86_64")).toBe(false);
+  });
+
+  it("leaves a plain left press to the picker", () => {
+    expect(isContextMenuPress({ button: 0, ctrlKey: false }, "MacIntel")).toBe(false);
   });
 });

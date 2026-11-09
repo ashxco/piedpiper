@@ -1,4 +1,6 @@
 import { type ContextWindowSnapshot, formatContextWindowTokens } from "~/lib/contextWindow";
+import { cn } from "~/lib/utils";
+import { Button } from "../ui/button";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 
 function formatPercentage(value: number | null): string | null {
@@ -11,10 +13,76 @@ function formatPercentage(value: number | null): string | null {
   return `${Math.round(value)}%`;
 }
 
-export function ContextWindowMeter(props: { usage: ContextWindowSnapshot }) {
-  const { usage } = props;
+const CRITICAL_USED_PERCENTAGE = 90;
+
+function clampPercentage(value: number | null): number {
+  return Math.max(0, Math.min(100, value ?? 0));
+}
+
+/** Bar under the popover readout; renders nothing while the window size is unknown. */
+export function ContextWindowUsageBar(props: {
+  usage: Pick<ContextWindowSnapshot, "maxTokens" | "usedPercentage">;
+}) {
+  const { maxTokens, usedPercentage } = props.usage;
+  if (!maxTokens || maxTokens <= 0 || usedPercentage === null) return null;
+  const pct = clampPercentage(usedPercentage);
+  return (
+    <div
+      role="progressbar"
+      aria-label="Context window used"
+      aria-valuemin={0}
+      aria-valuemax={100}
+      aria-valuenow={Math.round(pct)}
+      className="h-1 w-full overflow-hidden rounded-full bg-foreground/10"
+    >
+      <div
+        className={cn(
+          "h-full rounded-full transition-[width] duration-500 ease-out motion-reduce:transition-none",
+          pct > CRITICAL_USED_PERCENTAGE ? "bg-destructive" : "bg-foreground/50",
+        )}
+        style={{ width: `${pct}%` }}
+      />
+    </div>
+  );
+}
+
+/** The popover's compact action; renders nothing when the thread cannot compact on demand. */
+export function ContextWindowCompactAction(props: {
+  onCompact?: (() => void) | undefined;
+  disabledReason?: string | null | undefined;
+}) {
+  const { onCompact, disabledReason } = props;
+  if (!onCompact) return null;
+  return (
+    <div className="space-y-1 pt-0.5">
+      <Button
+        type="button"
+        size="xs"
+        variant="outline"
+        disabled={Boolean(disabledReason)}
+        onClick={onCompact}
+      >
+        Compact
+      </Button>
+      {disabledReason ? (
+        <div className="max-w-56 whitespace-normal text-xs text-muted-foreground">
+          {disabledReason}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+export function ContextWindowMeter(props: {
+  usage: ContextWindowSnapshot;
+  onCompact?: (() => void) | undefined;
+  compactDisabledReason?: string | null | undefined;
+}) {
+  const { usage, onCompact, compactDisabledReason } = props;
   const usedPercentage = formatPercentage(usage.usedPercentage);
-  const pct = Math.max(0, Math.min(100, usage.usedPercentage ?? 0));
+  const pct = clampPercentage(usage.usedPercentage);
+  const usageColorClass =
+    pct > CRITICAL_USED_PERCENTAGE ? "text-destructive" : "text-foreground/50";
   const radius = 12;
   const strokeWidth = 1.5;
   const circumference = 2 * Math.PI * radius;
@@ -25,7 +93,8 @@ export function ContextWindowMeter(props: { usage: ContextWindowSnapshot }) {
       <PopoverTrigger
         openOnHover
         delay={150}
-        closeDelay={0}
+        // Long enough for the pointer to cross the gap to the popover's button.
+        closeDelay={150}
         render={
           <button
             type="button"
@@ -61,12 +130,15 @@ export function ContextWindowMeter(props: { usage: ContextWindowSnapshot }) {
                   strokeLinecap="round"
                   strokeDasharray={circumference}
                   strokeDashoffset={dashOffset}
-                  className="text-foreground/50 transition-[stroke-dashoffset] duration-500 ease-out"
+                  className={cn(
+                    usageColorClass,
+                    "transition-[stroke-dashoffset] duration-500 ease-out motion-reduce:transition-none",
+                  )}
                 />
               </svg>
-              <span className="relative text-[9px] leading-none font-medium text-foreground/50">
+              <span className={cn("relative text-[9px] leading-none font-medium", usageColorClass)}>
                 {usage.usedPercentage !== null
-                  ? Math.round(usage.usedPercentage)
+                  ? Math.round(pct)
                   : formatContextWindowTokens(usage.usedTokens)}
               </span>
             </span>
@@ -91,6 +163,7 @@ export function ContextWindowMeter(props: { usage: ContextWindowSnapshot }) {
               {formatContextWindowTokens(usage.usedTokens)} tokens used so far
             </div>
           )}
+          <ContextWindowUsageBar usage={usage} />
           {(usage.totalProcessedTokens ?? null) !== null &&
           (usage.totalProcessedTokens ?? 0) > usage.usedTokens ? (
             <div className="text-xs text-muted-foreground">
@@ -103,6 +176,10 @@ export function ContextWindowMeter(props: { usage: ContextWindowSnapshot }) {
               Automatically compacts its context when needed.
             </div>
           ) : null}
+          <ContextWindowCompactAction
+            onCompact={onCompact}
+            disabledReason={compactDisabledReason}
+          />
         </div>
       </PopoverPopup>
     </Popover>

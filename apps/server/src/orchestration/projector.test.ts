@@ -2,13 +2,17 @@ import {
   CommandId,
   EventId,
   ProjectId,
+  RuntimeTaskId,
   ThreadId,
+  TurnId,
   type OrchestrationEvent,
 } from "@piedpiper/contracts";
 import { Effect } from "effect";
 import { describe, expect, it } from "vitest";
 
-import { createEmptyReadModel, projectEvent } from "./projector.ts";
+import { hasLiveBackgroundTask } from "../provider/Layers/ProviderSessionReaper.ts";
+import { runtimeEventToActivities } from "./Layers/RuntimeNormalizer.ts";
+import { capThreadActivities, createEmptyReadModel, projectEvent } from "./projector.ts";
 
 function makeEvent(input: {
   sequence: number;
@@ -36,6 +40,190 @@ function makeEvent(input: {
     payload: input.payload as never,
   } as OrchestrationEvent;
 }
+
+const padding = (count: number) =>
+  Array.from({ length: count }, (_, index) => ({ id: `tool-${index}`, kind: "tool.completed" }));
+
+describe("capThreadActivities", () => {
+  it("keeps the newest goal rows past the activity window, in a window of their own", () => {
+    const goals = Array.from({ length: 25 }, (_, index) => ({
+      id: `goal-${index}`,
+      kind: "goal.updated",
+    }));
+    const kept = capThreadActivities([...goals, ...padding(600)]).map((activity) => activity.id);
+    expect(kept).toContain("goal-24");
+    expect(kept).not.toContain("goal-0");
+    expect(kept.filter((id) => id.startsWith("goal-"))).toHaveLength(20);
+    expect(kept.filter((id) => id.startsWith("tool-"))).toHaveLength(500);
+  });
+
+  it("keeps the start of a running task, including a restarted id, but not a finished one", () => {
+    const kept = capThreadActivities([
+      { id: "running", kind: "task.started", payload: { taskId: "a" } },
+      { id: "finished", kind: "task.started", payload: { taskId: "b" } },
+      { id: "finished-end", kind: "task.completed", payload: { taskId: "b" } },
+      { id: "first-run", kind: "task.started", payload: { taskId: "c" } },
+      { id: "first-end", kind: "task.completed", payload: { taskId: "c" } },
+      { id: "second-run", kind: "task.started", payload: { taskId: "c" } },
+      ...padding(600),
+    ]).map((activity) => activity.id);
+    expect(kept).toContain("running");
+    expect(kept).toContain("second-run");
+    expect(kept).not.toContain("finished");
+    expect(kept).not.toContain("first-run");
+  });
+
+  it("keeps open non-blocking questions and held answers past the activity window", () => {
+    const activities = [
+      {
+        id: "question",
+        kind: "user-input.requested",
+        payload: { requestId: "open", responseMode: "message" },
+      },
+      {
+        id: "answered-question",
+        kind: "user-input.requested",
+        payload: { requestId: "r", responseMode: "message" },
+      },
+      { id: "held", kind: "user-input.resolved", payload: { requestId: "r", held: true } },
+      {
+        id: "dismissed-question",
+        kind: "user-input.requested",
+        payload: { requestId: "d", responseMode: "message" },
+      },
+      {
+        id: "dismissed",
+        kind: "user-input.resolved",
+        payload: { requestId: "d", responseMode: "message" },
+      },
+      { id: "blocking", kind: "user-input.requested", payload: { requestId: "b" } },
+      { id: "answered", kind: "user-input.resolved", payload: { requestId: "b" } },
+      ...Array.from({ length: 500 }, (_, index) => ({
+        id: `tool-${index}`,
+        kind: "tool.completed",
+        payload: {},
+      })),
+    ];
+    const ids = capThreadActivities(activities).map((activity) => activity.id);
+    expect(ids).toHaveLength(502);
+    expect(ids.slice(0, 2)).toEqual(["question", "held"]);
+  });
+
+  it("keeps model-switch dividers that fall outside the activity window", () => {
+    const activities = [
+      { id: "switch-old", kind: "turn.model-switched" },
+      ...Array.from({ length: 501 }, (_, index) => ({
+        id: `tool-${index}`,
+        kind: "tool.completed",
+      })),
+    ];
+    const capped = capThreadActivities(activities);
+    expect(capped).toHaveLength(501);
+    expect(capped[0]?.id).toBe("switch-old");
+    expect(capped[1]?.id).toBe("tool-1");
+    expect(capped.at(-1)?.id).toBe("tool-500");
+  });
+
+  it("gives thinking blocks their own window so they never evict tool rows", () => {
+    const activities = [
+      ...Array.from({ length: 500 }, (_, index) => ({
+        id: `tool-${index}`,
+        kind: "tool.completed",
+      })),
+      ...Array.from({ length: 250 }, (_, index) => ({
+        id: `thought-${index}`,
+        kind: "reasoning.block",
+      })),
+    ];
+    const capped = capThreadActivities(activities);
+    expect(capped.filter((entry) => entry.kind === "tool.completed")).toHaveLength(500);
+    const thoughts = capped.filter((entry) => entry.kind === "reasoning.block");
+    expect(thoughts).toHaveLength(200);
+    expect(thoughts[0]?.id).toBe("thought-50");
+    expect(capThreadActivities(activities.slice(-150))).toHaveLength(150);
+  });
+});
+
+describe("task progress rows", () => {
+  it("keeps task.started and the task's liveness through 600 progress ticks", async () => {
+    const createdAt = "2026-02-23T10:00:00.000Z";
+    const threadId = ThreadId.makeUnsafe("thread-1");
+    const activityEvent = (sequence: number, activity: unknown) =>
+      makeEvent({
+        sequence,
+        type: "thread.activity-appended",
+        aggregateKind: "thread",
+        aggregateId: "thread-1",
+        occurredAt: createdAt,
+        commandId: `cmd-activity-${sequence}`,
+        payload: { threadId, activity },
+      });
+    const runtimeBase = {
+      provider: "claudeAgent" as const,
+      threadId,
+      turnId: TurnId.makeUnsafe("turn-1"),
+    };
+    let state = await Effect.runPromise(
+      projectEvent(
+        createEmptyReadModel(createdAt),
+        makeEvent({
+          sequence: 1,
+          type: "thread.created",
+          aggregateKind: "thread",
+          aggregateId: "thread-1",
+          occurredAt: createdAt,
+          commandId: "cmd-create",
+          payload: {
+            threadId,
+            projectId: "project-1",
+            title: "demo",
+            modelSelection: { provider: "claudeAgent", model: "claude-sonnet-4-5" },
+            runtimeMode: "full-access",
+            branch: null,
+            worktreePath: null,
+            createdAt,
+            updatedAt: createdAt,
+          },
+        }),
+      ),
+    );
+    const [started] = runtimeEventToActivities({
+      ...runtimeBase,
+      type: "task.started",
+      eventId: EventId.makeUnsafe("evt-started"),
+      createdAt,
+      payload: { taskId: RuntimeTaskId.makeUnsafe("task-1"), description: "Subagent" },
+    });
+    state = await Effect.runPromise(projectEvent(state, activityEvent(2, started)));
+
+    let lastTickAt = createdAt;
+    for (let tick = 0; tick < 600; tick += 1) {
+      lastTickAt = new Date(Date.parse(createdAt) + (tick + 1) * 1000).toISOString();
+      const [progress] = runtimeEventToActivities({
+        ...runtimeBase,
+        type: "task.progress",
+        eventId: EventId.makeUnsafe(`evt-tick-${tick}`),
+        createdAt: lastTickAt,
+        payload: { taskId: RuntimeTaskId.makeUnsafe("task-1"), description: "Subagent" },
+      });
+      state = await Effect.runPromise(projectEvent(state, activityEvent(tick + 3, progress)));
+    }
+
+    const thread = state.threads.get(threadId)!;
+    expect(thread.activities.map((activity) => activity.kind)).toEqual([
+      "task.started",
+      "task.progress",
+    ]);
+    expect(thread.activities[1]?.createdAt).toBe(lastTickAt);
+    expect(
+      hasLiveBackgroundTask(
+        thread,
+        { provider: "claudeAgent", createdAt },
+        Date.parse(lastTickAt) + 1000,
+      ),
+    ).toBe(true);
+  });
+});
 
 describe("orchestration projector", () => {
   it("applies thread.created events", async () => {
@@ -657,6 +845,276 @@ describe("orchestration projector", () => {
     ).toEqual([{ id: "activity-1", turnId: "turn-1" }]);
     expect(thread?.checkpoints.map((checkpoint) => checkpoint.checkpointTurnCount)).toEqual([1]);
     expect(thread?.latestTurn?.turnId).toBe("turn-1");
+  });
+
+  it("marks a turn completed when its real checkpoint replaces a missing placeholder", async () => {
+    const createdAt = "2026-02-23T10:00:00.000Z";
+    const diffEvent = (sequence: number, status: "missing" | "ready", checkpointRef: string) =>
+      makeEvent({
+        sequence,
+        type: "thread.turn-diff-completed",
+        aggregateKind: "thread",
+        aggregateId: "thread-1",
+        occurredAt: `2026-02-23T10:00:0${sequence}.000Z`,
+        commandId: `cmd-diff-${sequence}`,
+        payload: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          checkpointTurnCount: 1,
+          checkpointRef,
+          status,
+          files: [],
+          assistantMessageId: "assistant-msg-1",
+          completedAt: `2026-02-23T10:00:0${sequence}.000Z`,
+        },
+      });
+    const events = [
+      makeEvent({
+        sequence: 1,
+        type: "thread.created",
+        aggregateKind: "thread",
+        aggregateId: "thread-1",
+        occurredAt: createdAt,
+        commandId: "cmd-create",
+        payload: {
+          threadId: "thread-1",
+          projectId: "project-1",
+          title: "demo",
+          modelSelection: { provider: "codex", model: "gpt-5.3-codex" },
+          runtimeMode: "full-access",
+          branch: null,
+          worktreePath: null,
+          createdAt,
+          updatedAt: createdAt,
+        },
+      }),
+      diffEvent(2, "missing", "provider-diff:evt-1"),
+      diffEvent(3, "ready", "refs/piedpiper/checkpoints/thread-1/turn/1"),
+    ];
+
+    const afterEvents = await events.reduce<Promise<ReturnType<typeof createEmptyReadModel>>>(
+      (statePromise, event) =>
+        statePromise.then((state) => Effect.runPromise(projectEvent(state, event))),
+      Promise.resolve(createEmptyReadModel(createdAt)),
+    );
+
+    const thread = [...afterEvents.threads.values()][0];
+    expect(thread?.latestTurn?.state).toBe("completed");
+    expect(thread?.checkpoints.map((checkpoint) => checkpoint.status)).toEqual(["ready"]);
+  });
+
+  it("keeps a turn running through a mid-turn diff, then settles it at the session's time", async () => {
+    const createdAt = "2026-02-23T12:00:00.000Z";
+    const events = [
+      makeEvent({
+        sequence: 1,
+        type: "thread.created",
+        aggregateKind: "thread",
+        aggregateId: "thread-1",
+        occurredAt: createdAt,
+        commandId: "cmd-create",
+        payload: {
+          threadId: "thread-1",
+          projectId: "project-1",
+          title: "demo",
+          modelSelection: { provider: "codex", model: "gpt-5.3-codex" },
+          runtimeMode: "full-access",
+          branch: null,
+          worktreePath: null,
+          createdAt,
+          updatedAt: createdAt,
+        },
+      }),
+      makeEvent({
+        sequence: 2,
+        type: "thread.session-set",
+        aggregateKind: "thread",
+        aggregateId: "thread-1",
+        occurredAt: "2026-02-23T12:00:01.000Z",
+        commandId: "cmd-running",
+        payload: {
+          threadId: "thread-1",
+          session: {
+            threadId: "thread-1",
+            status: "running",
+            providerName: "codex",
+            runtimeMode: "full-access",
+            activeTurnId: "turn-1",
+            lastError: null,
+            updatedAt: "2026-02-23T12:00:01.000Z",
+          },
+        },
+      }),
+      makeEvent({
+        sequence: 3,
+        type: "thread.turn-diff-completed",
+        aggregateKind: "thread",
+        aggregateId: "thread-1",
+        occurredAt: "2026-02-23T12:00:02.000Z",
+        commandId: "cmd-diff",
+        payload: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          checkpointTurnCount: 1,
+          checkpointRef: "provider-diff:evt-1",
+          status: "missing",
+          files: [],
+          assistantMessageId: "assistant-msg-1",
+          completedAt: "2026-02-23T12:00:02.000Z",
+        },
+      }),
+    ];
+    const running = await events.reduce<Promise<ReturnType<typeof createEmptyReadModel>>>(
+      (statePromise, event) =>
+        statePromise.then((state) => Effect.runPromise(projectEvent(state, event))),
+      Promise.resolve(createEmptyReadModel(createdAt)),
+    );
+    const runningThread = [...running.threads.values()][0];
+    expect(runningThread?.latestTurn?.state).toBe("running");
+    expect(runningThread?.latestTurn?.completedAt).toBeNull();
+    expect(runningThread?.checkpoints).toHaveLength(1);
+
+    const settled = await Effect.runPromise(
+      projectEvent(
+        running,
+        makeEvent({
+          sequence: 4,
+          type: "thread.session-set",
+          aggregateKind: "thread",
+          aggregateId: "thread-1",
+          occurredAt: "2026-02-23T12:00:09.000Z",
+          commandId: "cmd-failed",
+          payload: {
+            threadId: "thread-1",
+            session: {
+              threadId: "thread-1",
+              status: "error",
+              providerName: "codex",
+              runtimeMode: "full-access",
+              activeTurnId: null,
+              lastError: "boom",
+              updatedAt: "2026-02-23T12:00:03.000Z",
+            },
+          },
+        }),
+      ),
+    );
+    const settledThread = [...settled.threads.values()][0];
+    expect(settledThread?.latestTurn?.state).toBe("error");
+    expect(settledThread?.latestTurn?.completedAt).toBe("2026-02-23T12:00:03.000Z");
+  });
+
+  it("settles a running latest turn when its session leaves running", async () => {
+    const createdAt = "2026-02-23T11:00:00.000Z";
+    const sessionSet = (
+      sequence: number,
+      status: "running" | "ready" | "stopped" | "error",
+      activeTurnId: string | null,
+    ) =>
+      makeEvent({
+        sequence,
+        type: "thread.session-set",
+        aggregateKind: "thread",
+        aggregateId: "thread-1",
+        occurredAt: `2026-02-23T11:00:0${sequence}.000Z`,
+        commandId: `cmd-session-${sequence}`,
+        payload: {
+          threadId: "thread-1",
+          session: {
+            threadId: "thread-1",
+            status,
+            providerName: "claudeAgent",
+            runtimeMode: "full-access",
+            activeTurnId,
+            lastError: status === "error" ? "boom" : null,
+            updatedAt: `2026-02-23T11:00:0${sequence}.000Z`,
+          },
+        },
+      });
+    const diffReady = (sequence: number, turnId: string) =>
+      makeEvent({
+        sequence,
+        type: "thread.turn-diff-completed",
+        aggregateKind: "thread",
+        aggregateId: "thread-1",
+        occurredAt: `2026-02-23T11:00:0${sequence}.000Z`,
+        commandId: `cmd-diff-${sequence}`,
+        payload: {
+          threadId: "thread-1",
+          turnId,
+          checkpointTurnCount: sequence,
+          checkpointRef: `refs/piedpiper/checkpoints/thread-1/turn/${sequence}`,
+          status: "ready",
+          files: [],
+          assistantMessageId: null,
+          completedAt: `2026-02-23T11:00:0${sequence}.000Z`,
+        },
+      });
+    const created = makeEvent({
+      sequence: 1,
+      type: "thread.created",
+      aggregateKind: "thread",
+      aggregateId: "thread-1",
+      occurredAt: createdAt,
+      commandId: "cmd-create",
+      payload: {
+        threadId: "thread-1",
+        projectId: "project-1",
+        title: "demo",
+        modelSelection: { provider: "codex", model: "gpt-5.3-codex" },
+        runtimeMode: "full-access",
+        branch: null,
+        worktreePath: null,
+        createdAt,
+        updatedAt: createdAt,
+      },
+    });
+    const run = (events: ReadonlyArray<OrchestrationEvent>) =>
+      events
+        .reduce<Promise<ReturnType<typeof createEmptyReadModel>>>(
+          (statePromise, event) =>
+            statePromise.then((state) => Effect.runPromise(projectEvent(state, event))),
+          Promise.resolve(createEmptyReadModel(createdAt)),
+        )
+        .then((model) => [...model.threads.values()][0]?.latestTurn);
+
+    // A session error mid-turn marks the turn failed, and the later checkpoint keeps it failed.
+    const errored = await run([
+      created,
+      sessionSet(2, "running", "turn-1"),
+      sessionSet(3, "error", null),
+    ]);
+    expect(errored?.state).toBe("error");
+    expect(errored?.completedAt).toBe("2026-02-23T11:00:03.000Z");
+    expect(
+      (
+        await run([
+          created,
+          sessionSet(2, "running", "turn-1"),
+          sessionSet(3, "error", null),
+          diffReady(4, "turn-1"),
+        ])
+      )?.state,
+    ).toBe("error");
+
+    // A stop mid-turn interrupts it.
+    expect(
+      (await run([created, sessionSet(2, "running", "turn-1"), sessionSet(3, "stopped", null)]))
+        ?.state,
+    ).toBe("interrupted");
+
+    // A stop after the turn finished (ready) must not relabel it as interrupted.
+    expect(
+      (
+        await run([
+          created,
+          sessionSet(2, "running", "turn-1"),
+          sessionSet(3, "ready", null),
+          sessionSet(4, "stopped", null),
+          diffReady(5, "turn-1"),
+        ])
+      )?.state,
+    ).toBe("completed");
   });
 
   it("does not fallback-retain messages tied to removed turn IDs", async () => {

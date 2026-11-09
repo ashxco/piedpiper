@@ -21,6 +21,20 @@ export class WorkspaceRootNotExistsError extends Schema.TaggedErrorClass<Workspa
   }
 }
 
+export class WorkspaceRootStatFailedError extends Schema.TaggedErrorClass<WorkspaceRootStatFailedError>()(
+  "WorkspaceRootStatFailedError",
+  {
+    workspaceRoot: Schema.String,
+    normalizedWorkspaceRoot: Schema.String,
+    reason: Schema.String,
+    cause: Schema.optional(Schema.Defect),
+  },
+) {
+  override get message(): string {
+    return `Workspace root could not be accessed (${this.reason}): ${this.normalizedWorkspaceRoot}`;
+  }
+}
+
 export class WorkspaceRootNotDirectoryError extends Schema.TaggedErrorClass<WorkspaceRootNotDirectoryError>()(
   "WorkspaceRootNotDirectoryError",
   {
@@ -47,6 +61,7 @@ export class WorkspacePathOutsideRootError extends Schema.TaggedErrorClass<Works
 
 export const WorkspacePathsError = Schema.Union([
   WorkspaceRootNotExistsError,
+  WorkspaceRootStatFailedError,
   WorkspaceRootNotDirectoryError,
   WorkspacePathOutsideRootError,
 ]);
@@ -61,7 +76,10 @@ export interface WorkspacePathsShape {
    */
   readonly normalizeWorkspaceRoot: (
     workspaceRoot: string,
-  ) => Effect.Effect<string, WorkspaceRootNotExistsError | WorkspaceRootNotDirectoryError>;
+  ) => Effect.Effect<
+    string,
+    WorkspaceRootNotExistsError | WorkspaceRootStatFailedError | WorkspaceRootNotDirectoryError
+  >;
 
   /**
    * Resolve a relative path within a validated workspace root.

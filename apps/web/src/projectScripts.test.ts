@@ -1,21 +1,29 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  commandForProjectScript,
+  commandForProjectScriptSafe,
   nextProjectScriptId,
   primaryProjectScript,
   projectScriptCwd,
   projectScriptRuntimeEnv,
+  projectScriptTerminalInput,
   projectScriptIdFromCommand,
   setupProjectScript,
 } from "./projectScripts";
 
 describe("projectScripts helpers", () => {
   it("builds and parses script run commands", () => {
-    const command = commandForProjectScript("lint");
+    const command = commandForProjectScriptSafe("lint")!;
     expect(command).toBe("script.lint.run");
     expect(projectScriptIdFromCommand(command)).toBe("lint");
     expect(projectScriptIdFromCommand("terminal.toggle")).toBeNull();
+  });
+
+  it("does not throw for script ids that cannot form a keybinding command", () => {
+    expect(commandForProjectScriptSafe("lint")).toBe("script.lint.run");
+    expect(commandForProjectScriptSafe("Foo_Bar")).toBeNull();
+    expect(() => commandForProjectScriptSafe("Foo_Bar")).not.toThrow();
+    expect(projectScriptIdFromCommand("script.Foo_Bar.run")).toBeNull();
   });
 
   it("slugifies and dedupes project script ids", () => {
@@ -85,5 +93,16 @@ describe("projectScripts helpers", () => {
         worktreePath: null,
       }),
     ).toBe("/repo");
+  });
+
+  it("prefixes script terminal input with a space to keep it out of shell history", () => {
+    expect(projectScriptTerminalInput("bun run dev")).toBe(" bun run dev\r");
+    expect(projectScriptTerminalInput("bun run dev", { shellHistory: "suppress" })).toBe(
+      " bun run dev\r",
+    );
+  });
+
+  it("keeps user-run commands in shell history when asked to preserve it", () => {
+    expect(projectScriptTerminalInput("ls -la", { shellHistory: "preserve" })).toBe("ls -la\r");
   });
 });

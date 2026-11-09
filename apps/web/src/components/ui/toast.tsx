@@ -18,12 +18,17 @@ import {
 import { cn } from "~/lib/utils";
 import { buttonVariants } from "~/components/ui/button";
 import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
-import { buildVisibleToastLayout, shouldHideCollapsedToastContent } from "./toast.logic";
+import {
+  buildVisibleToastLayout,
+  resolveCopyableToastErrorText,
+  shouldHideCollapsedToastContent,
+} from "./toast.logic";
 
 export type ThreadToastData = {
   threadId?: ThreadId | null;
   tooltipStyle?: boolean;
   dismissAfterVisibleMs?: number;
+  hideCopyButton?: boolean;
 };
 
 const toastManager = Toast.createToastManager<ThreadToastData>();
@@ -38,6 +43,15 @@ const TOAST_ICONS = {
   success: CircleCheckIcon,
   warning: TriangleAlertIcon,
 } as const;
+
+function ToastCopyErrorButton({
+  toast,
+}: {
+  toast: Parameters<typeof resolveCopyableToastErrorText>[0];
+}) {
+  const text = resolveCopyableToastErrorText(toast);
+  return text === null ? null : <CopyErrorButton text={text} />;
+}
 
 function CopyErrorButton({ text }: { text: string }) {
   const { copyToClipboard, isCopied } = useCopyToClipboard();
@@ -312,9 +326,7 @@ function Toasts({ position = "top-right" }: { position: ToastPosition }) {
                         className="min-w-0 flex-1 break-words font-medium"
                         data-slot="toast-title"
                       />
-                      {toast.type === "error" && typeof toast.description === "string" && (
-                        <CopyErrorButton text={toast.description} />
-                      )}
+                      <ToastCopyErrorButton toast={toast} />
                       <Toast.Close
                         aria-label="Close"
                         className="shrink-0 rounded-md p-1 text-muted-foreground/50 transition-colors hover:text-foreground"
@@ -412,9 +424,7 @@ function AnchoredToasts() {
                               className="min-w-0 break-words font-medium"
                               data-slot="toast-title"
                             />
-                            {toast.type === "error" && typeof toast.description === "string" && (
-                              <CopyErrorButton text={toast.description} />
-                            )}
+                            <ToastCopyErrorButton toast={toast} />
                           </div>
                           <Toast.Description
                             className="min-w-0 select-text break-words text-muted-foreground"

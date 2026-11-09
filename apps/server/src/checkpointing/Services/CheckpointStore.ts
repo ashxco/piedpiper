@@ -32,6 +32,32 @@ export interface DiffCheckpointsInput {
   readonly fromCheckpointRef: CheckpointRef;
   readonly toCheckpointRef: CheckpointRef;
   readonly fallbackFromToHead?: boolean;
+  /** Defaults to a full patch; numstat returns NUL-delimited `git diff --numstat -z` records. */
+  readonly format?: "patch" | "numstat";
+  /** Limits the diff to these repository-relative paths. An empty list yields an empty diff. */
+  readonly filePaths?: ReadonlyArray<string>;
+  /** Cuts a patch at this many bytes and returns it without the truncation marker. */
+  readonly maxOutputBytes?: number;
+  /** Ignores whitespace changes (`git diff -w`). Applies to the patch format only; numstat stays exact. */
+  readonly ignoreWhitespace?: boolean;
+}
+
+export interface DiffCheckpointPatchInput extends Omit<DiffCheckpointsInput, "format"> {
+  /** Cuts git's raw output at this many bytes; `truncated` reports whether git's output was longer. */
+  readonly maxOutputBytes: number;
+}
+
+export interface DiffCheckpointPatchResult {
+  /** The patch without the truncation marker; a cut drops any incomplete final character. */
+  readonly patch: string;
+  /** Git's own output exceeded the byte limit. */
+  readonly truncated: boolean;
+}
+
+export interface ListAuthoredPathsInput {
+  readonly cwd: string;
+  readonly fromCheckpointRef: CheckpointRef;
+  readonly toCheckpointRef: CheckpointRef;
 }
 
 export interface DeleteCheckpointRefsInput {
@@ -74,13 +100,32 @@ export interface CheckpointStoreShape {
   ) => Effect.Effect<boolean, CheckpointStoreError>;
 
   /**
-   * Compute patch diff between two checkpoint refs.
+   * Compute a diff between two checkpoint refs (a full patch unless `format` says otherwise).
    *
-   * Can optionally treat missing "from" ref as `HEAD`.
+   * Can optionally treat missing "from" ref as `HEAD`. Fails with
+   * `CheckpointRefUnavailableError` naming the side whose ref does not resolve.
    */
   readonly diffCheckpoints: (
     input: DiffCheckpointsInput,
   ) => Effect.Effect<string, CheckpointStoreError>;
+
+  /**
+   * Compute a patch between two checkpoint refs, cut at a byte limit, reporting whether git's
+   * output was cut. Fails like `diffCheckpoints`.
+   */
+  readonly diffCheckpointPatch: (
+    input: DiffCheckpointPatchInput,
+  ) => Effect.Effect<DiffCheckpointPatchResult, CheckpointStoreError>;
+
+  /**
+   * Repository-relative paths the work between two checkpoints touched: uncommitted edits,
+   * commits made or discarded in the range, and merge conflict fixes. Files a pull, merge or
+   * rebase brought in are left out. Null when HEAD did not move or a checkpoint predates
+   * recording HEAD as its parent, meaning every changed file counts.
+   */
+  readonly listAuthoredPaths: (
+    input: ListAuthoredPathsInput,
+  ) => Effect.Effect<ReadonlySet<string> | null, CheckpointStoreError>;
 
   /**
    * Delete the provided checkpoint refs.

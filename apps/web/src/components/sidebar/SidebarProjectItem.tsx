@@ -1,8 +1,9 @@
-import type { GitStatusResult, ProjectId, ThreadId } from "@piedpiper/contracts";
+import type { ProjectId, ThreadId } from "@piedpiper/contracts";
 import type { UnifiedSettings } from "@piedpiper/contracts/settings";
-import { EllipsisIcon, SquarePenIcon } from "lucide-react";
+import { AlarmClockIcon, ChevronRightIcon, EllipsisIcon, SquarePenIcon } from "lucide-react";
 import {
   memo,
+  useState,
   type Dispatch,
   type KeyboardEvent,
   type MouseEvent,
@@ -14,15 +15,25 @@ import {
 
 import type { useNavigate } from "@tanstack/react-router";
 import { readNativeApi } from "../../nativeApi";
+import { dispatchProjectArchived, isProjectArchived } from "../../lib/projectArchive";
 import { newCommandId } from "../../lib/utils";
+import { isImeComposingKeyboardEvent } from "../../lib/imeComposition";
+import { sidebarProjectRowId } from "../../lib/sidebarTree";
+import { useServerAvailableEditors } from "../../rpc/serverState";
+import { sidebarSnoozedShelfRowId } from "../Sidebar.snooze";
+import { useComposerDraftStore } from "../../composerDraftStore";
+import { useStore } from "../../store";
+import { deleteThreadsSequentially } from "../../threadSelectionStore";
 import { useUiStateStore } from "../../uiStateStore";
 import {
+  canDiscardDraftThread,
   resolveSidebarNewThreadEnvMode,
-  resolveSidebarNewThreadSeedContext,
+  resolveSidebarNewThreadOptions,
   resolveThreadStatusPill,
 } from "../Sidebar.logic";
 import { ProjectFavicon } from "../ProjectFavicon";
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../ui/menu";
+import { toastManager } from "../ui/toast";
 import {
   SidebarMenuAction,
   SidebarMenuButton,
@@ -32,13 +43,25 @@ import {
 } from "../ui/sidebar";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { DraftThreadRow } from "./DraftThreadRow";
+import {
+  fileManagerOpenLabel,
+  hasFileManager,
+  openProjectInFileManager,
+} from "./projectFileManager";
 import { SidebarThreadRow } from "./SidebarThreadRow";
 import type { SortableProjectHandleProps } from "./SortableProjectItem";
 import { ThreadStatusLabel } from "./ThreadStatusLabel";
 import { UnicodeSpinner } from "./UnicodeSpinner";
 
-type ThreadPr = GitStatusResult["pr"];
 type ProjectStatus = NonNullable<ReturnType<typeof resolveThreadStatusPill>>;
+
+function toastProjectActionFailure(title: string, error: unknown) {
+  toastManager.add({
+    type: "error",
+    title,
+    description: error instanceof Error ? error.message : "An error occurred.",
+  });
+}
 
 export interface SidebarRenderedProject {
   hasHiddenThreads: boolean;
@@ -49,9 +72,12 @@ export interface SidebarRenderedProject {
     name: string;
     cwd: string;
     expanded: boolean;
+    archivedAt?: string | null | undefined;
   };
   projectStatus: ProjectStatus | null;
   renderedThreadIds: readonly ThreadId[];
+  /** Threads hidden in the collapsed shelf under the list, in sort order. */
+  snoozedThreadIds: readonly ThreadId[];
   showEmptyThreadState: boolean;
   shouldShowThreadPanel: boolean;
   isThreadListExpanded: boolean;
@@ -64,10 +90,6 @@ export interface SidebarProjectItemProps {
   isManualProjectSorting: boolean;
 
   // Active selection context
-  activeThread:
-    | { projectId: ProjectId; branch: string | null; worktreePath: string | null }
-    | null
-    | undefined;
   activeDraftThread:
     | {
         projectId: ProjectId;
@@ -78,7 +100,6 @@ export interface SidebarProjectItemProps {
     | null
     | undefined;
   routeThreadId: ThreadId | null;
-  selectedThreadIds: ReadonlySet<ThreadId>;
 
   // App + UI settings
   appSettings: UnifiedSettings;
@@ -86,7 +107,6 @@ export interface SidebarProjectItemProps {
 
   // Per-project derived data
   threadIdsByProjectId: Record<string, readonly ThreadId[]>;
-  prByThreadId: ReadonlyMap<ThreadId, ThreadPr>;
   threadJumpLabelById: ReadonlyMap<ThreadId, string>;
   showThreadJumpHints: boolean;
 
@@ -96,16 +116,17 @@ export interface SidebarProjectItemProps {
   renamingProjectTitle: string;
   setRenamingProjectTitle: Dispatch<SetStateAction<string>>;
   setRenamingProjectId: Dispatch<SetStateAction<ProjectId | null>>;
+  /** Project name captured when rename started, so a concurrent rename is not overwritten. */
+  renamingProjectOriginalTitle?: string;
+  setRenamingProjectOriginalTitle?: (title: string) => void;
 
   // Thread rename state (passed through to SidebarThreadRow)
   renamingThreadId: ThreadId | null;
   renamingTitle: string;
+  renamingOriginalTitle?: string;
   setRenamingTitle: Dispatch<SetStateAction<string>>;
   renamingInputRef: MutableRefObject<HTMLInputElement | null>;
   renamingCommittedRef: MutableRefObject<boolean>;
-  confirmingArchiveThreadId: ThreadId | null;
-  setConfirmingArchiveThreadId: Dispatch<SetStateAction<ThreadId | null>>;
-  confirmArchiveButtonRefs: MutableRefObject<Map<ThreadId, HTMLButtonElement>>;
 
   // Refs to drag suppression flags
   suppressProjectClickForContextMenuRef: MutableRefObject<boolean>;
@@ -131,7 +152,6 @@ export interface SidebarProjectItemProps {
   ) => Promise<void> | void;
 
   // Thread actions
-  archiveThread: (threadId: ThreadId) => Promise<void>;
   deleteThread: (
     threadId: ThreadId,
     options?: { deletedThreadIds?: Set<ThreadId> },
@@ -159,6 +179,11 @@ export interface SidebarProjectItemProps {
     threadId: ThreadId,
     position: { x: number; y: number },
   ) => Promise<void>;
+  handleDraftThreadContextMenu?: (
+    draftThreadId: ThreadId,
+    position: { x: number; y: number },
+    onDelete: () => void,
+  ) => Promise<void>;
   clearSelection: () => void;
   commitRename: (threadId: ThreadId, newTitle: string, originalTitle: string) => Promise<void>;
   cancelRename: () => void;
@@ -179,14 +204,11 @@ export const SidebarProjectItem = memo(function SidebarProjectItem({
   renderedProject,
   dragHandleProps,
   isManualProjectSorting,
-  activeThread,
   activeDraftThread,
   routeThreadId,
-  selectedThreadIds,
   appSettings,
   newThreadShortcutLabel,
   threadIdsByProjectId,
-  prByThreadId,
   threadJumpLabelById,
   showThreadJumpHints,
   renamingProjectId,
@@ -194,14 +216,14 @@ export const SidebarProjectItem = memo(function SidebarProjectItem({
   renamingProjectTitle,
   setRenamingProjectTitle,
   setRenamingProjectId,
+  renamingProjectOriginalTitle,
+  setRenamingProjectOriginalTitle,
   renamingThreadId,
   renamingTitle,
+  renamingOriginalTitle,
   setRenamingTitle,
   renamingInputRef,
   renamingCommittedRef,
-  confirmingArchiveThreadId,
-  setConfirmingArchiveThreadId,
-  confirmArchiveButtonRefs,
   suppressProjectClickForContextMenuRef,
   attachThreadListAutoAnimateRef,
   handleProjectTitlePointerDownCapture,
@@ -209,7 +231,6 @@ export const SidebarProjectItem = memo(function SidebarProjectItem({
   handleProjectTitleKeyDown,
   handleProjectContextMenu,
   commitProjectRename,
-  archiveThread,
   deleteThread,
   clearComposerDraftForThread,
   clearProjectDraftThreadId,
@@ -218,6 +239,7 @@ export const SidebarProjectItem = memo(function SidebarProjectItem({
   navigateToThread,
   handleMultiSelectContextMenu,
   handleThreadContextMenu,
+  handleDraftThreadContextMenu,
   clearSelection,
   commitRename,
   cancelRename,
@@ -229,6 +251,7 @@ export const SidebarProjectItem = memo(function SidebarProjectItem({
   collapseThreadListForProject,
   navigate,
 }: SidebarProjectItemProps) {
+  const canOpenFileManager = hasFileManager(useServerAvailableEditors());
   const {
     hasHiddenThreads,
     hiddenThreadStatus,
@@ -236,12 +259,72 @@ export const SidebarProjectItem = memo(function SidebarProjectItem({
     project,
     projectStatus,
     renderedThreadIds,
+    snoozedThreadIds,
     showEmptyThreadState,
     shouldShowThreadPanel,
     isThreadListExpanded,
     draftThreadId,
   } = renderedProject;
+  const [snoozedShelfOpen, setSnoozedShelfOpen] = useState(false);
+  // The open thread's row has to stay reachable, so its shelf cannot collapse over it.
+  const shelfHoldsRouteThread = routeThreadId !== null && snoozedThreadIds.includes(routeThreadId);
+  const showSnoozedThreads = snoozedShelfOpen || shelfHoldsRouteThread;
   const setProjectExpanded = useUiStateStore((state) => state.setProjectExpanded);
+  const projectRowId = sidebarProjectRowId(project.id);
+  const dismissDraftThread = () => {
+    if (!draftThreadId) return;
+    if (
+      !canDiscardDraftThread(
+        useComposerDraftStore.getState().getDraftThread(draftThreadId),
+        useStore.getState().sidebarThreadsById[draftThreadId] !== undefined,
+      )
+    ) {
+      return;
+    }
+    if (routeThreadId === draftThreadId) {
+      void navigate({ to: "/" }).then(() => {
+        clearComposerDraftForThread(draftThreadId);
+        clearProjectDraftThreadId(project.id);
+      });
+    } else {
+      clearComposerDraftForThread(draftThreadId);
+      clearProjectDraftThreadId(project.id);
+    }
+  };
+  const renderThreadRow = (
+    threadId: ThreadId,
+    rowThreadIds: readonly ThreadId[],
+    snoozed: boolean,
+  ) => (
+    <SidebarThreadRow
+      key={threadId}
+      threadId={threadId}
+      orderedProjectThreadIds={rowThreadIds}
+      routeThreadId={routeThreadId}
+      showThreadJumpHints={showThreadJumpHints}
+      jumpLabel={threadJumpLabelById.get(threadId) ?? null}
+      renamingThreadId={renamingThreadId}
+      renamingTitle={renamingTitle}
+      {...(renamingOriginalTitle !== undefined ? { renamingOriginalTitle } : {})}
+      setRenamingTitle={setRenamingTitle}
+      renamingInputRef={renamingInputRef}
+      renamingCommittedRef={renamingCommittedRef}
+      handleThreadClick={handleThreadClick}
+      navigateToThread={navigateToThread}
+      handleMultiSelectContextMenu={handleMultiSelectContextMenu}
+      handleThreadContextMenu={handleThreadContextMenu}
+      clearSelection={clearSelection}
+      commitRename={commitRename}
+      cancelRename={cancelRename}
+      attemptArchiveThread={attemptArchiveThread}
+      startRenameThread={startRenameThread}
+      attemptDeleteThread={attemptDeleteThread}
+      openPrLink={openPrLink}
+      projectCwd={project.cwd}
+      threadSortOrder={appSettings.sidebarThreadSortOrder}
+      snoozed={snoozed}
+    />
+  );
   return (
     <>
       <div className="group/project-header relative">
@@ -253,6 +336,8 @@ export const SidebarProjectItem = memo(function SidebarProjectItem({
           }`}
           {...(isManualProjectSorting && dragHandleProps ? dragHandleProps.attributes : {})}
           {...(isManualProjectSorting && dragHandleProps ? dragHandleProps.listeners : {})}
+          data-sidebar-row={projectRowId}
+          aria-expanded={project.expanded}
           onPointerDownCapture={handleProjectTitlePointerDownCapture}
           onClick={(event) => handleProjectTitleClick(event, project.id)}
           onKeyDown={(event) => handleProjectTitleKeyDown(event, project.id)}
@@ -265,19 +350,6 @@ export const SidebarProjectItem = memo(function SidebarProjectItem({
             });
           }}
         >
-          {!project.expanded && projectStatus ? (
-            <span
-              aria-hidden="true"
-              title={projectStatus.label}
-              className={`relative inline-flex size-3 shrink-0 items-center justify-center ${projectStatus.colorClass}`}
-            >
-              {projectStatus.pulse ? (
-                <UnicodeSpinner colorClass="bg-foreground" />
-              ) : (
-                <span className={`size-[5px] rounded-full ${projectStatus.dotClass}`} />
-              )}
-            </span>
-          ) : null}
           <ProjectFavicon cwd={project.cwd} expanded={project.expanded} />
           {renamingProjectId === project.id ? (
             <input
@@ -287,16 +359,25 @@ export const SidebarProjectItem = memo(function SidebarProjectItem({
               onChange={(e) => setRenamingProjectTitle(e.target.value)}
               onKeyDown={(e) => {
                 e.stopPropagation();
+                if (isImeComposingKeyboardEvent(e.nativeEvent)) return;
                 if (e.key === "Enter") {
                   e.preventDefault();
-                  void commitProjectRename(project.id, renamingProjectTitle, project.name);
+                  void commitProjectRename(
+                    project.id,
+                    renamingProjectTitle,
+                    renamingProjectOriginalTitle ?? project.name,
+                  );
                 } else if (e.key === "Escape") {
                   e.preventDefault();
                   setRenamingProjectId(null);
                 }
               }}
               onBlur={() => {
-                void commitProjectRename(project.id, renamingProjectTitle, project.name);
+                void commitProjectRename(
+                  project.id,
+                  renamingProjectTitle,
+                  renamingProjectOriginalTitle ?? project.name,
+                );
               }}
               onClick={(e) => e.stopPropagation()}
             />
@@ -305,10 +386,27 @@ export const SidebarProjectItem = memo(function SidebarProjectItem({
               {project.name}
             </span>
           )}
+          {!project.expanded && projectStatus ? (
+            <span className="sr-only">{projectStatus.label}</span>
+          ) : null}
         </SidebarMenuButton>
+        {!project.expanded && projectStatus ? (
+          <span
+            aria-hidden="true"
+            title={projectStatus.label}
+            className={`pointer-events-none absolute top-1/2 right-3 inline-flex size-3 -translate-y-1/2 items-center justify-center group-hover/project-header:hidden ${projectStatus.colorClass}`}
+          >
+            {projectStatus.pulse ? (
+              <UnicodeSpinner colorClass="bg-foreground" />
+            ) : (
+              <span className={`size-[5px] rounded-full ${projectStatus.dotClass}`} />
+            )}
+          </span>
+        ) : null}
         <Menu>
           <SidebarMenuAction
             render={<MenuTrigger />}
+            aria-label={`Project actions for ${project.name}`}
             showOnHover
             className="top-1/2! right-9 size-5 -translate-y-1/2 rounded-md p-0 text-muted-foreground hover:bg-secondary hover:text-foreground"
             onClick={(e) => {
@@ -319,54 +417,66 @@ export const SidebarProjectItem = memo(function SidebarProjectItem({
             <EllipsisIcon className="size-3.5" />
           </SidebarMenuAction>
           <MenuPopup align="start" side="bottom" className="min-w-36">
-            <MenuItem
-              className="min-h-7 py-1 sm:text-xs"
-              onClick={() => {
-                const api = readNativeApi();
-                if (!api || !project.cwd) return;
-                void api.shell.openExternal(`file://${project.cwd}`);
-              }}
-            >
-              Open in Finder
-            </MenuItem>
+            {canOpenFileManager && project.cwd ? (
+              <MenuItem
+                className="min-h-7 py-1 sm:text-xs"
+                onClick={() => void openProjectInFileManager(project.cwd)}
+              >
+                {fileManagerOpenLabel(navigator.platform)}
+              </MenuItem>
+            ) : null}
             <MenuItem
               className="min-h-7 py-1 sm:text-xs"
               onClick={() => {
                 setRenamingProjectTitle(project.name);
+                setRenamingProjectOriginalTitle?.(project.name);
                 setRenamingProjectId(project.id);
               }}
             >
               Rename
             </MenuItem>
-            <MenuItem
-              className="min-h-7 py-1 sm:text-xs"
-              onClick={async () => {
-                const api = readNativeApi();
-                if (!api) return;
-                const threadIds = threadIdsByProjectId[project.id] ?? [];
-                const isViewingProjectThread =
-                  routeThreadId !== null && threadIds.includes(routeThreadId);
-                for (const tid of threadIds) {
-                  await archiveThread(tid).catch(() => undefined);
-                }
-                if (draftThreadId) {
-                  clearComposerDraftForThread(draftThreadId);
-                  clearProjectDraftThreadId(project.id);
-                }
-                if (isViewingProjectThread) {
-                  void navigate({ to: "/" });
-                }
-                await api.orchestration
-                  .dispatchCommand({
-                    type: "project.delete",
-                    commandId: newCommandId(),
-                    projectId: project.id,
-                  })
-                  .catch(() => undefined);
-              }}
-            >
-              Archive
-            </MenuItem>
+            {isProjectArchived(project) ? (
+              <MenuItem
+                className="min-h-7 py-1 sm:text-xs"
+                onClick={async () => {
+                  const api = readNativeApi();
+                  if (!api) return;
+                  await dispatchProjectArchived(api, project.id, null).catch((error: unknown) =>
+                    toastProjectActionFailure("Failed to unarchive project", error),
+                  );
+                }}
+              >
+                Unarchive
+              </MenuItem>
+            ) : (
+              <MenuItem
+                className="min-h-7 py-1 sm:text-xs"
+                onClick={async () => {
+                  const api = readNativeApi();
+                  if (!api) return;
+                  try {
+                    await dispatchProjectArchived(api, project.id, new Date().toISOString());
+                  } catch (error) {
+                    toastProjectActionFailure("Failed to archive project", error);
+                    return;
+                  }
+                  const threadIds = threadIdsByProjectId[project.id] ?? [];
+                  // The draft is cleared below, so its route has to be left as well.
+                  const isViewingProject =
+                    routeThreadId !== null &&
+                    (threadIds.includes(routeThreadId) || routeThreadId === draftThreadId);
+                  if (isViewingProject) {
+                    void navigate({ to: "/" });
+                  }
+                  if (draftThreadId) {
+                    clearComposerDraftForThread(draftThreadId);
+                    clearProjectDraftThreadId(project.id);
+                  }
+                }}
+              >
+                Archive
+              </MenuItem>
+            )}
             <MenuItem
               className="min-h-7 py-1 sm:text-xs"
               variant="destructive"
@@ -380,8 +490,13 @@ export const SidebarProjectItem = memo(function SidebarProjectItem({
                 const threadIds = threadIdsByProjectId[project.id] ?? [];
                 const isViewingProjectThread =
                   routeThreadId !== null && threadIds.includes(routeThreadId);
-                for (const tid of threadIds) {
-                  await deleteThread(tid).catch(() => undefined);
+                const { firstError } = await deleteThreadsSequentially(threadIds, (tid) =>
+                  deleteThread(tid),
+                );
+                // The project delete would take the surviving threads' data with it.
+                if (firstError !== null) {
+                  toastProjectActionFailure("Failed to delete project", firstError);
+                  return;
                 }
                 if (draftThreadId) {
                   clearComposerDraftForThread(draftThreadId);
@@ -396,7 +511,9 @@ export const SidebarProjectItem = memo(function SidebarProjectItem({
                     commandId: newCommandId(),
                     projectId: project.id,
                   })
-                  .catch(() => undefined);
+                  .catch((error: unknown) =>
+                    toastProjectActionFailure("Failed to delete project", error),
+                  );
               }}
             >
               Delete
@@ -425,36 +542,16 @@ export const SidebarProjectItem = memo(function SidebarProjectItem({
                   if (!project.expanded) {
                     setProjectExpanded(project.id, true);
                   }
-                  const seedContext = resolveSidebarNewThreadSeedContext({
-                    projectId: project.id,
-                    defaultEnvMode: resolveSidebarNewThreadEnvMode({
-                      defaultEnvMode: appSettings.defaultThreadEnvMode,
+                  void handleNewThread(
+                    project.id,
+                    resolveSidebarNewThreadOptions({
+                      projectId: project.id,
+                      defaultEnvMode: resolveSidebarNewThreadEnvMode({
+                        defaultEnvMode: appSettings.defaultThreadEnvMode,
+                      }),
+                      activeDraftProjectId: activeDraftThread?.projectId ?? null,
                     }),
-                    activeThread:
-                      activeThread && activeThread.projectId === project.id
-                        ? {
-                            projectId: activeThread.projectId,
-                            branch: activeThread.branch,
-                            worktreePath: activeThread.worktreePath,
-                          }
-                        : null,
-                    activeDraftThread:
-                      activeDraftThread && activeDraftThread.projectId === project.id
-                        ? {
-                            projectId: activeDraftThread.projectId,
-                            branch: activeDraftThread.branch,
-                            worktreePath: activeDraftThread.worktreePath,
-                            envMode: activeDraftThread.envMode,
-                          }
-                        : null,
-                  });
-                  void handleNewThread(project.id, {
-                    ...(seedContext.branch !== undefined ? { branch: seedContext.branch } : {}),
-                    ...(seedContext.worktreePath !== undefined
-                      ? { worktreePath: seedContext.worktreePath }
-                      : {}),
-                    envMode: seedContext.envMode,
-                  });
+                  );
                 }}
               >
                 <SquarePenIcon className="size-3.5" />
@@ -476,11 +573,20 @@ export const SidebarProjectItem = memo(function SidebarProjectItem({
             <button
               type="button"
               data-thread-selection-safe
+              data-sidebar-row={`${projectRowId}:empty`}
+              data-sidebar-parent={projectRowId}
               className="flex w-full cursor-pointer items-center justify-center rounded-lg border border-dashed border-border/50 bg-muted/30 px-3 py-4 text-center transition-colors hover:border-border hover:bg-muted/50"
               onClick={() => {
-                void handleNewThread(project.id, {
-                  envMode: appSettings.defaultThreadEnvMode,
-                });
+                void handleNewThread(
+                  project.id,
+                  resolveSidebarNewThreadOptions({
+                    projectId: project.id,
+                    defaultEnvMode: resolveSidebarNewThreadEnvMode({
+                      defaultEnvMode: appSettings.defaultThreadEnvMode,
+                    }),
+                    activeDraftProjectId: activeDraftThread?.projectId ?? null,
+                  }),
+                );
               }}
             >
               <span className="text-[11px] text-muted-foreground/50">
@@ -493,60 +599,26 @@ export const SidebarProjectItem = memo(function SidebarProjectItem({
           <DraftThreadRow
             draftThreadId={draftThreadId}
             isActive={routeThreadId === draftThreadId}
+            navigationParent={projectRowId}
             onSelect={() => navigateToThread(draftThreadId)}
-            onDismiss={() => {
-              const isViewing = routeThreadId === draftThreadId;
-              if (isViewing) {
-                void navigate({ to: "/" }).then(() => {
-                  clearComposerDraftForThread(draftThreadId);
-                  clearProjectDraftThreadId(project.id);
-                });
-              } else {
-                clearComposerDraftForThread(draftThreadId);
-                clearProjectDraftThreadId(project.id);
-              }
+            onDismiss={dismissDraftThread}
+            onContextMenu={(position) => {
+              void handleDraftThreadContextMenu?.(draftThreadId, position, dismissDraftThread);
             }}
           />
         )}
         {shouldShowThreadPanel &&
-          renderedThreadIds.map((threadId) => (
-            <SidebarThreadRow
-              key={threadId}
-              threadId={threadId}
-              orderedProjectThreadIds={orderedProjectThreadIds}
-              routeThreadId={routeThreadId}
-              selectedThreadIds={selectedThreadIds}
-              showThreadJumpHints={showThreadJumpHints}
-              jumpLabel={threadJumpLabelById.get(threadId) ?? null}
-              appSettingsConfirmThreadArchive={appSettings.confirmThreadArchive}
-              renamingThreadId={renamingThreadId}
-              renamingTitle={renamingTitle}
-              setRenamingTitle={setRenamingTitle}
-              renamingInputRef={renamingInputRef}
-              renamingCommittedRef={renamingCommittedRef}
-              confirmingArchiveThreadId={confirmingArchiveThreadId}
-              setConfirmingArchiveThreadId={setConfirmingArchiveThreadId}
-              confirmArchiveButtonRefs={confirmArchiveButtonRefs}
-              handleThreadClick={handleThreadClick}
-              navigateToThread={navigateToThread}
-              handleMultiSelectContextMenu={handleMultiSelectContextMenu}
-              handleThreadContextMenu={handleThreadContextMenu}
-              clearSelection={clearSelection}
-              commitRename={commitRename}
-              cancelRename={cancelRename}
-              attemptArchiveThread={attemptArchiveThread}
-              startRenameThread={startRenameThread}
-              attemptDeleteThread={attemptDeleteThread}
-              openPrLink={openPrLink}
-              pr={prByThreadId.get(threadId) ?? null}
-            />
-          ))}
+          renderedThreadIds.map((threadId) =>
+            renderThreadRow(threadId, orderedProjectThreadIds, false),
+          )}
 
         {project.expanded && hasHiddenThreads && !isThreadListExpanded && (
           <SidebarMenuSubItem className="w-full">
             <SidebarMenuSubButton
               render={<button type="button" />}
               data-thread-selection-safe
+              data-sidebar-row={`${projectRowId}:more`}
+              data-sidebar-parent={projectRowId}
               size="sm"
               className="h-6 w-full translate-x-0 justify-start px-2 text-left text-[10px] text-muted-foreground hover:bg-accent hover:text-muted-foreground/80"
               onClick={() => {
@@ -565,6 +637,8 @@ export const SidebarProjectItem = memo(function SidebarProjectItem({
             <SidebarMenuSubButton
               render={<button type="button" />}
               data-thread-selection-safe
+              data-sidebar-row={`${projectRowId}:less`}
+              data-sidebar-parent={projectRowId}
               size="sm"
               className="h-6 w-full translate-x-0 justify-start px-2 text-left text-[10px] text-muted-foreground hover:bg-accent hover:text-muted-foreground/80"
               onClick={() => {
@@ -575,6 +649,42 @@ export const SidebarProjectItem = memo(function SidebarProjectItem({
             </SidebarMenuSubButton>
           </SidebarMenuSubItem>
         )}
+        {project.expanded && snoozedThreadIds.length > 0 && (
+          <SidebarMenuSubItem className="w-full">
+            <SidebarMenuSubButton
+              // While the open thread holds the shelf open it cannot collapse, so it is not a toggle.
+              render={
+                <button
+                  type="button"
+                  aria-expanded={shelfHoldsRouteThread ? undefined : showSnoozedThreads}
+                />
+              }
+              data-thread-selection-safe
+              data-testid={`snoozed-shelf-${project.id}`}
+              data-sidebar-row={sidebarSnoozedShelfRowId(projectRowId)}
+              data-sidebar-parent={projectRowId}
+              size="sm"
+              className="h-6 w-full translate-x-0 justify-start px-2 text-left text-[10px] text-muted-foreground hover:bg-accent hover:text-muted-foreground/80"
+              onClick={() => {
+                if (!shelfHoldsRouteThread) setSnoozedShelfOpen(!showSnoozedThreads);
+              }}
+            >
+              <span className="flex min-w-0 flex-1 items-center gap-1.5">
+                <AlarmClockIcon aria-hidden className="size-3" />
+                <span>Snoozed ({snoozedThreadIds.length})</span>
+                <ChevronRightIcon
+                  aria-hidden
+                  className={`size-3 transition-transform duration-150 ${
+                    showSnoozedThreads ? "rotate-90" : ""
+                  }`}
+                />
+              </span>
+            </SidebarMenuSubButton>
+          </SidebarMenuSubItem>
+        )}
+        {project.expanded &&
+          showSnoozedThreads &&
+          snoozedThreadIds.map((threadId) => renderThreadRow(threadId, snoozedThreadIds, true))}
       </SidebarMenuSub>
     </>
   );

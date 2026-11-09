@@ -2,6 +2,7 @@ import { ChevronDownIcon, FileTextIcon, SquarePenIcon, TerminalIcon } from "luci
 import { Fragment, memo, useCallback, useLayoutEffect, useRef, useState, useMemo } from "react";
 
 import { type ToolInputStream } from "../../types";
+import { formatDiffCount } from "~/lib/diffCount";
 import { cn } from "~/lib/utils";
 
 interface ToolInputCodePreviewProps {
@@ -50,7 +51,7 @@ const DiffLine = memo(function DiffLine(props: DiffLineProps) {
     <div
       className={cn(
         "flex items-start gap-2 px-2.5 py-[1px]",
-        isAddition ? "bg-emerald-500/10" : "bg-rose-500/10",
+        isAddition ? "bg-diff-addition/10" : "bg-diff-deletion/10",
       )}
     >
       <span
@@ -61,7 +62,10 @@ const DiffLine = memo(function DiffLine(props: DiffLineProps) {
         {lineNumber}
       </span>
       <span
-        className={cn("select-none", isAddition ? "text-emerald-400/70" : "text-rose-400/70")}
+        className={cn(
+          "select-none",
+          isAddition ? "text-diff-addition/70" : "text-diff-deletion/70",
+        )}
         aria-hidden="true"
       >
         {isAddition ? "+" : "-"}
@@ -338,13 +342,13 @@ export const ToolInputCodePreview = memo(function ToolInputCodePreview(
           {headerLabel}
         </span>
         {!isBashCommand && deletionsCount > 0 && (
-          <span className="font-mono text-[11px] text-rose-400/90" aria-label="lines removed">
-            -{deletionsCount}
+          <span className="font-mono text-[11px] text-diff-deletion/90" aria-label="lines removed">
+            -{formatDiffCount(deletionsCount)}
           </span>
         )}
         {!isBashCommand && additionsCount > 0 && (
-          <span className="font-mono text-[11px] text-emerald-400/90" aria-label="lines added">
-            +{additionsCount}
+          <span className="font-mono text-[11px] text-diff-addition/90" aria-label="lines added">
+            +{formatDiffCount(additionsCount)}
           </span>
         )}
       </button>

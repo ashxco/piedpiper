@@ -42,6 +42,18 @@ export interface GitManagerShape {
   ) => Effect.Effect<GitStatusResult, GitManagerServiceError>;
 
   /**
+   * After an agent turn, forget cached "no PR" answers for the workspace's branches so a PR
+   * opened during the turn shows up on the next status read; a lookup still in flight is dropped
+   * once it settles empty. Known PRs, the last-known fallback and the failure backoff are kept.
+   * When `branch` is given, only that branch's lookups are touched. Runs no git or gh command
+   * and never fails.
+   */
+  readonly refreshMissingPullRequest: (input: {
+    readonly cwd: string;
+    readonly branch?: string | null;
+  }) => Effect.Effect<void>;
+
+  /**
    * Resolve a pull request by URL/number against the current repository.
    */
   readonly resolvePullRequest: (
@@ -49,7 +61,8 @@ export interface GitManagerShape {
   ) => Effect.Effect<GitResolvePullRequestResult, GitManagerServiceError>;
 
   /**
-   * Prepare a new thread workspace from a pull request in local or worktree mode.
+   * Prepare a new thread workspace from a pull request in local or worktree mode. A reused
+   * worktree advances to the pull request head unless that would disturb local work.
    */
   readonly preparePullRequestThread: (
     input: GitPreparePullRequestThreadInput,

@@ -2,11 +2,11 @@ import { type ThreadId } from "@piedpiper/contracts";
 import { memo, useCallback, useMemo, useState } from "react";
 
 import { useComposerDraftStore } from "../../composerDraftStore";
-import { randomUUID } from "../../lib/utils";
 import { readNativeApi } from "../../nativeApi";
 import { projectScriptCwd, projectScriptRuntimeEnv } from "../../projectScripts";
 import { useProjectById, useThreadById } from "../../storeSelectors";
 import { selectThreadTerminalState, useTerminalStateStore } from "../../terminalStateStore";
+import { allocateTerminalId, useTerminalTabStateStore } from "../../terminalTabStateStore";
 import ThreadTerminalDrawer from "../ThreadTerminalDrawer";
 import { type TerminalContextSelection } from "../../lib/terminalContext";
 
@@ -15,9 +15,18 @@ export interface PersistentThreadTerminalDrawerProps {
   visible: boolean;
   focusRequestId: number;
   splitShortcutLabel: string | undefined;
+  splitVerticalShortcutLabel: string | undefined;
   newShortcutLabel: string | undefined;
   closeShortcutLabel: string | undefined;
   onAddTerminalContext: (selection: TerminalContextSelection) => void;
+}
+
+function allocateThreadTerminalId(threadId: ThreadId): string {
+  const { terminalStateByThreadId } = useTerminalStateStore.getState();
+  return allocateTerminalId(
+    threadId,
+    selectThreadTerminalState(terminalStateByThreadId, threadId).terminalIds,
+  );
 }
 
 export const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDrawer({
@@ -25,6 +34,7 @@ export const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerm
   visible,
   focusRequestId,
   splitShortcutLabel,
+  splitVerticalShortcutLabel,
   newShortcutLabel,
   closeShortcutLabel,
   onAddTerminalContext,
@@ -39,6 +49,7 @@ export const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerm
   );
   const storeSetTerminalHeight = useTerminalStateStore((state) => state.setTerminalHeight);
   const storeSplitTerminal = useTerminalStateStore((state) => state.splitTerminal);
+  const storeSplitTerminalVertical = useTerminalStateStore((state) => state.splitTerminalVertical);
   const storeNewTerminal = useTerminalStateStore((state) => state.newTerminal);
   const storeSetActiveTerminal = useTerminalStateStore((state) => state.setActiveTerminal);
   const storeCloseTerminal = useTerminalStateStore((state) => state.closeTerminal);
@@ -80,12 +91,17 @@ export const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerm
   );
 
   const splitTerminal = useCallback(() => {
-    storeSplitTerminal(threadId, `terminal-${randomUUID()}`);
+    storeSplitTerminal(threadId, allocateThreadTerminalId(threadId));
     bumpFocusRequestId();
   }, [bumpFocusRequestId, storeSplitTerminal, threadId]);
 
+  const splitTerminalVertical = useCallback(() => {
+    storeSplitTerminalVertical(threadId, allocateThreadTerminalId(threadId));
+    bumpFocusRequestId();
+  }, [bumpFocusRequestId, storeSplitTerminalVertical, threadId]);
+
   const createNewTerminal = useCallback(() => {
-    storeNewTerminal(threadId, `terminal-${randomUUID()}`);
+    storeNewTerminal(threadId, allocateThreadTerminalId(threadId));
     bumpFocusRequestId();
   }, [bumpFocusRequestId, storeNewTerminal, threadId]);
 
@@ -104,7 +120,9 @@ export const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerm
       const isFinalTerminal = terminalState.terminalIds.length <= 1;
       const fallbackExitWrite = () =>
         api.terminal.write({ threadId, terminalId, data: "exit\n" }).catch(() => undefined);
+      const endClose = () => useTerminalTabStateStore.getState().endClose(threadId, terminalId);
 
+      useTerminalTabStateStore.getState().beginClose(threadId, terminalId);
       if ("close" in api.terminal && typeof api.terminal.close === "function") {
         void (async () => {
           if (isFinalTerminal) {
@@ -115,9 +133,11 @@ export const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerm
             terminalId,
             deleteHistory: true,
           });
-        })().catch(() => fallbackExitWrite());
+        })()
+          .catch(() => fallbackExitWrite())
+          .finally(endClose);
       } else {
-        void fallbackExitWrite();
+        void fallbackExitWrite().finally(endClose);
       }
 
       storeCloseTerminal(threadId, terminalId);
@@ -154,8 +174,10 @@ export const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerm
         activeTerminalGroupId={terminalState.activeTerminalGroupId}
         focusRequestId={focusRequestId + localFocusRequestId + (visible ? 1 : 0)}
         onSplitTerminal={splitTerminal}
+        onSplitTerminalVertical={splitTerminalVertical}
         onNewTerminal={createNewTerminal}
         splitShortcutLabel={visible ? splitShortcutLabel : undefined}
+        splitVerticalShortcutLabel={visible ? splitVerticalShortcutLabel : undefined}
         newShortcutLabel={visible ? newShortcutLabel : undefined}
         closeShortcutLabel={visible ? closeShortcutLabel : undefined}
         onActiveTerminalChange={activateTerminal}

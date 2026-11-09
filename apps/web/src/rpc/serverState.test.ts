@@ -7,6 +7,7 @@ import {
   type ServerLifecycleStreamEvent,
   type ServerProvider,
 } from "@piedpiper/contracts";
+import { compileResolvedKeybindingRule } from "@piedpiper/shared/keybindings";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -221,6 +222,28 @@ describe("serverState", () => {
     stop();
   });
 
+  it("replaces the cached keybindings with those of a keybindings update", async () => {
+    serverApi.getConfig.mockResolvedValueOnce(baseServerConfig);
+    const stop = startServerStateSync(serverApi);
+    await waitFor(() => {
+      expect(getServerConfig()).toEqual(baseServerConfig);
+    });
+
+    const keybindings = [
+      compileResolvedKeybindingRule({ key: "mod+shift+y", command: "terminal.toggle" })!,
+    ];
+    emitServerConfigEvent({
+      version: 1,
+      type: "keybindingsUpdated",
+      payload: { keybindings, issues: [] },
+    });
+
+    await waitFor(() => {
+      expect(getServerConfig()?.keybindings).toEqual(keybindings);
+    });
+    stop();
+  });
+
   it("merges provider, settings, and keybinding updates into the cached config", async () => {
     serverApi.getConfig.mockResolvedValueOnce(baseServerConfig);
     const configListener = vi.fn();
@@ -246,6 +269,7 @@ describe("serverState", () => {
       version: 1,
       type: "keybindingsUpdated",
       payload: {
+        keybindings: [],
         issues: [{ kind: "keybindings.malformed-config", message: "bad json" }],
       },
     });

@@ -1,4 +1,4 @@
-import { Duration, Effect, Exit, Metric } from "effect";
+import { Clock, Duration, Effect, Exit, Metric } from "effect";
 import { dual } from "effect/Function";
 
 import {
@@ -97,14 +97,19 @@ export interface WithMetricsOptions {
   ) => Readonly<Record<string, unknown>>;
 }
 
-const withMetricsImpl = <A, E, R>(
-  effect: Effect.Effect<A, E, R>,
+// The live Clock's nanosecond reading is hrtime-based (monotonic), and TestClock can drive it.
+export const monotonicTimeNanos: Effect.Effect<bigint> = Clock.currentTimeNanos;
+
+export const elapsedSince = (startedAt: bigint): Effect.Effect<Duration.Duration> =>
+  Effect.map(monotonicTimeNanos, (now) => Duration.nanos(now > startedAt ? now - startedAt : 0n));
+
+const recordMetrics = (
   options: WithMetricsOptions,
-): Effect.Effect<A, E, R> =>
+  startedAt: bigint,
+  exit: Exit.Exit<unknown, unknown>,
+): Effect.Effect<void> =>
   Effect.gen(function* () {
-    const startedAt = Date.now();
-    const exit = yield* Effect.exit(effect);
-    const duration = Duration.millis(Math.max(0, Date.now() - startedAt));
+    const duration = yield* elapsedSince(startedAt);
     const baseAttributes =
       typeof options.attributes === "function" ? options.attributes() : (options.attributes ?? {});
 
@@ -129,12 +134,16 @@ const withMetricsImpl = <A, E, R>(
         1,
       );
     }
-
-    if (Exit.isSuccess(exit)) {
-      return exit.value;
-    }
-    return yield* Effect.failCause(exit.cause);
   });
+
+// Recorded in an exit finalizer so interrupted work is counted with an "interrupt" outcome.
+const withMetricsImpl = <A, E, R>(
+  effect: Effect.Effect<A, E, R>,
+  options: WithMetricsOptions,
+): Effect.Effect<A, E, R> =>
+  Effect.flatMap(monotonicTimeNanos, (startedAt) =>
+    Effect.onExit(effect, (exit) => recordMetrics(options, startedAt, exit)),
+  );
 
 export const withMetrics: {
   <A, E, R>(

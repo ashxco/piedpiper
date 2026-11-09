@@ -35,6 +35,20 @@ Important fields in each record:
 
 The schema lives in `apps/server/src/observability/TraceRecord.ts`.
 
+The local file clamps attribute strings to 500 characters (`db.query.text` to 200), while OTLP keeps the full values. Records are flushed in batches, so a crash can lose up to one flush window of trace records.
+
+Browser RPC client spans are posted to `POST /api/observability/v1/traces` (Bearer auth) and written to the same trace file, and to the OTLP collector when `PIEDPIPER_OTLP_TRACES_URL` is set. They carry extra `resourceAttributes` and `scope` fields; select them with `.resourceAttributes["service.name"] == "piedpiper-web"`. Their record type lives in `apps/server/src/observability/OtlpTraceRecord.ts`.
+
+#### Summarize the trace file
+
+```bash
+piedpiper trace summary --since 30m --limit 40
+```
+
+This reads the trace file and its rotated backups directly, so it works while the server is stalled or stopped. It prints counts, per-minute rate, latency percentiles and exits per span name.
+
+It reads `PIEDPIPER_TRACE_FILE` if set, otherwise `<home>/userdata/logs/server.trace.ndjson` for `--base-dir` or `PIEDPIPER_HOME`, plus `PIEDPIPER_TRACE_MAX_FILES` backups. For a dev run or a copied file, set `PIEDPIPER_TRACE_FILE`.
+
 ### Metrics
 
 Metrics are not written to a local file.
@@ -158,6 +172,22 @@ Do not rely on launching from Finder, Spotlight, the dock, or the Start menu aft
 #### 4. Fully restart after changing env
 
 The backend reads observability config at process start. If you change OTLP env vars, stop the app completely and start it again.
+
+### Option 3: Set Endpoints In Settings
+
+Settings > Diagnostics > OTLP endpoints edits the traces, metrics and logs URLs. An empty value turns that export off. Endpoints are read at startup, so a saved change applies after a restart.
+
+Precedence per signal (`resolveOtlpSignal` in `packages/shared/src/otelEnvironment.ts`):
+
+1. If `OTEL_SDK_DISABLED` is set, nothing is exported.
+2. `PIEDPIPER_OTLP_*_URL`.
+3. `OTEL_*`. An OTEL exporter set to `none` turns the signal off.
+4. The desktop bootstrap value.
+5. The saved setting.
+
+So "Saved value is not in use" can remain after a restart while an environment variable overrides the setting.
+
+Test posts an empty export from the server to the URL in the field, saved or not, with a 5 second timeout. Redirects are reported as rejected, not followed. Export headers go only to the signal's exact running URL, so a new authenticated endpoint can show "Rejected, HTTP 401" until it is saved and the server restarted.
 
 ## How To Use Traces And Metrics To Debug The Server
 
@@ -354,6 +384,22 @@ If you need those later, add client-side instrumentation or a dedicated server f
 2. Inspect `git.hook.started` and `git.hook.finished` events.
 3. Compare hook timing to the enclosing git span duration.
 
+### "Did the event loop stall?"
+
+The server samples event-loop health every 30 s and discards the first sample, which covers startup work. When the loop was blocked for more than 2 s, it records a warn-level root span `server.eventLoop.stall` in the local trace file (no OTLP needed).
+
+1. Filter spans named `server.eventLoop.stall`.
+2. Read its attributes: `delayMaxMs`, `utilization`, `cpuUserMs`, `cpuSystemMs`, `majorPageFaults`, `minorPageFaults`, `involuntaryContextSwitches` and `rssMb`.
+
+A stall of 5 s or more seen in the last 5 minutes is also reported to clients as `lastEventLoopStall` in the server config, sampled again on each connect. The web app shows one warning toast per `detectedAt`.
+
+### "Where is memory going?"
+
+1. Run `kill -USR2 <server pid>`. The server writes a V8 heap snapshot named `server-<pid>-<timestamp>.heapsnapshot` into the logs directory (`logsDir`).
+2. Open it in Chrome DevTools > Memory.
+
+Writing the snapshot blocks the event loop while it runs. Snapshots are large and can contain secrets (tokens, prompts, file contents), so do not share them casually. The SIGUSR2 handler does nothing on Windows.
+
 ### "Why do I have spans locally but nothing in Grafana?"
 
 Usually one of these is true:
@@ -485,11 +531,11 @@ Local trace file:
 - `PIEDPIPER_TRACE_FILE`: override trace file path
 - `PIEDPIPER_TRACE_MAX_BYTES`: per-file rotation size, default `10485760`
 - `PIEDPIPER_TRACE_MAX_FILES`: rotated file count, default `10`
-- `PIEDPIPER_TRACE_BATCH_WINDOW_MS`: flush window, default `200`
+- `PIEDPIPER_TRACE_BATCH_WINDOW_MS`: flush window, default `1000`. A batch also flushes at 256 records.
 - `PIEDPIPER_TRACE_MIN_LEVEL`: minimum trace level, default `Info`
 - `PIEDPIPER_TRACE_TIMING_ENABLED`: enable timing metadata, default `true`
 
-OTLP export:
+OTLP export (these can also be set in Settings; see [Option 3](#option-3-set-endpoints-in-settings)):
 
 - `PIEDPIPER_OTLP_TRACES_URL`: OTLP trace endpoint
 - `PIEDPIPER_OTLP_METRICS_URL`: OTLP metric endpoint
@@ -497,6 +543,18 @@ OTLP export:
 - `PIEDPIPER_OTLP_SERVICE_NAME`: service name, default `piedpiper-server`
 
 If the OTLP URLs are unset, local tracing still works and metrics stay in-process only.
+
+Every OTLP resource carries `service.instance.id`, random per server process; a value in `OTEL_RESOURCE_ATTRIBUTES` replaces it. The server also reports `process.runtime.name`, `process.runtime.version` and `process.runtime.description`.
+
+Product analytics:
+
+- `PIEDPIPER_POSTHOG_KEY`: PostHog project key, default empty. Analytics are a no-op with no network traffic unless this is set
+- `PIEDPIPER_POSTHOG_HOST`: PostHog host, default `https://us.i.posthog.com`
+- `PIEDPIPER_TELEMETRY_ENABLED`: when a key is set, set this to `false` in the server environment to opt out, default `true` for packaged and direct server runs. `scripts/dev-runner.ts` forces it to `false` unless it is already set in the environment
+
+`turbo.json` lets these variables through strict mode, so exporting them also reaches runs started through turbo. Events are tagged with a hashed identifier rather than a raw account id.
+
+On macOS and Linux the desktop app also reads `PIEDPIPER_TELEMETRY_ENABLED` from your login shell profile (for example `~/.zshrc`), so exporting it there and restarting the app also covers launches from Finder or the Dock. On Windows, set it as a user environment variable. The desktop app does not read `PIEDPIPER_POSTHOG_KEY` from the login shell, so a key exported in `~/.zshrc` does not reach launches from Finder or the Dock, and packaged builds have analytics off.
 
 ### What Is Instrumented Today
 

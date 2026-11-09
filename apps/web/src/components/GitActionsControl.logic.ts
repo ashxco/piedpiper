@@ -3,6 +3,7 @@ import type {
   GitStackedAction,
   GitStatusResult,
 } from "@piedpiper/contracts";
+import { isTemporaryWorktreeBranch } from "@piedpiper/shared/git";
 
 export type GitActionIconName = "commit" | "push" | "pr";
 
@@ -68,7 +69,6 @@ export function buildMenuItems(
   const canPush =
     !isBusy &&
     hasBranch &&
-    !hasChanges &&
     !isBehind &&
     gitStatus.aheadCount > 0 &&
     (gitStatus.hasUpstream || canPushWithoutUpstream);
@@ -98,7 +98,7 @@ export function buildMenuItems(
   if (hasOpenPr) {
     items.push({
       id: "pr",
-      label: "View PR",
+      label: viewPrLabel(gitStatus.pr),
       disabled: !canOpenPr,
       icon: "pr",
       kind: "open_pr",
@@ -106,6 +106,10 @@ export function buildMenuItems(
   }
 
   return items;
+}
+
+export function viewPrLabel(pr: GitStatusResult["pr"]): "View PR" | "View draft PR" {
+  return pr?.isDraft === true ? "View draft PR" : "View PR";
 }
 
 export function resolveQuickAction(
@@ -143,7 +147,8 @@ export function resolveQuickAction(
   }
 
   if (hasChanges) {
-    if (!gitStatus.hasUpstream && !hasOriginRemote) {
+    // Pushing onto a branch that is behind would be rejected as non-fast-forward.
+    if (isBehind || (!gitStatus.hasUpstream && !hasOriginRemote)) {
       return { label: "Commit", disabled: false, kind: "run_action", action: "commit" };
     }
     return { label: "Commit & push", disabled: false, kind: "run_action", action: "commit_push" };
@@ -152,18 +157,18 @@ export function resolveQuickAction(
   if (!gitStatus.hasUpstream) {
     if (!hasOriginRemote) {
       if (hasOpenPr && !isAhead) {
-        return { label: "View PR", disabled: false, kind: "open_pr" };
+        return { label: viewPrLabel(gitStatus.pr), disabled: false, kind: "open_pr" };
       }
       return {
         label: "Push",
         disabled: true,
         kind: "show_hint",
-        hint: 'Add an "origin" remote before pushing.',
+        hint: "Add a remote before pushing.",
       };
     }
     if (!isAhead) {
       if (hasOpenPr) {
-        return { label: "View PR", disabled: false, kind: "open_pr" };
+        return { label: viewPrLabel(gitStatus.pr), disabled: false, kind: "open_pr" };
       }
       return {
         label: "Push",
@@ -197,7 +202,7 @@ export function resolveQuickAction(
   }
 
   if (hasOpenPr && gitStatus.hasUpstream) {
-    return { label: "View PR", disabled: false, kind: "open_pr" };
+    return { label: viewPrLabel(gitStatus.pr), disabled: false, kind: "open_pr" };
   }
 
   return {
@@ -223,8 +228,18 @@ export function resolveThreadBranchUpdate(
 export function resolveLiveThreadBranchUpdate(input: {
   threadBranch: string | null;
   gitStatus: GitStatusResult | null;
+  /**
+   * null for a local-mode thread, which keeps a recorded branch (the composer warns instead) but
+   * still adopts the checkout's branch while it has none. Worktree threads own their checkout, so
+   * they keep syncing (deliberate deviation from upstream, which syncs drafts only).
+   */
+  threadWorktreePath?: string | null;
 }): { branch: string | null } | null {
   if (!input.gitStatus) {
+    return null;
+  }
+
+  if (input.threadWorktreePath === null && input.threadBranch !== null) {
     return null;
   }
 
@@ -233,6 +248,17 @@ export function resolveLiveThreadBranchUpdate(input: {
   }
 
   if (input.threadBranch === input.gitStatus.branch) {
+    return null;
+  }
+
+  // The server renamed the temporary worktree branch, but git status is still cached on the old
+  // temporary name. Syncing it back would recreate the deleted temporary branch.
+  if (
+    input.threadBranch !== null &&
+    input.gitStatus.branch !== null &&
+    !isTemporaryWorktreeBranch(input.threadBranch) &&
+    isTemporaryWorktreeBranch(input.gitStatus.branch)
+  ) {
     return null;
   }
 

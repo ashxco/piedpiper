@@ -43,10 +43,22 @@ describe("TerminalOpenInput", () => {
       decodes(TerminalOpenInput, {
         threadId: "thread-1",
         cwd: "/tmp/project",
-        cols: 10,
-        rows: 2,
+        cols: 0,
+        rows: 0,
       }),
     ).toBe(false);
+  });
+
+  it("accepts narrow split and ultrawide sizes", () => {
+    for (const [cols, rows] of [
+      [10, 2],
+      [450, 3],
+      [1000, 500],
+    ]) {
+      expect(decodes(TerminalOpenInput, { threadId: "thread-1", cwd: "/tmp", cols, rows })).toBe(
+        true,
+      );
+    }
   });
 
   it("defaults terminalId when missing", () => {
@@ -127,6 +139,18 @@ describe("TerminalResizeInput", () => {
         rows: 24,
       }),
     ).toBe(true);
+  });
+
+  it("accepts sizes up to 1000x500 and rejects out-of-range sizes", () => {
+    expect(decodes(TerminalResizeInput, { threadId: "thread-1", cols: 450, rows: 3 })).toBe(true);
+    expect(decodes(TerminalResizeInput, { threadId: "thread-1", cols: 1000, rows: 500 })).toBe(
+      true,
+    );
+    expect(decodes(TerminalResizeInput, { threadId: "thread-1", cols: 0, rows: 24 })).toBe(false);
+    expect(decodes(TerminalResizeInput, { threadId: "thread-1", cols: 1001, rows: 24 })).toBe(
+      false,
+    );
+    expect(decodes(TerminalResizeInput, { threadId: "thread-1", cols: 80, rows: 501 })).toBe(false);
   });
 });
 

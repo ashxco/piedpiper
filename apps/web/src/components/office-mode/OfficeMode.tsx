@@ -2,20 +2,9 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { resolveThreadStatusPill } from "../Sidebar.logic";
 import type { SidebarThreadSummary } from "../../types";
 import type { Project } from "../../types";
-import { useNavigate } from "@tanstack/react-router";
-import {
-  ChevronLeftIcon,
-  ArrowRightLeftIcon,
-  ChevronRightIcon,
-  LightbulbIcon,
-  MessageSquareIcon,
-  XIcon,
-} from "lucide-react";
-import { useAdvisorChatStore, useAdvisorThreadIdForCharacter } from "../../advisorChatStore";
-import { parseAdvisor } from "../../lib/advisorIdentity";
-import { compareByProminence } from "../../lib/advisorProminence";
-import { getAdvisorMeta } from "../../lib/advisorSkills";
-import { AdvisorCardChat } from "./AdvisorCardChat";
+import { ChevronLeftIcon, ArrowRightLeftIcon, ChevronRightIcon, XIcon } from "lucide-react";
+import { parseNpcCharacter } from "../../lib/npcIdentity";
+import { compareByProminence } from "../../lib/npcProminence";
 import { CHARACTER_LINES } from "./characterLines";
 import { AGENT_LINES } from "./agentLines";
 import { WORKING_MESSAGES } from "./workingMessages";
@@ -24,7 +13,7 @@ import { useUiStateStore } from "../../uiStateStore";
 import type { ThreadId } from "@piedpiper/contracts";
 
 import { Joystick } from "./Joystick";
-import { TIER_1, TIER_2, TIER_3, TIER_4, TIER_5, TIER_6, TIER_7 } from "./npcCharacters";
+import { TIER_2, TIER_3, TIER_4, TIER_5, TIER_6, TIER_7 } from "./npcCharacters";
 import {
   CLUSTERS,
   CLUSTERS_PER_TILE,
@@ -159,7 +148,7 @@ const SwapPicker = memo(function SwapPicker({
         }}
       >
         {chars.map((charId) => {
-          const p = parseAdvisor(charId);
+          const p = parseNpcCharacter(charId);
           return (
             <button
               key={charId}
@@ -217,7 +206,6 @@ const SwapPicker = memo(function SwapPicker({
 });
 
 export const OfficeMode = memo(function OfficeMode({ projectThreads }: OfficeModeProps) {
-  const navigate = useNavigate();
   const containerRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<{
     startX: number;
@@ -259,28 +247,7 @@ export const OfficeMode = memo(function OfficeMode({ projectThreads }: OfficeMod
   const [hoveredDeskKey, setHoveredDeskKey] = useState<string | null>(null);
   const setHoveredThreadId = useOfficeHoverStore((s) => s.setHoveredThreadId);
   const threadLastVisitedAtById = useUiStateStore((s) => s.threadLastVisitedAtById);
-  const [advisorChat, setAdvisorChat] = useState<{
-    characterId: string;
-  } | null>(null);
-  const lastAdvisorChatRef = useRef(advisorChat);
-  if (advisorChat) lastAdvisorChatRef.current = advisorChat;
-  const displayAdvisorChat = advisorChat ?? lastAdvisorChatRef.current;
-  const [floatingCardMode, setFloatingCardMode] = useState<"quote" | "chat" | "swap">("quote");
-  // Per-character thread map lives in a small Zustand store so navigating
-  // away from /virtual-office and coming back resumes the existing chat for
-  // each NPC instead of starting a fresh one. The store is in-memory only
-  // (not persisted to localStorage); the underlying threads themselves live
-  // in SQLite and are still reachable via the advisors page on hard reload.
-  const persistedAdvisorThreadIdForActiveCharacter = useAdvisorThreadIdForCharacter(
-    displayAdvisorChat?.characterId ?? null,
-  );
-  const setAdvisorChatThreadId = useAdvisorChatStore((state) => state.setThreadId);
-  const handleAdvisorThreadCreated = useCallback(
-    (characterId: string, createdThreadId: ThreadId) => {
-      setAdvisorChatThreadId(characterId, createdThreadId);
-    },
-    [setAdvisorChatThreadId],
-  );
+  const [floatingCardMode, setFloatingCardMode] = useState<"quote" | "swap">("quote");
   // Ticks every 20s so working messages rotate
   const [workingTick, setWorkingTick] = useState(0);
   useEffect(() => {
@@ -625,7 +592,6 @@ export const OfficeMode = memo(function OfficeMode({ projectThreads }: OfficeMod
     // Build a tiered character pool: shuffle each tier, then concatenate
     const CHAR_SEED = 31337;
     const tieredCharacters = [
-      ...seededShuffle(TIER_1, CHAR_SEED),
       ...seededShuffle(TIER_2, CHAR_SEED + 1),
       ...seededShuffle(TIER_3, CHAR_SEED + 2),
       ...seededShuffle(TIER_4, CHAR_SEED + 3),
@@ -901,10 +867,12 @@ export const OfficeMode = memo(function OfficeMode({ projectThreads }: OfficeMod
                   const showFront = !isBackSeat || hoveredSeatId === seat.id;
                   // Stagger the float animation by seat position so they don't all sync
                   const floatDelay = ((seat.xFrac * 7 + seat.yFrac * 13) % 1) * 2;
-                  // Resting = no active state (null or "Completed") — stops floating
+                  // Resting = no active state (null, "Completed" or "Failed") — stops floating
                   const isResting =
                     !seat.statusPulse &&
-                    (seat.statusLabel === null || seat.statusLabel === "Completed");
+                    (seat.statusLabel === null ||
+                      seat.statusLabel === "Completed" ||
+                      seat.statusLabel === "Failed");
                   // Sleeping = truly idle (null only) — sleeping sprite + Z animation
                   const isSleeping = !seat.statusPulse && seat.statusLabel === null;
                   // Working = pulsing (active session)
@@ -1198,11 +1166,11 @@ export const OfficeMode = memo(function OfficeMode({ projectThreads }: OfficeMod
 
       {/* Zoom controls — top right, matches the joystick bg */}
       <div
+        // Classes, not inline, so it can clear the native window buttons on Windows and Linux.
+        className="top-4 right-4 wco:right-[calc(100vw-env(titlebar-area-width)-env(titlebar-area-x)+1em)]"
         style={
           {
             position: "absolute",
-            top: 16,
-            right: 16,
             zIndex: 9999999,
             display: "flex",
             alignItems: "center",
@@ -1290,17 +1258,15 @@ export const OfficeMode = memo(function OfficeMode({ projectThreads }: OfficeMod
         </button>
       </div>
 
-      {/* Unified floating card — transforms between quote and chat mode */}
+      {/* Unified floating card — switches between quote and swap mode */}
       {(() => {
         const charImg = displayBubble
           ? displayBubble.kind === "agent"
             ? `/characters/resized-agents/${displayBubble.characterFile}.png`
             : `/characters/npcs/${displayBubble.characterFile}.png`
           : null;
-        const parsedBubbleAdvisor =
-          displayBubble?.kind === "npc" ? parseAdvisor(displayBubble.characterFile) : null;
-        const bubbleSkillMeta = parsedBubbleAdvisor ? getAdvisorMeta(parsedBubbleAdvisor.id) : null;
-        const isChatMode = floatingCardMode === "chat" && parsedBubbleAdvisor;
+        const parsedBubbleNpc =
+          displayBubble?.kind === "npc" ? parseNpcCharacter(displayBubble.characterFile) : null;
         const isSwapMode = floatingCardMode === "swap" && displayBubble?.kind === "npc";
         return (
           <div
@@ -1313,7 +1279,7 @@ export const OfficeMode = memo(function OfficeMode({ projectThreads }: OfficeMod
               transition: "transform 0.35s cubic-bezier(0.4,0,0.2,1), opacity 0.35s ease",
               zIndex: 200000,
               width: "min(600px, calc(100% - 48px))",
-              minHeight: isChatMode ? undefined : isSwapMode ? 400 : 160,
+              minHeight: isSwapMode ? 400 : 160,
               background: "rgba(0,0,0,0.55)",
               backdropFilter: "blur(40px)",
               WebkitBackdropFilter: "blur(40px)",
@@ -1327,7 +1293,7 @@ export const OfficeMode = memo(function OfficeMode({ projectThreads }: OfficeMod
             }}
           >
             {/* Quote mode content */}
-            {!isChatMode && !isSwapMode && (
+            {!isSwapMode && (
               <div
                 style={{
                   padding: "16px 24px",
@@ -1441,7 +1407,7 @@ export const OfficeMode = memo(function OfficeMode({ projectThreads }: OfficeMod
                     />
                   )}
                   <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 10 }}>
-                    {(parsedBubbleAdvisor || displayBubble?.agentName) && (
+                    {(parsedBubbleNpc || displayBubble?.agentName) && (
                       <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                         <span
                           style={{
@@ -1451,7 +1417,7 @@ export const OfficeMode = memo(function OfficeMode({ projectThreads }: OfficeMod
                             letterSpacing: "0.02em",
                           }}
                         >
-                          {parsedBubbleAdvisor?.shortName ?? displayBubble?.agentName}
+                          {parsedBubbleNpc?.shortName ?? displayBubble?.agentName}
                         </span>
                         {displayBubble?.kind === "npc" && (
                           <button
@@ -1493,106 +1459,19 @@ export const OfficeMode = memo(function OfficeMode({ projectThreads }: OfficeMod
                     >
                       {displayBubble?.line}
                     </p>
-                    {parsedBubbleAdvisor && (
-                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                        {bubbleSkillMeta && (
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setSpeechBubble(null);
-                              setFloatingCardMode("quote");
-                              void navigate({
-                                to: "/advisors",
-                                search: { advisor: parsedBubbleAdvisor.id },
-                              });
-                            }}
-                            style={{
-                              background: "white",
-                              border: "none",
-                              borderRadius: 999,
-                              color: "black",
-                              cursor: "pointer",
-                              padding: "6px 14px",
-                              display: "inline-flex",
-                              alignItems: "center",
-                              gap: 6,
-                              fontSize: 12,
-                              fontWeight: 600,
-                              transition: "opacity 0.15s ease",
-                            }}
-                            onMouseEnter={(e) => {
-                              e.currentTarget.style.opacity = "0.9";
-                            }}
-                            onMouseLeave={(e) => {
-                              e.currentTarget.style.opacity = "1";
-                            }}
-                          >
-                            <LightbulbIcon size={12} />
-                            Start {bubbleSkillMeta.skills[0]?.label ?? bubbleSkillMeta.role}
-                          </button>
-                        )}
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setAdvisorChat({
-                              characterId: parsedBubbleAdvisor.id,
-                            });
-                            setFloatingCardMode("chat");
-                          }}
-                          style={{
-                            background: "rgba(255,255,255,0.08)",
-                            border: "1px solid rgba(255,255,255,0.12)",
-                            borderRadius: 999,
-                            color: "rgba(255,255,255,0.9)",
-                            cursor: "pointer",
-                            padding: "6px 14px",
-                            display: "inline-flex",
-                            alignItems: "center",
-                            gap: 6,
-                            fontSize: 12,
-                            fontWeight: 500,
-                            transition: "background 0.15s ease",
-                          }}
-                          onMouseEnter={(e) => {
-                            e.currentTarget.style.background = "rgba(255,255,255,0.14)";
-                          }}
-                          onMouseLeave={(e) => {
-                            e.currentTarget.style.background = "rgba(255,255,255,0.08)";
-                          }}
-                        >
-                          <MessageSquareIcon size={12} />
-                          Chat
-                        </button>
-                      </div>
-                    )}
                   </div>
                 </div>
               </div>
-            )}
-
-            {/* Chat mode content */}
-            {isChatMode && displayAdvisorChat && (
-              <AdvisorCardChat
-                key={displayAdvisorChat.characterId}
-                characterId={displayAdvisorChat.characterId}
-                threadId={persistedAdvisorThreadIdForActiveCharacter}
-                onThreadCreated={(createdThreadId) =>
-                  handleAdvisorThreadCreated(displayAdvisorChat.characterId, createdThreadId)
-                }
-                onClose={() => setFloatingCardMode("quote")}
-              />
             )}
 
             {/* Swap mode — character picker grid with Core/Extended tabs */}
             {isSwapMode &&
               displayBubble &&
               (() => {
-                const CORE_CHARS = [...TIER_1, ...TIER_2, ...TIER_3].toSorted((a, b) => {
-                  const showA = parseAdvisor(a)?.show ?? "";
-                  const showB = parseAdvisor(b)?.show ?? "";
-                  const showOrder = { advisor: 0, sv: 1, tech: 2 } as Record<string, number>;
+                const CORE_CHARS = [...TIER_2, ...TIER_3].toSorted((a, b) => {
+                  const showA = parseNpcCharacter(a)?.show ?? "";
+                  const showB = parseNpcCharacter(b)?.show ?? "";
+                  const showOrder = { sv: 0, tech: 1 } as Record<string, number>;
                   const orderDiff = (showOrder[showA] ?? 9) - (showOrder[showB] ?? 9);
                   if (orderDiff !== 0) return orderDiff;
                   return compareByProminence(a, b);

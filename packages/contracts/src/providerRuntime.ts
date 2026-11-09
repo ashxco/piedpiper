@@ -12,7 +12,7 @@ import {
   TrimmedNonEmptyString,
   TurnId,
 } from "./baseSchemas";
-import { ProviderKind } from "./orchestration";
+import { ProviderGoal, ProviderKind } from "./orchestration";
 
 const TrimmedNonEmptyStringSchema = TrimmedNonEmptyString;
 const UnknownRecordSchema = Schema.Record(Schema.String, Schema.Unknown);
@@ -71,7 +71,13 @@ export type RuntimeTurnState = typeof RuntimeTurnState.Type;
 const RuntimePlanStepStatus = Schema.Literals(["pending", "inProgress", "completed"]);
 export type RuntimePlanStepStatus = typeof RuntimePlanStepStatus.Type;
 
-const RuntimeItemStatus = Schema.Literals(["inProgress", "completed", "failed", "declined"]);
+const RuntimeItemStatus = Schema.Literals([
+  "inProgress",
+  "completed",
+  "failed",
+  "declined",
+  "stopped",
+]);
 export type RuntimeItemStatus = typeof RuntimeItemStatus.Type;
 
 const RuntimeContentStreamKind = Schema.Literals([
@@ -160,6 +166,7 @@ const ProviderRuntimeEventType = Schema.Literals([
   "thread.realtime.audio.delta",
   "thread.realtime.error",
   "thread.realtime.closed",
+  "thread.goal.updated",
   "turn.started",
   "turn.completed",
   "turn.aborted",
@@ -223,6 +230,7 @@ const ItemCompletedType = Schema.Literal("item.completed");
 const ContentDeltaType = Schema.Literal("content.delta");
 const RequestOpenedType = Schema.Literal("request.opened");
 const RequestResolvedType = Schema.Literal("request.resolved");
+const ThreadGoalUpdatedType = Schema.Literal("thread.goal.updated");
 const UserInputRequestedType = Schema.Literal("user-input.requested");
 const UserInputResolvedType = Schema.Literal("user-input.resolved");
 const TaskStartedType = Schema.Literal("task.started");
@@ -280,6 +288,8 @@ const SessionExitedPayload = Schema.Struct({
   reason: Schema.optional(TrimmedNonEmptyStringSchema),
   recoverable: Schema.optional(Schema.Boolean),
   exitKind: Schema.optional(RuntimeSessionExitKind),
+  /** The session can be gone before its turn.completed is handled, so the exit carries the cursor. */
+  resumeCursor: Schema.optional(Schema.Unknown),
 });
 export type SessionExitedPayload = typeof SessionExitedPayload.Type;
 
@@ -362,6 +372,9 @@ const TurnCompletedPayload = Schema.Struct({
   modelUsage: Schema.optional(UnknownRecordSchema),
   totalCostUsd: Schema.optional(Schema.Number),
   errorMessage: Schema.optional(TrimmedNonEmptyStringSchema),
+  // Set when a usage limit ended the turn; null when any limit's reset is unknown.
+  rateLimitResetAt: Schema.optional(Schema.NullOr(IsoDateTime)),
+  rateLimitTypes: Schema.optional(Schema.Array(TrimmedNonEmptyStringSchema)),
 });
 export type TurnCompletedPayload = typeof TurnCompletedPayload.Type;
 
@@ -435,6 +448,10 @@ const RequestOpenedPayload = Schema.Struct({
   requestType: CanonicalRequestType,
   detail: Schema.optional(TrimmedNonEmptyStringSchema),
   args: Schema.optional(Schema.Unknown),
+  // Claude's explanation of why it asked (SDK decisionReason, terminal escapes stripped).
+  reason: Schema.optional(TrimmedNonEmptyStringSchema),
+  // True when Claude forbids a standing grant, so "Always allow this session" must not be offered.
+  noStandingGrant: Schema.optional(Schema.Boolean),
 });
 export type RequestOpenedPayload = typeof RequestOpenedPayload.Type;
 
@@ -448,6 +465,8 @@ export type RequestResolvedPayload = typeof RequestResolvedPayload.Type;
 const UserInputQuestionOption = Schema.Struct({
   label: TrimmedNonEmptyStringSchema,
   description: TrimmedNonEmptyStringSchema,
+  // Optional Markdown preview (Claude AskUserQuestion), shown when the option is focused.
+  preview: Schema.optional(Schema.String),
 });
 export type UserInputQuestionOption = typeof UserInputQuestionOption.Type;
 
@@ -464,6 +483,8 @@ export type UserInputQuestion = typeof UserInputQuestion.Type;
 
 const UserInputRequestedPayload = Schema.Struct({
   questions: Schema.Array(UserInputQuestion),
+  // "message": a non-blocking question answered by a follow-up message. Absent means "blocking".
+  responseMode: Schema.optional(Schema.Literals(["blocking", "message"])),
 });
 export type UserInputRequestedPayload = typeof UserInputRequestedPayload.Type;
 
@@ -810,6 +831,19 @@ const ProviderRuntimeRequestResolvedEvent = Schema.Struct({
 });
 export type ProviderRuntimeRequestResolvedEvent = typeof ProviderRuntimeRequestResolvedEvent.Type;
 
+const ThreadGoalUpdatedPayload = Schema.Struct({
+  goal: Schema.NullOr(ProviderGoal),
+});
+export type ThreadGoalUpdatedPayload = typeof ThreadGoalUpdatedPayload.Type;
+
+const ProviderRuntimeThreadGoalUpdatedEvent = Schema.Struct({
+  ...ProviderRuntimeEventBase.fields,
+  type: ThreadGoalUpdatedType,
+  payload: ThreadGoalUpdatedPayload,
+});
+export type ProviderRuntimeThreadGoalUpdatedEvent =
+  typeof ProviderRuntimeThreadGoalUpdatedEvent.Type;
+
 const ProviderRuntimeUserInputRequestedEvent = Schema.Struct({
   ...ProviderRuntimeEventBase.fields,
   type: UserInputRequestedType,
@@ -976,6 +1010,7 @@ export const ProviderRuntimeEventV2 = Schema.Union([
   ProviderRuntimeThreadRealtimeAudioDeltaEvent,
   ProviderRuntimeThreadRealtimeErrorEvent,
   ProviderRuntimeThreadRealtimeClosedEvent,
+  ProviderRuntimeThreadGoalUpdatedEvent,
   ProviderRuntimeTurnStartedEvent,
   ProviderRuntimeTurnCompletedEvent,
   ProviderRuntimeTurnAbortedEvent,

@@ -4,10 +4,20 @@ import { describe, expect, it } from "vitest";
 import {
   clearThreadUi,
   markThreadUnread,
+  markThreadVisited,
+  parsePersistedPinnedThreadIds,
+  parsePersistedSnoozedThreads,
+  parsePersistedThreadChangedFilesExpanded,
   reorderProjects,
+  resolveThreadChangedFilesExpanded,
   setProjectExpanded,
+  setThreadChangedFilesExpanded,
+  setThreadPinned,
+  snoozeThread,
   syncProjects,
   syncThreads,
+  unsnoozeThread,
+  type ThreadSnooze,
   type UiState,
 } from "./uiStateStore";
 
@@ -16,11 +26,30 @@ function makeUiState(overrides: Partial<UiState> = {}): UiState {
     projectExpandedById: {},
     projectOrder: [],
     threadLastVisitedAtById: {},
+    threadChangedFilesExpandedById: {},
+    pinnedThreadIds: [],
+    snoozedThreadsById: {},
     ...overrides,
   };
 }
 
 describe("uiStateStore pure functions", () => {
+  it("markThreadVisited stores the provided server timestamp", () => {
+    const threadId = ThreadId.makeUnsafe("thread-1");
+    const next = markThreadVisited(makeUiState(), threadId, "2026-02-25T12:30:00.700Z");
+    expect(next.threadLastVisitedAtById[threadId]).toBe("2026-02-25T12:30:00.700Z");
+  });
+
+  it("markThreadVisited does not move visit state backwards under clock skew", () => {
+    const threadId = ThreadId.makeUnsafe("thread-1");
+    const initialState = makeUiState({
+      threadLastVisitedAtById: { [threadId]: "2026-02-25T12:30:00.700Z" },
+    });
+    expect(markThreadVisited(initialState, threadId, "2026-02-25T12:30:00.000Z")).toBe(
+      initialState,
+    );
+  });
+
   it("markThreadUnread moves lastVisitedAt before completion for a completed thread", () => {
     const threadId = ThreadId.makeUnsafe("thread-1");
     const latestTurnCompletedAt = "2026-02-25T12:30:00.000Z";
@@ -188,5 +217,170 @@ describe("uiStateStore pure functions", () => {
     const next = clearThreadUi(initialState, thread1);
 
     expect(next.threadLastVisitedAtById).toEqual({});
+  });
+});
+
+describe("changed-files expansion state", () => {
+  const thread1 = ThreadId.makeUnsafe("thread-1");
+  const thread2 = ThreadId.makeUnsafe("thread-2");
+
+  it("stores explicit expand and collapse choices per thread and turn", () => {
+    const collapsed = setThreadChangedFilesExpanded(makeUiState(), thread1, "turn-1", false);
+    expect(collapsed.threadChangedFilesExpandedById).toEqual({ [thread1]: { "turn-1": false } });
+
+    const expanded = setThreadChangedFilesExpanded(collapsed, thread1, "turn-1", true);
+    expect(expanded.threadChangedFilesExpandedById).toEqual({ [thread1]: { "turn-1": true } });
+    expect(setThreadChangedFilesExpanded(expanded, thread1, "turn-1", true)).toBe(expanded);
+  });
+
+  it("falls back to the default when a turn has no stored choice", () => {
+    const state = makeUiState({
+      threadChangedFilesExpandedById: { [thread1]: { "turn-1": false } },
+    });
+    expect(resolveThreadChangedFilesExpanded(state, thread1, "turn-1", true)).toBe(false);
+    expect(resolveThreadChangedFilesExpanded(state, thread1, "turn-2", true)).toBe(true);
+    expect(resolveThreadChangedFilesExpanded(state, thread2, "turn-1", false)).toBe(false);
+  });
+
+  it("syncThreads prunes expansion state for deleted threads", () => {
+    const state = makeUiState({
+      threadChangedFilesExpandedById: {
+        [thread1]: { "turn-1": false },
+        [thread2]: { "turn-2": true },
+      },
+    });
+    const next = syncThreads(state, [{ id: thread1 }]);
+    expect(next.threadChangedFilesExpandedById).toEqual({ [thread1]: { "turn-1": false } });
+  });
+
+  it("clearThreadUi removes expansion state for the thread", () => {
+    const state = makeUiState({
+      threadChangedFilesExpandedById: { [thread1]: { "turn-1": false } },
+    });
+    expect(clearThreadUi(state, thread1).threadChangedFilesExpandedById).toEqual({});
+  });
+
+  it("sanitizes persisted values and drops ones without the version marker", () => {
+    expect(
+      parsePersistedThreadChangedFilesExpanded({
+        threadChangedFilesExpansionVersion: 1,
+        threadChangedFilesExpandedById: {
+          [thread1]: { "turn-1": false, "turn-2": true, "turn-3": "yes" as never },
+          [thread2]: null as never,
+          "": { "turn-1": true },
+        },
+      }),
+    ).toEqual({ [thread1]: { "turn-1": false, "turn-2": true } });
+    expect(
+      parsePersistedThreadChangedFilesExpanded({
+        threadChangedFilesExpandedById: { [thread1]: { "turn-1": false } },
+      }),
+    ).toEqual({});
+  });
+});
+
+describe("thread pinning", () => {
+  const thread1 = ThreadId.makeUnsafe("thread-1");
+  const thread2 = ThreadId.makeUnsafe("thread-2");
+
+  it("pins and unpins a thread, leaving state untouched when nothing changes", () => {
+    const pinned = setThreadPinned(makeUiState(), thread1, true);
+    expect(pinned.pinnedThreadIds).toEqual([thread1]);
+    expect(setThreadPinned(pinned, thread1, true)).toBe(pinned);
+    expect(setThreadPinned(pinned, thread1, false).pinnedThreadIds).toEqual([]);
+  });
+
+  it("clearThreadUi drops the pin of a deleted or archived thread", () => {
+    const state = makeUiState({ pinnedThreadIds: [thread1, thread2] });
+    expect(clearThreadUi(state, thread1).pinnedThreadIds).toEqual([thread2]);
+  });
+
+  it("syncThreads prunes pins of threads that no longer exist", () => {
+    const state = makeUiState({ pinnedThreadIds: [thread1, thread2] });
+    expect(syncThreads(state, [{ id: thread2 }]).pinnedThreadIds).toEqual([thread2]);
+    const unchanged = makeUiState({ pinnedThreadIds: [thread1] });
+    expect(syncThreads(unchanged, [{ id: thread1 }])).toBe(unchanged);
+  });
+
+  it("parses persisted pins, ignoring invalid and duplicate entries", () => {
+    expect(
+      parsePersistedPinnedThreadIds({
+        pinnedThreadIds: ["thread-1", "", 3 as never, "thread-1", "thread-2"],
+      }),
+    ).toEqual([thread1, thread2]);
+    expect(parsePersistedPinnedThreadIds({})).toEqual([]);
+  });
+});
+
+describe("uiStateStore thread snoozes", () => {
+  const threadId = ThreadId.makeUnsafe("thread-1");
+  const snooze: ThreadSnooze = {
+    snoozedUntil: "2026-02-26T09:00:00.000Z",
+    snoozedAt: "2026-02-25T12:00:00.000Z",
+    questionPendingAtSnooze: false,
+  };
+
+  it("stores and removes a snooze, keeping state identity when there is nothing to remove", () => {
+    const snoozed = snoozeThread(makeUiState(), threadId, snooze);
+    expect(snoozed.snoozedThreadsById[threadId]).toEqual(snooze);
+    expect(unsnoozeThread(snoozed, threadId).snoozedThreadsById).toEqual({});
+    const empty = makeUiState();
+    expect(unsnoozeThread(empty, threadId)).toBe(empty);
+  });
+
+  it("round-trips through the persisted shape", () => {
+    const state = snoozeThread(makeUiState(), threadId, snooze);
+    const persisted = JSON.parse(
+      JSON.stringify({ snoozedThreadsById: state.snoozedThreadsById }),
+    ) as { snoozedThreadsById: Record<string, unknown> };
+    expect(parsePersistedSnoozedThreads(persisted)).toEqual({ [threadId]: snooze });
+  });
+
+  it("drops malformed persisted entries so they can never hide a thread", () => {
+    expect(
+      parsePersistedSnoozedThreads({
+        snoozedThreadsById: {
+          bad: { snoozedUntil: "not-a-date", snoozedAt: snooze.snoozedAt },
+          missing: { snoozedUntil: snooze.snoozedUntil },
+          nullish: null as unknown as Record<string, unknown>,
+          flagless: { snoozedUntil: snooze.snoozedUntil, snoozedAt: snooze.snoozedAt },
+          seen: {
+            snoozedUntil: snooze.snoozedUntil,
+            snoozedAt: snooze.snoozedAt,
+            wakeSeenAt: "2026-02-25T13:00:00.000Z",
+          },
+          badSeen: {
+            snoozedUntil: snooze.snoozedUntil,
+            snoozedAt: snooze.snoozedAt,
+            wakeSeenAt: 1,
+          },
+        },
+      }),
+    ).toEqual({
+      flagless: {
+        snoozedUntil: snooze.snoozedUntil,
+        snoozedAt: snooze.snoozedAt,
+        questionPendingAtSnooze: false,
+      },
+      seen: {
+        snoozedUntil: snooze.snoozedUntil,
+        snoozedAt: snooze.snoozedAt,
+        questionPendingAtSnooze: false,
+        wakeSeenAt: "2026-02-25T13:00:00.000Z",
+      },
+      badSeen: {
+        snoozedUntil: snooze.snoozedUntil,
+        snoozedAt: snooze.snoozedAt,
+        questionPendingAtSnooze: false,
+      },
+    });
+    expect(parsePersistedSnoozedThreads({})).toEqual({});
+  });
+
+  it("forgets snoozes of removed threads in syncThreads and clearThreadUi", () => {
+    const state = snoozeThread(makeUiState(), threadId, snooze);
+    expect(syncThreads(state, []).snoozedThreadsById).toEqual({});
+    expect(clearThreadUi(state, threadId).snoozedThreadsById).toEqual({});
+    expect(syncThreads(state, [{ id: threadId }])).toBe(state);
   });
 });

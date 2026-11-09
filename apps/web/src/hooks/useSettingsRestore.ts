@@ -3,6 +3,7 @@ import { DEFAULT_UNIFIED_SETTINGS } from "@piedpiper/contracts/settings";
 import { Equal } from "effect";
 import { useCallback, useMemo } from "react";
 
+import { getChangedTopLevelSettingLabels } from "../components/settings/settingsRestoreLabels";
 import { ensureNativeApi, readNativeApi } from "../nativeApi";
 import { useSettings, useUpdateSettings } from "./useSettings";
 import { useTheme } from "./useTheme";
@@ -27,38 +28,11 @@ export function useSettingsRestore(onRestored?: () => void) {
   const changedSettingLabels = useMemo(
     () => [
       ...(theme !== "system" ? ["Theme"] : []),
-      ...(settings.timestampFormat !== DEFAULT_UNIFIED_SETTINGS.timestampFormat
-        ? ["Time format"]
-        : []),
-      ...(settings.diffWordWrap !== DEFAULT_UNIFIED_SETTINGS.diffWordWrap
-        ? ["Diff line wrapping"]
-        : []),
-      ...(settings.enableAssistantStreaming !== DEFAULT_UNIFIED_SETTINGS.enableAssistantStreaming
-        ? ["Assistant output"]
-        : []),
-      ...(settings.defaultThreadEnvMode !== DEFAULT_UNIFIED_SETTINGS.defaultThreadEnvMode
-        ? ["New thread mode"]
-        : []),
-      ...(settings.confirmThreadArchive !== DEFAULT_UNIFIED_SETTINGS.confirmThreadArchive
-        ? ["Archive confirmation"]
-        : []),
-      ...(settings.confirmThreadDelete !== DEFAULT_UNIFIED_SETTINGS.confirmThreadDelete
-        ? ["Delete confirmation"]
-        : []),
+      ...getChangedTopLevelSettingLabels(settings),
       ...(isGitWritingModelDirty ? ["Git writing model"] : []),
       ...(areProviderSettingsDirty ? ["Providers"] : []),
     ],
-    [
-      areProviderSettingsDirty,
-      isGitWritingModelDirty,
-      settings.confirmThreadArchive,
-      settings.confirmThreadDelete,
-      settings.defaultThreadEnvMode,
-      settings.diffWordWrap,
-      settings.enableAssistantStreaming,
-      settings.timestampFormat,
-      theme,
-    ],
+    [areProviderSettingsDirty, isGitWritingModelDirty, settings, theme],
   );
 
   const restoreDefaults = useCallback(async () => {

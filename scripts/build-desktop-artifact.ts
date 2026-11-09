@@ -13,7 +13,18 @@ import { resolveCatalogDependencies } from "./lib/resolve-catalog.ts";
 
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { Config, Data, Effect, FileSystem, Layer, Logger, Option, Path, Schema } from "effect";
+import {
+  Config,
+  Data,
+  Effect,
+  FileSystem,
+  Layer,
+  Logger,
+  Option,
+  Path,
+  Result,
+  Schema,
+} from "effect";
 import { Command, Flag } from "effect/unstable/cli";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
@@ -101,7 +112,7 @@ function getDefaultArch(platform: typeof BuildPlatform.Type): typeof BuildArch.T
   return config.archChoices[0] ?? "x64";
 }
 
-class BuildScriptError extends Data.TaggedError("BuildScriptError")<{
+export class BuildScriptError extends Data.TaggedError("BuildScriptError")<{
   readonly message: string;
   readonly cause?: unknown;
 }> {}
@@ -182,6 +193,7 @@ interface StagePackageJson {
   readonly devDependencies: {
     readonly electron: string;
   };
+  readonly patchedDependencies?: Record<string, string>;
 }
 
 const AzureTrustedSigningOptionsConfig = Config.all({
@@ -356,7 +368,49 @@ function stageMacIcons(stageResourcesDir: string, verbose: boolean) {
   });
 }
 
-function stageLinuxIcons(stageResourcesDir: string) {
+// electron-builder does not resize a single PNG, and AppImage hosts look icons up by size.
+export const LINUX_ICON_SIZES = [16, 22, 24, 32, 48, 64, 128, 256, 512] as const;
+
+const LINUX_ICON_RESIZE_TOOLS: ReadonlyArray<{
+  readonly tool: string;
+  readonly args: (source: string, target: string, size: number) => ReadonlyArray<string>;
+}> = [
+  {
+    tool: "magick",
+    args: (source, target, size) => [source, "-resize", `${size}x${size}`, target],
+  },
+  {
+    tool: "convert",
+    args: (source, target, size) => [source, "-resize", `${size}x${size}`, target],
+  },
+  {
+    tool: "sips",
+    args: (source, target, size) => ["-z", `${size}`, `${size}`, source, "--out", target],
+  },
+];
+
+export const stageLinuxIconSize = Effect.fn("stageLinuxIconSize")(function* (
+  sourcePng: string,
+  targetPng: string,
+  iconSize: number,
+  verbose: boolean,
+) {
+  const failures: string[] = [];
+  for (const { tool, args } of LINUX_ICON_RESIZE_TOOLS) {
+    const attempt = yield* runCommand(
+      ChildProcess.make(tool, [...args(sourcePng, targetPng, iconSize)], {
+        ...commandOutputOptions(verbose),
+      }),
+    ).pipe(Effect.result);
+    if (Result.isSuccess(attempt)) return;
+    failures.push(`${tool}: ${attempt.failure.message}`);
+  }
+  return yield* new BuildScriptError({
+    message: `Could not resize the Linux icon to ${iconSize}x${iconSize}. Install ImageMagick so \`magick\` or \`convert\` is available (\`sips\` also works on macOS). Tried ${failures.join("; ")}`,
+  });
+});
+
+export function stageLinuxIcons(stageResourcesDir: string, verbose: boolean) {
   return Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
@@ -367,8 +421,20 @@ function stageLinuxIcons(stageResourcesDir: string) {
       });
     }
 
+    // The app itself still loads icon.png as its window icon.
     const iconPath = path.join(stageResourcesDir, "icon.png");
     yield* fs.copyFile(iconSource, iconPath);
+
+    const iconsDir = path.join(stageResourcesDir, "icons");
+    yield* fs.makeDirectory(iconsDir, { recursive: true });
+    for (const iconSize of LINUX_ICON_SIZES) {
+      yield* stageLinuxIconSize(
+        iconSource,
+        path.join(iconsDir, `${iconSize}x${iconSize}.png`),
+        iconSize,
+        verbose,
+      );
+    }
   });
 }
 
@@ -465,22 +531,74 @@ function resolveGitHubPublishConfig():
   };
 }
 
-const createBuildConfig = Effect.fn("createBuildConfig")(function* (
+// A known electron-builder 26 release: reproducible builds and support for `toolsets`.
+const ELECTRON_BUILDER_VERSION = "26.15.6";
+export const DESKTOP_ELECTRON_LANGUAGES = ["en-US"] as const;
+// The app always runs the user's own claude binary, so the SDK's ~200MB platform packages are
+// dead weight. The trailing dash keeps the SDK's own JS package.
+export const DESKTOP_FILE_EXCLUSIONS = [
+  "!**/node_modules/@anthropic-ai/claude-agent-sdk-*/**/*",
+] as const;
+// node-pty's Windows prebuilds and ConPTY helpers (about 60MB) cannot run on macOS or Linux.
+export const MAC_FILE_EXCLUSIONS = [
+  "!**/node_modules/node-pty/prebuilds/win32-*/**/*",
+  "!**/node_modules/node-pty/third_party/conpty/**/*",
+] as const;
+// Linux compiles node-pty during the staged install, so every published prebuild is unused.
+export const LINUX_FILE_EXCLUSIONS = [
+  ...MAC_FILE_EXCLUSIONS,
+  "!**/node_modules/node-pty/prebuilds/darwin-*/**/*",
+] as const;
+
+// A universal app runs both Darwin prebuilds; a single-architecture app only loads its own.
+export function resolveMacFileExclusions(arch?: typeof BuildArch.Type): ReadonlyArray<string> {
+  if (arch === undefined || arch === "universal") return [...MAC_FILE_EXCLUSIONS];
+  const unusedArch = arch === "arm64" ? "x64" : "arm64";
+  return [...MAC_FILE_EXCLUSIONS, `!**/node_modules/node-pty/prebuilds/darwin-${unusedArch}/**/*`];
+}
+
+function resolvePlatformFileExclusions(
+  platform: typeof BuildPlatform.Type,
+  arch: typeof BuildArch.Type | undefined,
+): ReadonlyArray<string> {
+  if (platform === "mac") return resolveMacFileExclusions(arch);
+  if (platform === "linux") return LINUX_FILE_EXCLUSIONS;
+  return [];
+}
+
+// Smart unpack extracts whole native packages, JS included, which slows NSIS installs. Loaders
+// only need real files for these extensions; everything else reads fine from inside the asar.
+export const WINDOWS_NATIVE_ASAR_UNPACK_GLOB =
+  "{**/*.node,**/*.dll,**/*.exe,**/*.so,**/*.so.*,**/*.dylib}";
+export const WINDOWS_NSIS_INCLUDE = "apps/desktop/resources/installer.nsh";
+
+// The static AppImage runtime does not need the system libfuse2 (FUSE-3-only distributions).
+const LINUX_APPIMAGE_TOOLSETS = { appimage: "1.0.3" } as const;
+
+export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
   platform: typeof BuildPlatform.Type,
   target: string,
   productName: string,
   signed: boolean,
   mockUpdates: boolean,
   mockUpdateServerPort: string | undefined,
+  arch?: typeof BuildArch.Type,
 ) {
   const buildConfig: Record<string, unknown> = {
     appId: "com.piedpiper.app",
     productName,
     artifactName: "PiedPiper-${version}-${arch}.${ext}",
+    electronLanguages: [...DESKTOP_ELECTRON_LANGUAGES],
+    files: [...DESKTOP_FILE_EXCLUSIONS, ...resolvePlatformFileExclusions(platform, arch)],
     directories: {
       buildResources: "apps/desktop/resources",
     },
+    ...(platform === "win"
+      ? { asar: { smartUnpack: false }, asarUnpack: [WINDOWS_NATIVE_ASAR_UNPACK_GLOB] }
+      : {}),
   };
+  // Left undefined, electron-builder infers a GitHub feed from GH_TOKEN and crashes without a repo.
+  buildConfig.publish = null;
   const publishConfig = resolveGitHubPublishConfig();
   if (publishConfig) {
     buildConfig.publish = [publishConfig];
@@ -498,14 +616,28 @@ const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       target: target === "dmg" ? [target, "zip"] : [target],
       icon: "icon.icns",
       category: "public.app-category.developer-tools",
+      extendInfo: {
+        NSLocalNetworkUsageDescription:
+          "Pied Piper connects to devices on your local network for commands run by terminals and coding agents.",
+        NSCameraUsageDescription:
+          "Pied Piper lets commands run by terminals and coding agents use the camera.",
+        NSMicrophoneUsageDescription:
+          "Pied Piper lets commands run by terminals and coding agents use the microphone.",
+        // macOS 26 offers Messages/Mail codes in every text field unless opted out.
+        NSAutoFillRequiresTextContentTypeForOneTimeCodeOnMac: true,
+      },
     };
   }
 
   if (platform === "linux") {
+    const path = yield* Path.Path;
+    const repoRoot = yield* RepoRoot;
+    buildConfig.afterPack = path.join(repoRoot, "scripts/linux-after-pack.ts");
+    buildConfig.toolsets = { ...LINUX_APPIMAGE_TOOLSETS };
     buildConfig.linux = {
       target: [target],
       executableName: "piedpiper",
-      icon: "icon.png",
+      icon: "icons",
       category: "Development",
       desktop: {
         entry: {
@@ -524,6 +656,7 @@ const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       winConfig.azureSignOptions = yield* AzureTrustedSigningOptionsConfig;
     }
     buildConfig.win = winConfig;
+    buildConfig.nsis = { include: WINDOWS_NSIS_INCLUDE };
   }
 
   return buildConfig;
@@ -540,7 +673,7 @@ const assertPlatformBuildResources = Effect.fn("assertPlatformBuildResources")(f
   }
 
   if (platform === "linux") {
-    yield* stageLinuxIcons(stageResourcesDir);
+    yield* stageLinuxIcons(stageResourcesDir, verbose);
     return;
   }
 
@@ -655,6 +788,14 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   // electron-builder is filtering out stageResourcesDir directory in the AppImage for production
   yield* fs.copy(stageResourcesDir, path.join(stageAppDir, "apps/desktop/prod-resources"));
 
+  // The server bundle keeps npm dependencies external, so the staged install must apply the
+  // same dependency patches as the workspace install.
+  const patchedDependencies: Record<string, string> = rootPackageJson.patchedDependencies ?? {};
+  for (const patchPath of Object.values(patchedDependencies)) {
+    yield* fs.makeDirectory(path.dirname(path.join(stageAppDir, patchPath)), { recursive: true });
+    yield* fs.copy(path.join(repoRoot, patchPath), path.join(stageAppDir, patchPath));
+  }
+
   const stagePackageJson: StagePackageJson = {
     name: "piedpiper",
     version: appVersion,
@@ -663,7 +804,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     private: true,
     description: "Pied Piper desktop build",
     author: "Pied Piper",
-    main: "apps/desktop/dist-electron/main.js",
+    main: "apps/desktop/dist-electron/boot.js",
     build: yield* createBuildConfig(
       options.platform,
       options.target,
@@ -671,6 +812,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
       options.signed,
       options.mockUpdates,
       options.mockUpdateServerPort,
+      options.arch,
     ),
     dependencies: {
       ...resolvedServerDependencies,
@@ -679,6 +821,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     devDependencies: {
       electron: electronVersion,
     },
+    ...(Object.keys(patchedDependencies).length > 0 ? { patchedDependencies } : {}),
   };
 
   const stagePackageJsonString = yield* encodeJsonString(stagePackageJson);
@@ -731,7 +874,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
       ...commandOutputOptions(options.verbose),
       // Windows needs shell mode to resolve .cmd shims.
       shell: process.platform === "win32",
-    })`bunx electron-builder ${platformConfig.cliFlag} --${options.arch} --publish never`,
+    })`bunx electron-builder@${ELECTRON_BUILDER_VERSION} ${platformConfig.cliFlag} --${options.arch} --publish never`,
   );
 
   const stageDistDir = path.join(stageAppDir, "dist");
@@ -828,8 +971,10 @@ const buildDesktopArtifactCli = Command.make("build-desktop-artifact", {
 
 const cliRuntimeLayer = Layer.mergeAll(Logger.layer([Logger.consolePretty()]), NodeServices.layer);
 
-Command.run(buildDesktopArtifactCli, { version: "0.0.0" }).pipe(
-  Effect.scoped,
-  Effect.provide(cliRuntimeLayer),
-  NodeRuntime.runMain,
-);
+if (import.meta.main) {
+  Command.run(buildDesktopArtifactCli, { version: "0.0.0" }).pipe(
+    Effect.scoped,
+    Effect.provide(cliRuntimeLayer),
+    NodeRuntime.runMain,
+  );
+}

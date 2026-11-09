@@ -1,49 +1,15 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  COMPOSER_FOOTER_COMPACT_BREAKPOINT_PX,
-  COMPOSER_FOOTER_WIDE_ACTIONS_COMPACT_BREAKPOINT_PX,
   COMPOSER_PRIMARY_ACTIONS_COMPACT_BREAKPOINT_PX,
-  measureComposerFooterOverflowPx,
+  resolveComposerFooterBlockStates,
   resolveComposerFooterContentWidth,
-  shouldForceCompactComposerFooterForFit,
+  resolveComposerFooterControlsLayout,
   shouldUseCompactComposerPrimaryActions,
-  shouldUseCompactComposerFooter,
 } from "./composerFooterLayout";
 
-describe("shouldUseCompactComposerFooter", () => {
-  it("stays expanded without a measured width", () => {
-    expect(shouldUseCompactComposerFooter(null)).toBe(false);
-  });
-
-  it("switches to compact mode below the breakpoint", () => {
-    expect(shouldUseCompactComposerFooter(COMPOSER_FOOTER_COMPACT_BREAKPOINT_PX - 1)).toBe(true);
-  });
-
-  it("stays expanded at and above the breakpoint", () => {
-    expect(shouldUseCompactComposerFooter(COMPOSER_FOOTER_COMPACT_BREAKPOINT_PX)).toBe(false);
-    expect(shouldUseCompactComposerFooter(COMPOSER_FOOTER_COMPACT_BREAKPOINT_PX + 48)).toBe(false);
-  });
-
-  it("uses a higher breakpoint for wide action states", () => {
-    expect(
-      shouldUseCompactComposerFooter(COMPOSER_FOOTER_WIDE_ACTIONS_COMPACT_BREAKPOINT_PX - 1, {
-        hasWideActions: true,
-      }),
-    ).toBe(true);
-    expect(
-      shouldUseCompactComposerFooter(COMPOSER_FOOTER_WIDE_ACTIONS_COMPACT_BREAKPOINT_PX, {
-        hasWideActions: true,
-      }),
-    ).toBe(false);
-  });
-});
-
 describe("shouldUseCompactComposerPrimaryActions", () => {
-  it("matches the wide footer breakpoint", () => {
-    expect(COMPOSER_PRIMARY_ACTIONS_COMPACT_BREAKPOINT_PX).toBe(
-      COMPOSER_FOOTER_WIDE_ACTIONS_COMPACT_BREAKPOINT_PX,
-    );
+  it("compacts wide action states below the breakpoint", () => {
     expect(
       shouldUseCompactComposerPrimaryActions(COMPOSER_PRIMARY_ACTIONS_COMPACT_BREAKPOINT_PX - 1, {
         hasWideActions: true,
@@ -55,69 +21,121 @@ describe("shouldUseCompactComposerPrimaryActions", () => {
       }),
     ).toBe(false);
   });
-});
 
-describe("measureComposerFooterOverflowPx", () => {
-  it("returns the overflow amount when content exceeds the footer width", () => {
-    expect(
-      measureComposerFooterOverflowPx({
-        footerContentWidth: 500,
-        leadingContentWidth: 340,
-        actionsWidth: 180,
-      }),
-    ).toBe(28);
-  });
-
-  it("returns zero when content fits", () => {
-    expect(
-      measureComposerFooterOverflowPx({
-        footerContentWidth: 500,
-        leadingContentWidth: 320,
-        actionsWidth: 160,
-      }),
-    ).toBe(0);
+  it("never compacts ordinary actions or an unmeasured composer", () => {
+    expect(shouldUseCompactComposerPrimaryActions(200)).toBe(false);
+    expect(shouldUseCompactComposerPrimaryActions(null, { hasWideActions: true })).toBe(false);
   });
 });
 
-describe("shouldForceCompactComposerFooterForFit", () => {
-  it("stays expanded when content widths fit within the footer", () => {
-    expect(
-      shouldForceCompactComposerFooterForFit({
-        footerContentWidth: 500,
-        leadingContentWidth: 320,
-        actionsWidth: 160,
-      }),
-    ).toBe(false);
+describe("resolveComposerFooterControlsLayout", () => {
+  const measurement = {
+    fixedWidth: 140,
+    gap: 4,
+    blockWidths: [80, 140],
+    iconOnlyBlockWidths: [40, 60],
+    overflowWidth: 24,
+  };
+
+  it("removes trailing labels before moving controls into the menu", () => {
+    for (const [availableWidth, iconOnlyCount, hiddenCount] of [
+      [368, 0, 0],
+      [367, 1, 0],
+      [288, 1, 0],
+      [287, 2, 0],
+      [248, 2, 0],
+      [247, 2, 1],
+      [212, 2, 1],
+      [211, 2, 2],
+      [0, 2, 2],
+    ] as const) {
+      expect(resolveComposerFooterControlsLayout({ ...measurement, availableWidth })).toEqual({
+        iconOnlyCount,
+        hiddenCount,
+      });
+    }
   });
 
-  it("stays expanded when minor overflow can be recovered by compacting primary actions", () => {
+  it("demotes immediately but restores only with a pixel of slack", () => {
+    for (const [availableWidth, previous, promoted] of [
+      [368, { iconOnlyCount: 1, hiddenCount: 0 }, { iconOnlyCount: 0, hiddenCount: 0 }],
+      [288, { iconOnlyCount: 2, hiddenCount: 0 }, { iconOnlyCount: 1, hiddenCount: 0 }],
+      [248, { iconOnlyCount: 2, hiddenCount: 1 }, { iconOnlyCount: 2, hiddenCount: 0 }],
+    ] as const) {
+      expect(
+        resolveComposerFooterControlsLayout({ ...measurement, availableWidth, previous }),
+      ).toEqual(previous);
+      expect(
+        resolveComposerFooterControlsLayout({
+          ...measurement,
+          availableWidth: availableWidth + 1,
+          previous,
+        }),
+      ).toEqual(promoted);
+    }
     expect(
-      shouldForceCompactComposerFooterForFit({
-        footerContentWidth: 500,
-        leadingContentWidth: 340,
-        actionsWidth: 180,
+      resolveComposerFooterControlsLayout({
+        ...measurement,
+        availableWidth: 367,
+        previous: { iconOnlyCount: 0, hiddenCount: 0 },
       }),
-    ).toBe(false);
+    ).toEqual({ iconOnlyCount: 1, hiddenCount: 0 });
   });
 
-  it("forces footer compact mode when action compaction would not recover enough space", () => {
-    expect(
-      shouldForceCompactComposerFooterForFit({
-        footerContentWidth: 500,
-        leadingContentWidth: 420,
-        actionsWidth: 220,
-      }),
-    ).toBe(true);
+  it("settles when label widths jitter by a fraction of a pixel at each threshold", () => {
+    for (const availableWidth of [368, 288, 248, 212]) {
+      let previous = resolveComposerFooterControlsLayout({ ...measurement, availableWidth });
+      for (let render = 0; render < 10; render += 1) {
+        const next = resolveComposerFooterControlsLayout({
+          ...measurement,
+          availableWidth,
+          previous,
+          fixedWidth: 140 + (render % 2) * 0.5,
+        });
+        if (render > 1) expect(next).toEqual(previous);
+        previous = next;
+      }
+    }
   });
 
-  it("ignores incomplete measurements", () => {
+  it("clamps a previous layout when the block list shrinks", () => {
     expect(
-      shouldForceCompactComposerFooterForFit({
-        footerContentWidth: null,
-        leadingContentWidth: 340,
-        actionsWidth: 180,
+      resolveComposerFooterControlsLayout({
+        ...measurement,
+        availableWidth: 1000,
+        previous: { iconOnlyCount: 4, hiddenCount: 4 },
       }),
-    ).toBe(false);
+    ).toEqual({ iconOnlyCount: 0, hiddenCount: 0 });
+  });
+
+  it("handles an empty block list", () => {
+    expect(
+      resolveComposerFooterControlsLayout({
+        ...measurement,
+        blockWidths: [],
+        iconOnlyBlockWidths: [],
+        availableWidth: 10,
+      }),
+    ).toEqual({ iconOnlyCount: 0, hiddenCount: 0 });
+  });
+});
+
+describe("resolveComposerFooterBlockStates", () => {
+  const blocks = ["traits", "mode", "access", "plan"] as const;
+
+  it("takes hidden and icon-only blocks from the end", () => {
+    expect(resolveComposerFooterBlockStates(blocks, { iconOnlyCount: 0, hiddenCount: 0 })).toEqual({
+      hidden: [],
+      iconOnly: [],
+    });
+    expect(resolveComposerFooterBlockStates(blocks, { iconOnlyCount: 2, hiddenCount: 0 })).toEqual({
+      hidden: [],
+      iconOnly: ["access", "plan"],
+    });
+    expect(resolveComposerFooterBlockStates(blocks, { iconOnlyCount: 4, hiddenCount: 1 })).toEqual({
+      hidden: ["plan"],
+      iconOnly: blocks,
+    });
   });
 });
 

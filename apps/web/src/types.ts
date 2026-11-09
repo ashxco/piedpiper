@@ -38,7 +38,16 @@ export interface ChatImageAttachment {
   previewUrl?: string;
 }
 
-export type ChatAttachment = ChatImageAttachment;
+export interface ChatFileAttachment {
+  type: "file";
+  id: string;
+  name: string;
+  mimeType: string;
+  sizeBytes: number;
+  previewUrl?: never;
+}
+
+export type ChatAttachment = ChatImageAttachment | ChatFileAttachment;
 
 export interface ChatMessage {
   id: MessageId;
@@ -72,7 +81,11 @@ export interface TurnDiffSummary {
   turnId: TurnId;
   completedAt: string;
   status?: string | undefined;
+  /** A prefix of the turn's files when `filesTotal` is set. */
   files: TurnDiffFileChange[];
+  filesTotal?: number | undefined;
+  additionsTotal?: number | undefined;
+  deletionsTotal?: number | undefined;
   checkpointRef?: CheckpointRef | undefined;
   assistantMessageId?: MessageId | undefined;
   checkpointTurnCount?: number | undefined;
@@ -85,6 +98,8 @@ export interface Project {
   defaultModelSelection: ModelSelection | null;
   createdAt?: string | undefined;
   updatedAt?: string | undefined;
+  archivedAt?: string | null | undefined;
+  faviconPath?: string | null | undefined;
   scripts: ProjectScript[];
 }
 
@@ -125,9 +140,14 @@ export interface SidebarThreadSummary {
   branch: string | null;
   worktreePath: string | null;
   latestUserMessageAt: string | null;
+  /** When the newest question still waiting on the user was asked; a newer one wakes a snooze. */
+  pendingUserInputAt?: string | null | undefined;
+  /** Newest message the user sent themselves; restart and usage-limit resends don't count. */
+  latestManualUserMessageAt?: string | null | undefined;
   hasPendingApprovals: boolean;
   hasPendingUserInput: boolean;
   hasActionableProposedPlan: boolean;
+  hasLiveBackgroundTask?: boolean | undefined;
 }
 
 export interface ThreadSession {

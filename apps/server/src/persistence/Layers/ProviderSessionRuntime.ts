@@ -22,6 +22,19 @@ const ProviderSessionRuntimeDbRowSchema = ProviderSessionRuntime.mapFields(
 );
 
 const decodeRuntime = Schema.decodeUnknownEffect(ProviderSessionRuntime);
+const decodeRuntimeDbRow = Schema.decodeUnknownEffect(ProviderSessionRuntimeDbRowSchema);
+
+// Lenient shape for list(): rows are decoded one by one so a single bad row cannot hide the rest.
+const ProviderSessionRuntimeRawRowSchema = Schema.Struct({
+  threadId: Schema.Unknown,
+  providerName: Schema.Unknown,
+  adapterKey: Schema.Unknown,
+  runtimeMode: Schema.Unknown,
+  status: Schema.Unknown,
+  lastSeenAt: Schema.Unknown,
+  resumeCursor: Schema.Unknown,
+  runtimePayload: Schema.Unknown,
+});
 
 const GetRuntimeRequestSchema = Schema.Struct({
   threadId: ThreadId,
@@ -96,7 +109,7 @@ const makeProviderSessionRuntimeRepository = Effect.gen(function* () {
 
   const listRuntimeRows = SqlSchema.findAll({
     Request: Schema.Void,
-    Result: ProviderSessionRuntimeDbRowSchema,
+    Result: ProviderSessionRuntimeRawRowSchema,
     execute: () =>
       sql`
         SELECT
@@ -165,17 +178,22 @@ const makeProviderSessionRuntimeRepository = Effect.gen(function* () {
         ),
       ),
       Effect.flatMap((rows) =>
-        Effect.forEach(
-          rows,
-          (row) =>
-            decodeRuntime(row).pipe(
-              Effect.mapError(
-                toPersistenceDecodeError("ProviderSessionRuntimeRepository.list:rowToRuntime"),
-              ),
+        Effect.forEach(rows, (row) =>
+          decodeRuntimeDbRow(row).pipe(
+            Effect.flatMap((dbRow) => decodeRuntime(dbRow)),
+            Effect.map(Option.some),
+            Effect.catch((cause) =>
+              Effect.logWarning("skipping undecodable provider session runtime row", {
+                threadId: typeof row.threadId === "string" ? row.threadId : undefined,
+                error: toPersistenceDecodeError(
+                  "ProviderSessionRuntimeRepository.list:rowToRuntime",
+                )(cause).message,
+              }).pipe(Effect.as(Option.none<ProviderSessionRuntime>())),
             ),
-          { concurrency: "unbounded" },
+          ),
         ),
       ),
+      Effect.map((decoded) => decoded.flatMap((row) => (Option.isSome(row) ? [row.value] : []))),
     );
 
   const deleteByThreadId: ProviderSessionRuntimeRepositoryShape["deleteByThreadId"] = (input) =>

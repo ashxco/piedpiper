@@ -21,8 +21,11 @@ function normalizeScriptId(value: string): string {
   return cleaned.slice(0, MAX_SCRIPT_ID_LENGTH).replace(/-+$/g, "") || "script";
 }
 
-export const commandForProjectScript = (scriptId: string): KeybindingCommand =>
-  SCRIPT_RUN_COMMAND_PATTERN.makeUnsafe(`script.${scriptId}.run`);
+/** Returns null when the id can't form a valid keybinding command (e.g. ids written by another client). */
+export function commandForProjectScriptSafe(scriptId: string): KeybindingCommand | null {
+  const candidate = `script.${scriptId}.run`;
+  return Schema.is(SCRIPT_RUN_COMMAND_PATTERN)(candidate) ? candidate : null;
+}
 
 export function projectScriptIdFromCommand(command: string): string | null {
   const trimmed = command.trim();
@@ -85,6 +88,19 @@ export function projectScriptRuntimeEnv(
     return { ...env, ...input.extraEnv };
   }
   return env;
+}
+
+/**
+ * Terminal input for running a project script. The leading space keeps it out of shell history
+ * where the shell ignores space-prefixed commands (bash ignorespace, zsh HIST_IGNORE_SPACE, fish);
+ * only the first line of a multi-line command is prefixed and PowerShell history is unaffected.
+ * Pass shellHistory "preserve" for commands the user runs themselves (e.g. chat code blocks).
+ */
+export function projectScriptTerminalInput(
+  command: string,
+  options?: { readonly shellHistory?: "preserve" | "suppress" },
+): string {
+  return options?.shellHistory === "preserve" ? `${command}\r` : ` ${command}\r`;
 }
 
 export function primaryProjectScript(scripts: ProjectScript[]): ProjectScript | null {

@@ -3,13 +3,17 @@ import { describe, expect, it } from "vitest";
 import {
   clampCollapsedComposerCursor,
   collapseExpandedComposerCursor,
+  composerStateAtPromptEnd,
   detectComposerTrigger,
   expandCollapsedComposerCursor,
   isCollapsedCursorAdjacentToInlineToken,
+  isStandaloneUsageLimitsSlashCommand,
   parseStandaloneComposerSlashCommand,
   replaceTextRange,
+  resolveComposerLineBoundaryMove,
 } from "./composer-logic";
 import { INLINE_TERMINAL_CONTEXT_PLACEHOLDER } from "./lib/terminalContext";
+import { carryDisplacedCustomAnswerIntoPrompt } from "./pendingUserInput";
 
 describe("detectComposerTrigger", () => {
   it("detects @path trigger at cursor", () => {
@@ -48,6 +52,18 @@ describe("detectComposerTrigger", () => {
     });
   });
 
+  it("detects slash model query after a capitalized /Model", () => {
+    const text = "/Model spark";
+    const trigger = detectComposerTrigger(text, text.length);
+
+    expect(trigger).toEqual({
+      kind: "slash-model",
+      query: "spark",
+      rangeStart: 0,
+      rangeEnd: text.length,
+    });
+  });
+
   it("detects non-model slash commands while typing", () => {
     const text = "/pl";
     const trigger = detectComposerTrigger(text, text.length);
@@ -58,6 +74,22 @@ describe("detectComposerTrigger", () => {
       rangeStart: 0,
       rangeEnd: text.length,
     });
+  });
+
+  it("detects any slash word, so the menu can offer provider commands", () => {
+    for (const text of ["/foo", "/compact"]) {
+      expect(detectComposerTrigger(text, text.length)).toEqual({
+        kind: "slash-command",
+        query: text.slice(1),
+        rangeStart: 0,
+        rangeEnd: text.length,
+      });
+    }
+  });
+
+  it("treats a slash word with a second slash as a path, not a command", () => {
+    expect(detectComposerTrigger("/usr/bin", "/usr/bin".length)).toBeNull();
+    expect(detectComposerTrigger("/usr/bin", "/usr".length)).toBeNull();
   });
 
   it("detects @path trigger in the middle of existing text", () => {
@@ -236,6 +268,10 @@ describe("isCollapsedCursorAdjacentToInlineToken", () => {
 });
 
 describe("parseStandaloneComposerSlashCommand", () => {
+  it("leaves /compact to reach the server as a message", () => {
+    expect(parseStandaloneComposerSlashCommand("/compact")).toBeNull();
+  });
+
   it("parses standalone /plan command", () => {
     expect(parseStandaloneComposerSlashCommand(" /plan ")).toBe("plan");
   });
@@ -246,5 +282,133 @@ describe("parseStandaloneComposerSlashCommand", () => {
 
   it("ignores slash commands with extra message text", () => {
     expect(parseStandaloneComposerSlashCommand("/plan explain this")).toBeNull();
+  });
+});
+
+describe("isStandaloneUsageLimitsSlashCommand", () => {
+  it("matches only the exact command", () => {
+    expect(isStandaloneUsageLimitsSlashCommand(" /usage-limits ")).toBe(true);
+    expect(isStandaloneUsageLimitsSlashCommand("/USAGE-LIMITS")).toBe(true);
+    expect(isStandaloneUsageLimitsSlashCommand("/usage-limits please")).toBe(false);
+    expect(isStandaloneUsageLimitsSlashCommand("/usage")).toBe(false);
+  });
+
+  it("stays out of the interaction mode parser", () => {
+    expect(parseStandaloneComposerSlashCommand("/usage-limits")).toBeNull();
+  });
+
+  it("keeps the hyphen in the slash trigger query", () => {
+    expect(detectComposerTrigger("/usage-li", "/usage-li".length)).toMatchObject({
+      kind: "slash-command",
+      query: "usage-li",
+    });
+  });
+});
+
+describe("quoted mention cursor mapping", () => {
+  const text = 'what is in @"My File.md" please';
+  const collapsedCursorAfterMention = "what is in ".length + 2;
+  const expandedCursorAfterMention = 'what is in @"My File.md" '.length;
+
+  it("maps collapsed quoted mention cursor to expanded text cursor", () => {
+    expect(expandCollapsedComposerCursor(text, collapsedCursorAfterMention)).toBe(
+      expandedCursorAfterMention,
+    );
+  });
+
+  it("maps expanded quoted mention cursor back to collapsed cursor", () => {
+    expect(collapseExpandedComposerCursor(text, expandedCursorAfterMention)).toBe(
+      collapsedCursorAfterMention,
+    );
+  });
+
+  it("uses the raw token length for a needlessly quoted simple path", () => {
+    const quoted = 'see @"src/a.ts" now';
+    const collapsedEnd = "see ".length + 1 + " now".length;
+    expect(expandCollapsedComposerCursor(quoted, collapsedEnd)).toBe(quoted.length);
+    expect(collapseExpandedComposerCursor(quoted, quoted.length)).toBe(collapsedEnd);
+  });
+
+  it("maps cursors around a quoted path that begins with @", () => {
+    const scoped = 'see @"@types/global.d.ts" now';
+    const collapsedEnd = "see ".length + 1 + " now".length;
+    expect(expandCollapsedComposerCursor(scoped, collapsedEnd)).toBe(scoped.length);
+    expect(collapseExpandedComposerCursor(scoped, scoped.length)).toBe(collapsedEnd);
+  });
+});
+
+const makeKeyEvent = (
+  value: string,
+  overrides: Partial<{
+    altKey: boolean;
+    metaKey: boolean;
+    ctrlKey: boolean;
+    shiftKey: boolean;
+    isComposing: boolean;
+    keyCode: number;
+  }> = {},
+) => ({
+  key: value,
+  altKey: false,
+  metaKey: false,
+  ctrlKey: false,
+  shiftKey: false,
+  isComposing: false,
+  keyCode: 0,
+  ...overrides,
+});
+
+describe("resolveComposerLineBoundaryMove", () => {
+  it("maps Home/End to line boundaries on macOS", () => {
+    expect(resolveComposerLineBoundaryMove(makeKeyEvent("Home"), "MacIntel")).toEqual({
+      alter: "move",
+      direction: "backward",
+    });
+    expect(
+      resolveComposerLineBoundaryMove(makeKeyEvent("End", { shiftKey: true }), "MacIntel"),
+    ).toEqual({
+      alter: "extend",
+      direction: "forward",
+    });
+  });
+
+  it("leaves other platforms, keys, modifiers and IME composition alone", () => {
+    expect(resolveComposerLineBoundaryMove(makeKeyEvent("Home"), "Win32")).toBeNull();
+    expect(resolveComposerLineBoundaryMove(makeKeyEvent("ArrowLeft"), "MacIntel")).toBeNull();
+    expect(
+      resolveComposerLineBoundaryMove(makeKeyEvent("End", { metaKey: true }), "MacIntel"),
+    ).toBeNull();
+    expect(
+      resolveComposerLineBoundaryMove(makeKeyEvent("Home", { altKey: true }), "MacIntel"),
+    ).toBeNull();
+    expect(
+      resolveComposerLineBoundaryMove(makeKeyEvent("Home", { ctrlKey: true }), "MacIntel"),
+    ).toBeNull();
+    expect(
+      resolveComposerLineBoundaryMove(makeKeyEvent("End", { isComposing: true }), "MacIntel"),
+    ).toBeNull();
+    expect(
+      resolveComposerLineBoundaryMove(makeKeyEvent("End", { keyCode: 229 }), "MacIntel"),
+    ).toBeNull();
+  });
+});
+
+describe("composerStateAtPromptEnd", () => {
+  it("puts the caret at the end of a restored draft", () => {
+    const prompt = carryDisplacedCustomAnswerIntoPrompt("first half\n", "second half");
+    expect(composerStateAtPromptEnd(prompt)).toEqual({ cursor: prompt.length, trigger: null });
+  });
+
+  it("collapses mention chips so the next keystroke lands after the draft", () => {
+    const prompt = "see @AGENTS.md please";
+    expect(composerStateAtPromptEnd(prompt).cursor).toBe("see ".length + 1 + " please".length);
+  });
+
+  it("keeps a trailing mention trigger when the draft ends with @", () => {
+    const prompt = "look at @";
+    expect(composerStateAtPromptEnd(prompt)).toEqual({
+      cursor: prompt.length,
+      trigger: { kind: "path", query: "", rangeStart: "look at ".length, rangeEnd: prompt.length },
+    });
   });
 });

@@ -2,7 +2,11 @@ import { ProjectId, ThreadId } from "@piedpiper/contracts";
 import { describe, expect, it } from "vitest";
 
 import { DEFAULT_INTERACTION_MODE, DEFAULT_RUNTIME_MODE, type Thread } from "./types";
-import { formatWorktreePathForDisplay, getOrphanedWorktreePathForThread } from "./worktreeCleanup";
+import {
+  formatThreadWorktreeLabel,
+  formatWorktreePathForDisplay,
+  getOrphanedWorktreePathForThread,
+} from "./worktreeCleanup";
 
 function makeThread(overrides: Partial<Thread> = {}): Thread {
   return {
@@ -64,6 +68,37 @@ describe("getOrphanedWorktreePathForThread", () => {
     expect(result).toBeNull();
   });
 
+  it.each([
+    ["/tmp/repo/worktrees/feature-a", "/tmp/repo/worktrees/feature-a/"],
+    ["/tmp/repo/worktrees/feature-a", "/tmp/repo/worktrees/feature-a//"],
+    ["C:\\repo\\worktrees\\feature-a", "c:/repo/worktrees/feature-a/"],
+    ["\\\\server\\share\\wt", "\\\\SERVER\\share\\wt\\"],
+    ["\\\\server\\share\\wt", "//SERVER/share/wt/"],
+  ])("treats %s and %s as the same worktree", (targetPath, otherPath) => {
+    const threads = [
+      makeThread({ id: ThreadId.makeUnsafe("thread-1"), worktreePath: targetPath }),
+      makeThread({ id: ThreadId.makeUnsafe("thread-2"), worktreePath: otherPath }),
+    ];
+    expect(getOrphanedWorktreePathForThread(threads, ThreadId.makeUnsafe("thread-1"))).toBeNull();
+    expect(getOrphanedWorktreePathForThread(threads, ThreadId.makeUnsafe("thread-2"))).toBeNull();
+  });
+
+  it("keeps case-sensitive POSIX worktrees apart", () => {
+    const threads = [
+      makeThread({
+        id: ThreadId.makeUnsafe("thread-1"),
+        worktreePath: "/tmp/repo/worktrees/Feature",
+      }),
+      makeThread({
+        id: ThreadId.makeUnsafe("thread-2"),
+        worktreePath: "/tmp/repo/worktrees/feature",
+      }),
+    ];
+    expect(getOrphanedWorktreePathForThread(threads, ThreadId.makeUnsafe("thread-1"))).toBe(
+      "/tmp/repo/worktrees/Feature",
+    );
+  });
+
   it("ignores threads linked to different worktrees", () => {
     const threads = [
       makeThread({
@@ -103,5 +138,26 @@ describe("formatWorktreePathForDisplay", () => {
   it("ignores trailing slashes", () => {
     const result = formatWorktreePathForDisplay("/tmp/custom-worktrees/my-worktree/");
     expect(result).toBe("my-worktree");
+  });
+});
+
+describe("formatThreadWorktreeLabel", () => {
+  it("includes the worktree folder and branch", () => {
+    expect(
+      formatThreadWorktreeLabel({
+        worktreePath: "/tmp/worktrees/sidebar-indicator",
+        branch: "feature/sidebar-indicator",
+      }),
+    ).toBe("Worktree: sidebar-indicator (feature/sidebar-indicator)");
+  });
+
+  it("omits the branch when the thread has none", () => {
+    expect(formatThreadWorktreeLabel({ worktreePath: "C:\\wt\\fix-1\\", branch: null })).toBe(
+      "Worktree: fix-1",
+    );
+  });
+
+  it.each([null, undefined, "", "   "])("returns null without a worktree path (%j)", (path) => {
+    expect(formatThreadWorktreeLabel({ worktreePath: path, branch: "main" })).toBeNull();
   });
 });

@@ -16,19 +16,25 @@ export interface ShellCandidate {
   args?: string[];
 }
 
-export function defaultShellResolver(): string {
-  if (process.platform === "win32") {
-    return process.env.ComSpec ?? "cmd.exe";
+export function defaultShellResolver(
+  platform: NodeJS.Platform = process.platform,
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  if (platform === "win32") {
+    return "pwsh.exe";
   }
-  return process.env.SHELL ?? "bash";
+  return env.SHELL ?? "bash";
 }
 
-export function normalizeShellCommand(value: string | undefined): string | null {
+export function normalizeShellCommand(
+  value: string | undefined,
+  platform: NodeJS.Platform = process.platform,
+): string | null {
   if (!value) return null;
   const trimmed = value.trim();
   if (trimmed.length === 0) return null;
 
-  if (process.platform === "win32") {
+  if (platform === "win32") {
     return trimmed;
   }
 
@@ -37,13 +43,25 @@ export function normalizeShellCommand(value: string | undefined): string | null 
   return firstToken.replace(/^['"]|['"]$/g, "");
 }
 
-export function shellCandidateFromCommand(command: string | null): ShellCandidate | null {
+export function shellCandidateFromCommand(
+  command: string | null,
+  platform: NodeJS.Platform = process.platform,
+): ShellCandidate | null {
   if (!command || command.length === 0) return null;
-  const shellName = path.basename(command).toLowerCase();
-  if (process.platform !== "win32" && shellName === "zsh") {
+  const shellName = (
+    platform === "win32" ? path.win32.basename(command) : path.basename(command)
+  ).toLowerCase();
+  if (platform === "win32" && (shellName === "pwsh.exe" || shellName === "powershell.exe")) {
+    return { shell: command, args: ["-NoLogo"] };
+  }
+  if (platform !== "win32" && shellName === "zsh") {
     return { shell: command, args: ["-o", "nopromptsp"] };
   }
   return { shell: command };
+}
+
+function windowsSystemRoot(env: NodeJS.ProcessEnv): string {
+  return env.SystemRoot?.trim() || env.windir?.trim() || "C:\\Windows";
 }
 
 export function formatShellCandidate(candidate: ShellCandidate): string {
@@ -64,27 +82,37 @@ export function uniqueShellCandidates(candidates: Array<ShellCandidate | null>):
   return ordered;
 }
 
-export function resolveShellCandidates(shellResolver: () => string): ShellCandidate[] {
-  const requested = shellCandidateFromCommand(normalizeShellCommand(shellResolver()));
+export function resolveShellCandidates(
+  shellResolver: () => string,
+  platform: NodeJS.Platform = process.platform,
+  env: NodeJS.ProcessEnv = process.env,
+): ShellCandidate[] {
+  const candidate = (command: string | null) => shellCandidateFromCommand(command, platform);
+  const requested = candidate(normalizeShellCommand(shellResolver(), platform));
 
-  if (process.platform === "win32") {
+  if (platform === "win32") {
+    const system32 = path.win32.join(windowsSystemRoot(env), "System32");
+    // cmd stays ahead of PowerShell 5.1: scripts are typed raw and 5.1 rejects `a && b`.
     return uniqueShellCandidates([
       requested,
-      shellCandidateFromCommand(process.env.ComSpec ?? null),
-      shellCandidateFromCommand("powershell.exe"),
-      shellCandidateFromCommand("cmd.exe"),
+      candidate("pwsh.exe"),
+      candidate(env.ComSpec ?? null),
+      candidate(path.win32.join(system32, "cmd.exe")),
+      candidate("cmd.exe"),
+      candidate(path.win32.join(system32, "WindowsPowerShell", "v1.0", "powershell.exe")),
+      candidate("powershell.exe"),
     ]);
   }
 
   return uniqueShellCandidates([
     requested,
-    shellCandidateFromCommand(normalizeShellCommand(process.env.SHELL)),
-    shellCandidateFromCommand("/bin/zsh"),
-    shellCandidateFromCommand("/bin/bash"),
-    shellCandidateFromCommand("/bin/sh"),
-    shellCandidateFromCommand("zsh"),
-    shellCandidateFromCommand("bash"),
-    shellCandidateFromCommand("sh"),
+    candidate(normalizeShellCommand(env.SHELL, platform)),
+    candidate("/bin/zsh"),
+    candidate("/bin/bash"),
+    candidate("/bin/sh"),
+    candidate("zsh"),
+    candidate("bash"),
+    candidate("sh"),
   ]);
 }
 
@@ -131,6 +159,7 @@ export function isRetryableShellSpawnError(error: PtySpawnError): boolean {
     message.includes("enoent") ||
     message.includes("not found") ||
     message.includes("file not found") ||
-    message.includes("no such file")
+    message.includes("no such file") ||
+    message.includes("cannot create process")
   );
 }

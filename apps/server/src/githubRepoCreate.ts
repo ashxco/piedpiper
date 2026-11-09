@@ -33,6 +33,9 @@ export interface GitGitHubCreateRepoResult {
   readonly htmlUrl: string;
 }
 
+// First pushes upload the whole history, so they get the same long cap as GitCore pushes.
+const FIRST_PUSH_TIMEOUT_MS = 30 * 60_000;
+
 /**
  * Build a `GitCommandError` factory bound to a single repo cwd, used to
  * report failures from any of the gh/git steps with a consistent shape.
@@ -67,27 +70,38 @@ export const gitGitHubCreateRepoEffect = (
     // Run a git command via gitCore.execute, mapping spawn errors and
     // non-zero exits into GitCommandError so the toast carries the
     // underlying detail instead of a generic "exit 1".
-    const runGit = (operation: string, args: ReadonlyArray<string>) =>
-      git.execute({ operation, cwd: input.cwd, args }).pipe(
-        Effect.mapError((cause) =>
-          failGitCommand(
-            operation,
-            `git ${args.join(" ")}`,
-            cause instanceof Error ? cause.message : String(cause),
+    const runGit = (
+      operation: string,
+      args: ReadonlyArray<string>,
+      options?: { readonly timeoutMs?: number | null },
+    ) =>
+      git
+        .execute({
+          operation,
+          cwd: input.cwd,
+          args,
+          ...(options?.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+        })
+        .pipe(
+          Effect.mapError((cause) =>
+            failGitCommand(
+              operation,
+              `git ${args.join(" ")}`,
+              cause instanceof Error ? cause.message : String(cause),
+            ),
           ),
-        ),
-        Effect.flatMap((result) =>
-          result.code === 0
-            ? Effect.succeed(result)
-            : Effect.fail(
-                failGitCommand(
-                  operation,
-                  `git ${args.join(" ")}`,
-                  (result.stderr || result.stdout || `exit code ${result.code}`).trim(),
+          Effect.flatMap((result) =>
+            result.code === 0
+              ? Effect.succeed(result)
+              : Effect.fail(
+                  failGitCommand(
+                    operation,
+                    `git ${args.join(" ")}`,
+                    (result.stderr || result.stdout || `exit code ${result.code}`).trim(),
+                  ),
                 ),
-              ),
-        ),
-      );
+          ),
+        );
 
     // Best-effort variant: returns the raw result without failing on
     // non-zero exits, used for read-only checks where we want to branch
@@ -294,13 +308,11 @@ export const gitGitHubCreateRepoEffect = (
     //    `--force-with-lease` makes the push idempotent on retry — if
     //    main was already pushed in a previous partial run, the push is
     //    a no-op (or fast-forward) instead of "rejected".
-    yield* runGit("gitGitHubCreateRepo.pushMain", [
-      "push",
-      "-u",
-      "--force-with-lease",
-      "origin",
-      "main",
-    ]);
+    yield* runGit(
+      "gitGitHubCreateRepo.pushMain",
+      ["push", "-u", "--force-with-lease", "origin", "main"],
+      { timeoutMs: FIRST_PUSH_TIMEOUT_MS },
+    );
 
     // 6. If the user was on something other than main, push that too so
     //    they can keep working on the same branch.
@@ -311,13 +323,11 @@ export const gitGitHubCreateRepoEffect = (
     ]);
     const currentBranch = currentBranchResult.stdout.trim();
     if (currentBranch && currentBranch !== "main" && currentBranch !== "HEAD") {
-      yield* runGit("gitGitHubCreateRepo.pushCurrent", [
-        "push",
-        "-u",
-        "--force-with-lease",
-        "origin",
-        currentBranch,
-      ]);
+      yield* runGit(
+        "gitGitHubCreateRepo.pushCurrent",
+        ["push", "-u", "--force-with-lease", "origin", currentBranch],
+        { timeoutMs: FIRST_PUSH_TIMEOUT_MS },
+      );
     }
 
     // 7. Make sure the local view of `origin/HEAD` points at main so

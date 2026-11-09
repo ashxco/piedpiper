@@ -5,6 +5,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
+  attachmentRelativePath,
   createAttachmentId,
   parseThreadSegmentFromAttachmentId,
   resolveAttachmentPathById,
@@ -55,6 +56,29 @@ describe("attachmentStore", () => {
         attachmentId,
       });
       expect(resolved).toBe(pngPath);
+    } finally {
+      fs.rmSync(attachmentsDir, { recursive: true, force: true });
+    }
+  });
+
+  it("stores PDF attachments as .pdf and finds them by id", async () => {
+    const attachmentsDir = fs.mkdtempSync(path.join(os.tmpdir(), "piedpiper-attachment-store-"));
+    try {
+      const attachmentId = "thread-1-document";
+      const relativePath = attachmentRelativePath({
+        type: "file",
+        id: attachmentId,
+        name: "report.pdf",
+        mimeType: "application/pdf",
+        sizeBytes: 5,
+      });
+      expect(relativePath).toBe(`${attachmentId}.pdf`);
+
+      const pdfPath = path.join(attachmentsDir, relativePath);
+      fs.writeFileSync(pdfPath, Buffer.from("%PDF-"));
+      await expect(resolveAttachmentPathById({ attachmentsDir, attachmentId })).resolves.toBe(
+        pdfPath,
+      );
     } finally {
       fs.rmSync(attachmentsDir, { recursive: true, force: true });
     }

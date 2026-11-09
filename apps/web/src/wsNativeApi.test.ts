@@ -8,6 +8,7 @@ import {
   type ServerConfig,
   type ServerProvider,
   type TerminalEvent,
+  type TerminalMetadataStreamEvent,
   ThreadId,
 } from "@piedpiper/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -30,6 +31,7 @@ function registerListener<T>(listeners: Set<(event: T) => void>, listener: (even
 }
 
 const terminalEventListeners = new Set<(event: TerminalEvent) => void>();
+const terminalMetadataListeners = new Set<(event: TerminalMetadataStreamEvent) => void>();
 const orchestrationEventListeners = new Set<(event: OrchestrationEvent) => void>();
 
 const rpcClientMock = {
@@ -44,10 +46,15 @@ const rpcClientMock = {
     onEvent: vi.fn((listener: (event: TerminalEvent) => void) =>
       registerListener(terminalEventListeners, listener),
     ),
+    onMetadata: vi.fn((listener: (event: TerminalMetadataStreamEvent) => void) =>
+      registerListener(terminalMetadataListeners, listener),
+    ),
   },
   projects: {
     searchEntries: vi.fn(),
     writeFile: vi.fn(),
+    readConfigFile: vi.fn(),
+    scanAgentSessions: vi.fn(),
   },
   shell: {
     openInEditor: vi.fn(),
@@ -55,22 +62,31 @@ const rpcClientMock = {
   git: {
     pull: vi.fn(),
     status: vi.fn(),
+    diffPreview: vi.fn(),
     runStackedAction: vi.fn(),
     listBranches: vi.fn(),
     createWorktree: vi.fn(),
+    createWorktreeWithProgress: vi.fn(),
     removeWorktree: vi.fn(),
     createBranch: vi.fn(),
     checkout: vi.fn(),
     init: vi.fn(),
+    cloneRepository: vi.fn(),
     resolvePullRequest: vi.fn(),
     preparePullRequestThread: vi.fn(),
   },
   server: {
     getConfig: vi.fn(),
     refreshProviders: vi.fn(),
+    listProviderSlashCommands: vi.fn(),
     upsertKeybinding: vi.fn(),
+    removeKeybinding: vi.fn(),
     getSettings: vi.fn(),
     updateSettings: vi.fn(),
+    getTraceDiagnostics: vi.fn(),
+    getProcessDiagnostics: vi.fn(),
+    signalProcess: vi.fn(),
+    checkOtlpEndpoint: vi.fn(),
     subscribeConfig: vi.fn(),
     subscribeLifecycle: vi.fn(),
   },
@@ -79,6 +95,7 @@ const rpcClientMock = {
     dispatchCommand: vi.fn(),
     getTurnDiff: vi.fn(),
     getFullThreadDiff: vi.fn(),
+    getTurnDiffFileContents: vi.fn(),
     replayEvents: vi.fn(),
     onDomainEvent: vi.fn((listener: (event: OrchestrationEvent) => void) =>
       registerListener(orchestrationEventListeners, listener),
@@ -174,6 +191,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   showContextMenuFallbackMock.mockReset();
   terminalEventListeners.clear();
+  terminalMetadataListeners.clear();
   orchestrationEventListeners.clear();
   Reflect.deleteProperty(getWindowForTest(), "desktopBridge");
 });
@@ -193,6 +211,19 @@ describe("wsNativeApi", () => {
     expect(rpcClientMock.server.getConfig).toHaveBeenCalledWith();
     expect(rpcClientMock.server.subscribeConfig).not.toHaveBeenCalled();
     expect(rpcClientMock.server.subscribeLifecycle).not.toHaveBeenCalled();
+  });
+
+  it("forwards terminal metadata events", async () => {
+    const { createWsNativeApi } = await import("./wsNativeApi");
+    const onMetadata = vi.fn();
+
+    const unsubscribe = createWsNativeApi().terminal.onMetadata(onMetadata);
+    const event = { type: "snapshot", terminals: [] } as const;
+    emitEvent(terminalMetadataListeners, event);
+    unsubscribe();
+    emitEvent(terminalMetadataListeners, event);
+
+    expect(onMetadata.mock.calls).toEqual([[event]]);
   });
 
   it("forwards terminal and orchestration stream events", async () => {
@@ -284,6 +315,37 @@ describe("wsNativeApi", () => {
     });
   });
 
+  it("forwards project config file reads to the project RPC", async () => {
+    rpcClientMock.projects.readConfigFile.mockResolvedValue({ config: null });
+    const { createWsNativeApi } = await import("./wsNativeApi");
+
+    const api = createWsNativeApi();
+    await expect(api.projects.readConfigFile({ cwd: "/tmp/project" })).resolves.toEqual({
+      config: null,
+    });
+
+    expect(rpcClientMock.projects.readConfigFile).toHaveBeenCalledWith({ cwd: "/tmp/project" });
+  });
+
+  it("forwards the reveal flag to the open-in-editor RPC only when set", async () => {
+    rpcClientMock.shell.openInEditor.mockResolvedValue(undefined);
+    const { createWsNativeApi } = await import("./wsNativeApi");
+
+    const api = createWsNativeApi();
+    await api.shell.openInEditor("/tmp/project/a.ts", "file-manager", { reveal: true });
+    await api.shell.openInEditor("/tmp/project/b.ts", "file-manager");
+
+    expect(rpcClientMock.shell.openInEditor).toHaveBeenNthCalledWith(1, {
+      cwd: "/tmp/project/a.ts",
+      editor: "file-manager",
+      reveal: true,
+    });
+    expect(rpcClientMock.shell.openInEditor).toHaveBeenNthCalledWith(2, {
+      cwd: "/tmp/project/b.ts",
+      editor: "file-manager",
+    });
+  });
+
   it("forwards full-thread diff requests to the orchestration RPC", async () => {
     rpcClientMock.orchestration.getFullThreadDiff.mockResolvedValue({ diff: "patch" });
     const { createWsNativeApi } = await import("./wsNativeApi");
@@ -298,6 +360,32 @@ describe("wsNativeApi", () => {
       threadId: "thread-1",
       toTurnCount: 1,
     });
+  });
+
+  it("forwards the diff preview and turn file contents calls to the RPC client", async () => {
+    const { createWsNativeApi } = await import("./wsNativeApi");
+
+    const api = createWsNativeApi();
+
+    expect(api.git.diffPreview).toBe(rpcClientMock.git.diffPreview);
+    expect(api.orchestration.getTurnDiffFileContents).toBe(
+      rpcClientMock.orchestration.getTurnDiffFileContents,
+    );
+  });
+
+  it("forwards the subscribed handler with terminal event subscriptions", async () => {
+    const { createWsNativeApi } = await import("./wsNativeApi");
+
+    const api = createWsNativeApi();
+    const listener = vi.fn();
+    const options = { onSubscribed: vi.fn() };
+    const onEvent: (
+      callback: (event: TerminalEvent) => void,
+      options: { readonly onSubscribed?: () => void },
+    ) => () => void = api.terminal.onEvent;
+    onEvent(listener, options);
+
+    expect(rpcClientMock.terminal.onEvent).toHaveBeenCalledWith(listener, options);
   });
 
   it("forwards provider refreshes directly to the RPC client", async () => {
@@ -316,6 +404,34 @@ describe("wsNativeApi", () => {
     expect(rpcClientMock.server.refreshProviders).toHaveBeenCalledWith();
   });
 
+  it("forwards slash command listing and agent session scans to the RPC client", async () => {
+    const commands = { commands: [{ name: "compact" }] };
+    const scan = { candidates: [] };
+    rpcClientMock.server.listProviderSlashCommands.mockResolvedValue(commands);
+    rpcClientMock.projects.scanAgentSessions.mockResolvedValue(scan);
+    const { createWsNativeApi } = await import("./wsNativeApi");
+
+    const api = createWsNativeApi();
+    const input = { provider: "claudeAgent", cwd: "/repo" } as const;
+
+    await expect(api.server.listProviderSlashCommands(input)).resolves.toBe(commands);
+    expect(rpcClientMock.server.listProviderSlashCommands).toHaveBeenCalledWith(input);
+    await expect(api.projects.scanAgentSessions()).resolves.toBe(scan);
+    expect(rpcClientMock.projects.scanAgentSessions).toHaveBeenCalledWith();
+  });
+
+  it("exposes repository cloning so the sidebar can offer it", async () => {
+    const destination = { destinationPath: "/code/repo" };
+    rpcClientMock.git.cloneRepository.mockResolvedValue(destination);
+    const { createWsNativeApi } = await import("./wsNativeApi");
+
+    const api = createWsNativeApi();
+    const input = { url: "https://github.com/acme/repo.git", destinationPath: "/code/repo" };
+
+    await expect(api.git.cloneRepository?.(input)).resolves.toBe(destination);
+    expect(rpcClientMock.git.cloneRepository).toHaveBeenCalledWith(input);
+  });
+
   it("forwards server settings updates directly to the RPC client", async () => {
     const nextSettings = {
       ...DEFAULT_SERVER_SETTINGS,
@@ -332,6 +448,34 @@ describe("wsNativeApi", () => {
     expect(rpcClientMock.server.updateSettings).toHaveBeenCalledWith({
       enableAssistantStreaming: true,
     });
+  });
+
+  it("forwards the settings keybinding and diagnostics calls to the rpc client", async () => {
+    const { createWsNativeApi } = await import("./wsNativeApi");
+    const { server } = createWsNativeApi();
+
+    expect(server.removeKeybinding).toBe(rpcClientMock.server.removeKeybinding);
+    expect(server.getTraceDiagnostics).toBe(rpcClientMock.server.getTraceDiagnostics);
+    expect(server.getProcessDiagnostics).toBe(rpcClientMock.server.getProcessDiagnostics);
+    expect(server.signalProcess).toBe(rpcClientMock.server.signalProcess);
+    expect(server.checkOtlpEndpoint).toBe(rpcClientMock.server.checkOtlpEndpoint);
+  });
+
+  it("offers the project icon picker only when the desktop shell provides one", async () => {
+    const { createWsNativeApi, __resetWsNativeApiForTests } = await import("./wsNativeApi");
+    expect(createWsNativeApi().dialogs).not.toHaveProperty("pickProjectFavicon");
+
+    __resetWsNativeApiForTests();
+    getWindowForTest().desktopBridge = makeDesktopBridge();
+    expect(createWsNativeApi().dialogs).not.toHaveProperty("pickProjectFavicon");
+
+    __resetWsNativeApiForTests();
+    const pickProjectFavicon = vi.fn().mockResolvedValue("/icons/logo.png");
+    getWindowForTest().desktopBridge = makeDesktopBridge({ pickProjectFavicon });
+    await expect(createWsNativeApi().dialogs.pickProjectFavicon?.("/repo")).resolves.toBe(
+      "/icons/logo.png",
+    );
+    expect(pickProjectFavicon).toHaveBeenCalledWith("/repo");
   });
 
   it("forwards context menu metadata to the desktop bridge", async () => {
@@ -355,5 +499,39 @@ describe("wsNativeApi", () => {
 
     await expect(api.contextMenu.show(items, { x: 4, y: 5 })).resolves.toBe("rename");
     expect(showContextMenuFallbackMock).toHaveBeenCalledWith(items, { x: 4, y: 5 });
+  });
+
+  it("uses the themed confirm dialog when a host is mounted", async () => {
+    const confirm = vi.fn().mockResolvedValue(false);
+    getWindowForTest().desktopBridge = makeDesktopBridge({ confirm });
+
+    const { createWsNativeApi } = await import("./wsNativeApi");
+    const confirmDialog = await import("./confirmDialog");
+    const unregister = confirmDialog.registerConfirmDialogHost();
+    try {
+      const api = createWsNativeApi();
+      const result = api.dialogs.confirm("Delete thread?");
+      await Promise.resolve();
+      expect(confirmDialog.readConfirmDialogState()).toMatchObject({
+        status: "confirming",
+        message: "Delete thread?",
+      });
+      confirmDialog.respondToConfirmDialog(true);
+      await expect(result).resolves.toBe(true);
+      expect(confirm).not.toHaveBeenCalled();
+    } finally {
+      unregister();
+    }
+  });
+
+  it("falls back to the desktop bridge confirm when no themed host is mounted", async () => {
+    const confirm = vi.fn().mockResolvedValue(true);
+    getWindowForTest().desktopBridge = makeDesktopBridge({ confirm });
+
+    const { createWsNativeApi } = await import("./wsNativeApi");
+    const api = createWsNativeApi();
+
+    await expect(api.dialogs.confirm("Continue?")).resolves.toBe(true);
+    expect(confirm).toHaveBeenCalledWith("Continue?");
   });
 });

@@ -13,6 +13,8 @@ import type {
   GitCreateBranchInput,
   GitCreateWorktreeInput,
   GitCreateWorktreeResult,
+  GitDiffPreviewInput,
+  GitDiffPreviewResult,
   GitInitInput,
   GitListBranchesInput,
   GitListBranchesResult,
@@ -24,6 +26,8 @@ import type {
 
 import type { GitCommandError } from "@piedpiper/contracts";
 
+import type { GitCheckoutProgress } from "../gitCheckoutProgress.ts";
+
 export interface ExecuteGitInput {
   readonly operation: string;
   readonly cwd: string;
@@ -31,7 +35,8 @@ export interface ExecuteGitInput {
   readonly stdin?: string;
   readonly env?: NodeJS.ProcessEnv;
   readonly allowNonZeroExit?: boolean;
-  readonly timeoutMs?: number;
+  /** `null` disables the timeout (for long-running network commands such as push). */
+  readonly timeoutMs?: number | null;
   readonly maxOutputBytes?: number;
   readonly truncateOutputAtMaxBytes?: boolean;
   readonly progress?: ExecuteGitProgress;
@@ -47,11 +52,18 @@ export interface ExecuteGitResult {
 
 export interface GitStatusDetails extends Omit<GitStatusResult, "pr"> {
   upstreamRef: string | null;
+  /** The repository's default branch when known; optional so older constructors still type-check. */
+  defaultBranch?: string | null;
 }
 
 export interface GitPreparedCommitContext {
   stagedSummary: string;
   stagedPatch: string;
+}
+
+export interface GitPrepareCommitContextOptions {
+  /** Default true. False skips the staged patch (empty string), e.g. when the user wrote the message. */
+  readonly includePatch?: boolean | undefined;
 }
 
 export interface ExecuteGitProgress {
@@ -81,6 +93,8 @@ export interface GitCommitProgress {
 export interface GitCommitOptions {
   readonly timeoutMs?: number;
   readonly progress?: GitCommitProgress;
+  /** Stage the working tree (or only `filePaths`) into the real index right before committing. */
+  readonly stage?: { readonly filePaths?: readonly string[] };
 }
 
 export interface GitPushResult {
@@ -140,6 +154,13 @@ export interface GitSetBranchUpstreamInput {
 /**
  * GitCoreShape - Service API for low-level Git repository interactions.
  */
+export interface GitStatusDetailsOptions {
+  /** Fail with "Git index is locked" instead of running status while index.lock exists (polling only). */
+  readonly failWhenIndexLocked?: boolean | undefined;
+  /** Read local refs without contacting the remote (passive polls). */
+  readonly skipUpstreamRefresh?: boolean | undefined;
+}
+
 export interface GitCoreShape {
   /**
    * Execute a raw Git command.
@@ -154,14 +175,18 @@ export interface GitCoreShape {
   /**
    * Read detailed working tree / branch status for a repository.
    */
-  readonly statusDetails: (cwd: string) => Effect.Effect<GitStatusDetails, GitCommandError>;
+  readonly statusDetails: (
+    cwd: string,
+    options?: GitStatusDetailsOptions,
+  ) => Effect.Effect<GitStatusDetails, GitCommandError>;
 
   /**
-   * Build staged change context for commit generation.
+   * Build commit-generation context from a scratch copy of the index (the real index is untouched).
    */
   readonly prepareCommitContext: (
     cwd: string,
     filePaths?: readonly string[],
+    options?: GitPrepareCommitContextOptions,
   ) => Effect.Effect<GitPreparedCommitContext | null, GitCommandError>;
 
   /**
@@ -235,7 +260,17 @@ export interface GitCoreShape {
    */
   readonly createWorktree: (
     input: GitCreateWorktreeInput,
+    options?: {
+      readonly onCheckoutProgress?: (progress: GitCheckoutProgress) => Effect.Effect<void, never>;
+    },
   ) => Effect.Effect<GitCreateWorktreeResult, GitCommandError>;
+
+  /**
+   * Read a working tree or branch patch for the diff panel; the real index is left untouched.
+   */
+  readonly diffPreview: (
+    input: GitDiffPreviewInput,
+  ) => Effect.Effect<GitDiffPreviewResult, GitCommandError>;
 
   /**
    * Materialize a GitHub pull request head as a local branch without switching checkout.

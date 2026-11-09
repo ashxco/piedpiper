@@ -6,9 +6,26 @@
  *
  * @module ServerConfig
  */
-import { Effect, FileSystem, Layer, LogLevel, Path, Schema, ServiceMap } from "effect";
+import { randomUUID } from "node:crypto";
+import { hostname } from "node:os";
+import {
+  DEFAULT_OTLP_EXPORT_OPTIONS,
+  type OtlpExportOptions,
+  type OtlpSignalName,
+} from "@piedpiper/shared/otelEnvironment";
+import { Config, Effect, FileSystem, Layer, LogLevel, Path, Schema, ServiceMap } from "effect";
+
+import { version as serverVersion } from "../package.json" with { type: "json" };
 
 export const DEFAULT_PORT = 3773;
+
+export const DEFAULT_OTLP_EXPORT_OPTIONS_BY_SIGNAL: Readonly<
+  Record<OtlpSignalName, OtlpExportOptions>
+> = {
+  traces: DEFAULT_OTLP_EXPORT_OPTIONS,
+  metrics: DEFAULT_OTLP_EXPORT_OPTIONS,
+  logs: DEFAULT_OTLP_EXPORT_OPTIONS,
+};
 
 export const RuntimeMode = Schema.Literals(["web", "desktop"]);
 export type RuntimeMode = typeof RuntimeMode.Type;
@@ -23,9 +40,6 @@ export interface ServerDerivedPaths {
   readonly settingsPath: string;
   readonly worktreesDir: string;
   readonly attachmentsDir: string;
-  readonly advisorsWorkspaceDir: string;
-  readonly advisorSkillsDir: string;
-  readonly advisorToolsDir: string;
   readonly logsDir: string;
   readonly serverLogPath: string;
   readonly serverTracePath: string;
@@ -47,12 +61,17 @@ export interface ServerConfigShape extends ServerDerivedPaths {
   readonly traceMaxFiles: number;
   readonly otlpTracesUrl: string | undefined;
   readonly otlpMetricsUrl: string | undefined;
+  readonly otlpLogsUrl: string | undefined;
+  /** Wire format and headers per signal, resolved with the URL that named the signal. */
+  readonly otlpExportOptions: Readonly<Record<OtlpSignalName, OtlpExportOptions>>;
   readonly otlpExportIntervalMs: number;
   readonly otlpServiceName: string;
   readonly mode: RuntimeMode;
   readonly port: number;
   readonly host: string | undefined;
   readonly cwd: string;
+  /** `cwd` came from the CLI and may be new; it is created once this server owns its state. */
+  readonly createCwdOnStartup?: boolean;
   readonly baseDir: string;
   readonly staticDir: string | undefined;
   readonly devUrl: URL | undefined;
@@ -60,6 +79,8 @@ export interface ServerConfigShape extends ServerDerivedPaths {
   readonly authToken: string | undefined;
   readonly autoBootstrapProjectFromCwd: boolean;
   readonly logWebSocketEvents: boolean;
+  /** The desktop already hydrated PATH from the login shell into the env this process inherits. */
+  readonly shellEnvironmentPrepared: boolean;
 }
 
 export const deriveServerPaths = Effect.fn(function* (
@@ -70,9 +91,6 @@ export const deriveServerPaths = Effect.fn(function* (
   const stateDir = join(baseDir, devUrl !== undefined ? "dev" : "userdata");
   const dbPath = join(stateDir, "state.sqlite");
   const attachmentsDir = join(stateDir, "attachments");
-  const advisorsWorkspaceDir = join(stateDir, "advisors-workspace");
-  const advisorSkillsDir = join(stateDir, "advisor-skills");
-  const advisorToolsDir = join(stateDir, "advisor-tools");
   const logsDir = join(stateDir, "logs");
   const providerLogsDir = join(logsDir, "provider");
   return {
@@ -82,9 +100,6 @@ export const deriveServerPaths = Effect.fn(function* (
     settingsPath: join(stateDir, "settings.json"),
     worktreesDir: join(baseDir, "worktrees"),
     attachmentsDir,
-    advisorsWorkspaceDir,
-    advisorSkillsDir,
-    advisorToolsDir,
     logsDir,
     serverLogPath: join(logsDir, "server.log"),
     serverTracePath: join(logsDir, "server.trace.ndjson"),
@@ -106,9 +121,6 @@ export const ensureServerDirectories = Effect.fn(function* (derivedPaths: Server
       fs.makeDirectory(derivedPaths.providerLogsDir, { recursive: true }),
       fs.makeDirectory(derivedPaths.terminalLogsDir, { recursive: true }),
       fs.makeDirectory(derivedPaths.attachmentsDir, { recursive: true }),
-      fs.makeDirectory(derivedPaths.advisorsWorkspaceDir, { recursive: true }),
-      fs.makeDirectory(derivedPaths.advisorSkillsDir, { recursive: true }),
-      fs.makeDirectory(derivedPaths.advisorToolsDir, { recursive: true }),
       fs.makeDirectory(derivedPaths.worktreesDir, { recursive: true }),
       fs.makeDirectory(path.dirname(derivedPaths.keybindingsConfigPath), { recursive: true }),
       fs.makeDirectory(path.dirname(derivedPaths.settingsPath), { recursive: true }),
@@ -116,7 +128,85 @@ export const ensureServerDirectories = Effect.fn(function* (derivedPaths: Server
     ],
     { concurrency: "unbounded" },
   );
+  // The state dir holds every conversation and log; 0700 keeps other local accounts out.
+  if (process.platform !== "win32") {
+    yield* fs.chmod(derivedPaths.stateDir, 0o700).pipe(
+      Effect.catch((error) =>
+        Effect.logWarning("could not restrict server state directory permissions", {
+          stateDir: derivedPaths.stateDir,
+          error: error.message,
+        }),
+      ),
+    );
+  }
 });
+
+/** Reads one key from an `OTEL_RESOURCE_ATTRIBUTES` value (`k=v,k2=v2`, values percent-encoded). */
+function readOtelResourceAttribute(raw: string | undefined, key: string): string | undefined {
+  for (const entry of raw?.split(",") ?? []) {
+    const separator = entry.indexOf("=");
+    if (separator <= 0 || entry.slice(0, separator).trim() !== key) continue;
+    const value = entry.slice(separator + 1).trim();
+    try {
+      return decodeURIComponent(value);
+    } catch {
+      return value;
+    }
+  }
+  return undefined;
+}
+
+const generatedServiceInstanceId = randomUUID();
+
+/**
+ * `process.runtime.*` as the OpenTelemetry Node detector reports them. Electron embeds Node;
+ * Bun, which runs the dev server, reports a Node compatibility version it has to override.
+ */
+export const processRuntimeAttributes = (
+  versions: Readonly<Record<string, string | undefined>> = process.versions,
+) =>
+  versions.bun
+    ? { name: "bun", version: versions.bun, description: "Bun" }
+    : {
+        name: "nodejs",
+        version: versions.node ?? "",
+        description: versions.electron ? `Electron ${versions.electron}` : "Node.js",
+      };
+
+/**
+ * Resource shared by every OTLP exporter, so traces and metrics report the same service
+ * identity. `host.name` and `service.instance.id` keep servers apart when several export to
+ * one collector; code attributes beat `OTEL_RESOURCE_ATTRIBUTES`, so the keys set here are
+ * read back from it to keep operator values winning.
+ */
+export const otlpResource = (
+  config: Pick<ServerConfigShape, "otlpServiceName" | "mode">,
+  hostName: string = hostname(),
+  otelResourceAttributes: string | undefined = process.env.OTEL_RESOURCE_ATTRIBUTES,
+) => {
+  const operatorOr = (key: string, fallback: string) =>
+    readOtelResourceAttribute(otelResourceAttributes, key) || fallback;
+  const runtime = processRuntimeAttributes();
+  return {
+    serviceName: config.otlpServiceName,
+    serviceVersion: serverVersion,
+    attributes: {
+      "service.runtime": "piedpiper-server",
+      "service.mode": config.mode,
+      "host.name": operatorOr("host.name", hostName),
+      "service.instance.id": operatorOr("service.instance.id", generatedServiceInstanceId),
+      "process.runtime.name": operatorOr("process.runtime.name", runtime.name),
+      "process.runtime.version": operatorOr("process.runtime.version", runtime.version),
+      "process.runtime.description": operatorOr("process.runtime.description", runtime.description),
+    },
+  };
+};
+
+/** Shared by the server and `piedpiper trace summary`, so the reader follows the writer. */
+export const traceFileConfig = Config.string("PIEDPIPER_TRACE_FILE").pipe(Config.option);
+export const traceMaxFilesConfig = Config.int("PIEDPIPER_TRACE_MAX_FILES").pipe(
+  Config.withDefault(10),
+);
 
 /**
  * ServerConfig - Service tag for server runtime configuration.
@@ -142,11 +232,13 @@ export class ServerConfig extends ServiceMap.Service<ServerConfig, ServerConfigS
           logLevel: "Error",
           traceMinLevel: "Info",
           traceTimingEnabled: true,
-          traceBatchWindowMs: 200,
+          traceBatchWindowMs: 1_000,
           traceMaxBytes: 10 * 1024 * 1024,
           traceMaxFiles: 10,
           otlpTracesUrl: undefined,
           otlpMetricsUrl: undefined,
+          otlpLogsUrl: undefined,
+          otlpExportOptions: DEFAULT_OTLP_EXPORT_OPTIONS_BY_SIGNAL,
           otlpExportIntervalMs: 10_000,
           otlpServiceName: "piedpiper-server",
           cwd,
@@ -155,6 +247,7 @@ export class ServerConfig extends ServiceMap.Service<ServerConfig, ServerConfigS
           mode: "web",
           autoBootstrapProjectFromCwd: false,
           logWebSocketEvents: false,
+          shellEnvironmentPrepared: false,
           port: 0,
           host: undefined,
           authToken: undefined,

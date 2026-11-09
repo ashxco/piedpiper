@@ -5,6 +5,8 @@ import { Button } from "../ui/button";
 interface ComposerPendingApprovalActionsProps {
   requestId: ApprovalRequestId;
   isResponding: boolean;
+  /** The provider forbids a session-wide grant, so only one-time approval is offered. */
+  noStandingGrant?: boolean;
   onRespondToApproval: (
     requestId: ApprovalRequestId,
     decision: ProviderApprovalDecision,
@@ -14,6 +16,7 @@ interface ComposerPendingApprovalActionsProps {
 export const ComposerPendingApprovalActions = memo(function ComposerPendingApprovalActions({
   requestId,
   isResponding,
+  noStandingGrant = false,
   onRespondToApproval,
 }: ComposerPendingApprovalActionsProps) {
   return (
@@ -34,14 +37,16 @@ export const ComposerPendingApprovalActions = memo(function ComposerPendingAppro
       >
         Decline
       </Button>
-      <Button
-        size="sm"
-        variant="outline"
-        disabled={isResponding}
-        onClick={() => void onRespondToApproval(requestId, "acceptForSession")}
-      >
-        Always allow this session
-      </Button>
+      {noStandingGrant ? null : (
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={isResponding}
+          onClick={() => void onRespondToApproval(requestId, "acceptForSession")}
+        >
+          Always allow this session
+        </Button>
+      )}
       <Button
         size="sm"
         variant="default"

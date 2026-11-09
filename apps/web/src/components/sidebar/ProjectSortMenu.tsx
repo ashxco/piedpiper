@@ -37,7 +37,10 @@ export const ProjectSortMenu = memo(function ProjectSortMenu({
       <Tooltip>
         <TooltipTrigger
           render={
-            <MenuTrigger className="inline-flex size-5 cursor-pointer items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground" />
+            <MenuTrigger
+              aria-label="Sort projects and threads"
+              className="inline-flex size-5 cursor-pointer items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+            />
           }
         >
           <ArrowUpDownIcon className="size-3.5" />

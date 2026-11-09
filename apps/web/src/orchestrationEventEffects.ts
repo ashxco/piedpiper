@@ -1,10 +1,14 @@
-import type { OrchestrationEvent, ThreadId } from "@piedpiper/contracts";
+import type { OrchestrationEvent, ProjectId, ThreadId } from "@piedpiper/contracts";
 
 export interface OrchestrationBatchEffects {
   clearPromotedDraftThreadIds: ThreadId[];
   clearDeletedThreadIds: ThreadId[];
   removeTerminalStateThreadIds: ThreadId[];
   needsProviderInvalidation: boolean;
+  /** Threads whose working tree changed (turn diff, revert), so only their git status is stale. */
+  gitStatusInvalidationThreadIds: ThreadId[];
+  /** Threads whose branch or worktree changed, so their git status and branch list are stale. */
+  gitBranchInvalidationThreadIds: ThreadId[];
 }
 
 export function deriveOrchestrationBatchEffects(
@@ -19,12 +23,22 @@ export function deriveOrchestrationBatchEffects(
     }
   >();
   let needsProviderInvalidation = false;
+  const gitStatusInvalidationThreadIds = new Set<ThreadId>();
+  const gitBranchInvalidationThreadIds = new Set<ThreadId>();
 
   for (const event of events) {
     switch (event.type) {
       case "thread.turn-diff-completed":
       case "thread.reverted": {
         needsProviderInvalidation = true;
+        gitStatusInvalidationThreadIds.add(event.payload.threadId);
+        break;
+      }
+
+      case "thread.meta-updated": {
+        if (event.payload.branch !== undefined || event.payload.worktreePath !== undefined) {
+          gitBranchInvalidationThreadIds.add(event.payload.threadId);
+        }
         break;
       }
 
@@ -90,5 +104,27 @@ export function deriveOrchestrationBatchEffects(
     clearDeletedThreadIds,
     removeTerminalStateThreadIds,
     needsProviderInvalidation,
+    // A branch refresh already covers status, so a thread is listed in at most one of the two.
+    gitStatusInvalidationThreadIds: [...gitStatusInvalidationThreadIds].filter(
+      (threadId) => !gitBranchInvalidationThreadIds.has(threadId),
+    ),
+    gitBranchInvalidationThreadIds: [...gitBranchInvalidationThreadIds],
   };
+}
+
+/** Unique git cwds (worktree, else project root) for the given threads; unknown threads are skipped. */
+export function resolveThreadGitCwds(
+  threadIds: Iterable<ThreadId>,
+  threads: ReadonlyArray<{ id: ThreadId; projectId: ProjectId; worktreePath: string | null }>,
+  projects: ReadonlyArray<{ id: ProjectId; cwd: string }>,
+): string[] {
+  const cwds = new Set<string>();
+  for (const threadId of threadIds) {
+    const thread = threads.find((candidate) => candidate.id === threadId);
+    if (!thread) continue;
+    const cwd =
+      thread.worktreePath ?? projects.find((project) => project.id === thread.projectId)?.cwd;
+    if (cwd) cwds.add(cwd);
+  }
+  return [...cwds];
 }

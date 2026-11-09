@@ -32,6 +32,11 @@ import Migration0016 from "./Migrations/016_CanonicalizeModelSelections.ts";
 import Migration0017 from "./Migrations/017_ProjectionThreadsArchivedAt.ts";
 import Migration0018 from "./Migrations/018_ProjectionThreadsArchivedAtIndex.ts";
 import Migration0019 from "./Migrations/019_ProjectionSnapshotLookupIndexes.ts";
+import Migration0020 from "./Migrations/020_DropOrchestrationEventCorrelationIndex.ts";
+import Migration0021 from "./Migrations/021_ProjectionProjectsArchivedAt.ts";
+import Migration0022 from "./Migrations/022_ProjectionProjectsFaviconPath.ts";
+import Migration0023 from "./Migrations/023_ClearAutomaticProjectModelDefaults.ts";
+import Migration0024 from "./Migrations/024_OrchestrationEventMaintenance.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -63,6 +68,11 @@ export const migrationEntries = [
   [17, "ProjectionThreadsArchivedAt", Migration0017],
   [18, "ProjectionThreadsArchivedAtIndex", Migration0018],
   [19, "ProjectionSnapshotLookupIndexes", Migration0019],
+  [20, "DropOrchestrationEventCorrelationIndex", Migration0020],
+  [21, "ProjectionProjectsArchivedAt", Migration0021],
+  [22, "ProjectionProjectsFaviconPath", Migration0022],
+  [23, "ClearAutomaticProjectModelDefaults", Migration0023],
+  [24, "OrchestrationEventMaintenance", Migration0024],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>

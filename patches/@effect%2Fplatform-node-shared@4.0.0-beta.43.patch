@@ -1,0 +1,26 @@
+diff --git a/dist/NodeChildProcessSpawner.js b/dist/NodeChildProcessSpawner.js
+index 9db00a84632fe340ed7d438128a3a80dfc9c5ce3..bf031dda8f0b8e47b81bd67874d7d5411ac6cb1c 100644
+--- a/dist/NodeChildProcessSpawner.js
++++ b/dist/NodeChildProcessSpawner.js
+@@ -241,6 +241,8 @@ const make = /*#__PURE__*/Effect.gen(function* () {
+   });
+   const killProcessGroup = (command, childProcess, signal) => {
+     if (globalThis.process.platform === "win32") {
++      // The process already exited; its PID may have been reused by an unrelated process.
++      if (childProcess.exitCode !== null || childProcess.signalCode !== null) return Effect.void;
+       return Effect.callback(resume => {
+         NodeChildProcess.exec(`taskkill /pid ${childProcess.pid} /T /F`, error => {
+           if (error) {
+diff --git a/src/NodeChildProcessSpawner.ts b/src/NodeChildProcessSpawner.ts
+index b2877e58c6facff1210e6f6277d264c7acb6eb06..3c2e817b48b72a00f145067587223334c22c5a2b 100644
+--- a/src/NodeChildProcessSpawner.ts
++++ b/src/NodeChildProcessSpawner.ts
+@@ -325,6 +325,8 @@ const make = Effect.gen(function*() {
+     signal: NodeJS.Signals
+   ) => {
+     if (globalThis.process.platform === "win32") {
++      // The process already exited; its PID may have been reused by an unrelated process.
++      if (childProcess.exitCode !== null || childProcess.signalCode !== null) return Effect.void
+       return Effect.callback<void, PlatformError.PlatformError>((resume) => {
+         NodeChildProcess.exec(`taskkill /pid ${childProcess.pid} /T /F`, (error) => {
+           if (error) {

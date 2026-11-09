@@ -1,11 +1,12 @@
 import { Effect, Layer, References, Tracer } from "effect";
-import { OtlpMetrics, OtlpSerialization, OtlpTracer } from "effect/unstable/observability";
+import { OtlpMetrics, OtlpTracer } from "effect/unstable/observability";
 
-import { ServerConfig } from "../../config.ts";
+import { otlpResource, ServerConfig } from "../../config.ts";
+import { otlpSerializationLayer } from "../../otlpExport.ts";
 import { ServerLoggerLive } from "../../serverLogger.ts";
 import { makeLocalFileTracer } from "../LocalFileTracer.ts";
-
-const otlpSerializationLayer = OtlpSerialization.layerJson;
+import { browserTraceCollectorLayer } from "../Services/BrowserTraceCollector.ts";
+import { makeTraceSink } from "../TraceSink.ts";
 
 export const ObservabilityLive = Layer.unwrap(
   Effect.gen(function* () {
@@ -16,33 +17,42 @@ export const ObservabilityLive = Layer.unwrap(
       Layer.succeed(References.TracerTimingEnabled, config.traceTimingEnabled),
     );
 
-    const tracerLayer = Layer.effect(
-      Tracer.Tracer,
+    const tracerLayer = Layer.unwrap(
       Effect.gen(function* () {
+        const sink = yield* makeTraceSink({
+          filePath: config.serverTracePath,
+          maxBytes: config.traceMaxBytes,
+          maxFiles: config.traceMaxFiles,
+          batchWindowMs: config.traceBatchWindowMs,
+        });
+
         const delegate =
           config.otlpTracesUrl === undefined
             ? undefined
             : yield* OtlpTracer.make({
                 url: config.otlpTracesUrl,
                 exportInterval: `${config.otlpExportIntervalMs} millis`,
-                resource: {
-                  serviceName: config.otlpServiceName,
-                  attributes: {
-                    "service.runtime": "piedpiper-server",
-                    "service.mode": config.mode,
-                  },
-                },
+                ...(config.otlpExportOptions.traces.headers
+                  ? { headers: config.otlpExportOptions.traces.headers }
+                  : {}),
+                resource: otlpResource(config),
               });
 
-        return yield* makeLocalFileTracer({
+        const tracer = yield* makeLocalFileTracer({
           filePath: config.serverTracePath,
           maxBytes: config.traceMaxBytes,
           maxFiles: config.traceMaxFiles,
           batchWindowMs: config.traceBatchWindowMs,
+          sink,
           ...(delegate ? { delegate } : {}),
         });
+
+        return Layer.mergeAll(
+          Layer.succeed(Tracer.Tracer, tracer),
+          browserTraceCollectorLayer(sink),
+        );
       }),
-    ).pipe(Layer.provideMerge(otlpSerializationLayer));
+    ).pipe(Layer.provideMerge(otlpSerializationLayer(config.otlpExportOptions.traces.protocol)));
 
     const metricsLayer =
       config.otlpMetricsUrl === undefined
@@ -50,14 +60,13 @@ export const ObservabilityLive = Layer.unwrap(
         : OtlpMetrics.layer({
             url: config.otlpMetricsUrl,
             exportInterval: `${config.otlpExportIntervalMs} millis`,
-            resource: {
-              serviceName: config.otlpServiceName,
-              attributes: {
-                "service.runtime": "piedpiper-server",
-                "service.mode": config.mode,
-              },
-            },
-          }).pipe(Layer.provideMerge(otlpSerializationLayer));
+            ...(config.otlpExportOptions.metrics.headers
+              ? { headers: config.otlpExportOptions.metrics.headers }
+              : {}),
+            resource: otlpResource(config),
+          }).pipe(
+            Layer.provideMerge(otlpSerializationLayer(config.otlpExportOptions.metrics.protocol)),
+          );
 
     return Layer.mergeAll(ServerLoggerLive, traceReferencesLayer, tracerLayer, metricsLayer);
   }),

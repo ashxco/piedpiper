@@ -1,5 +1,5 @@
 import { assert, describe, it } from "@effect/vitest";
-import { Effect, Exit, Metric, Stream } from "effect";
+import { Deferred, Effect, Exit, Fiber, Metric, Stream } from "effect";
 
 import {
   observeRpcEffect,
@@ -153,6 +153,31 @@ describe("RpcInstrumentation", () => {
       assert.equal(
         hasMetricSnapshot(snapshots, "piedpiper_rpc_request_duration", {
           method: "rpc.instrumentation.stream.effect.failure",
+        }),
+        true,
+      );
+    }),
+  );
+  it.effect("records interrupt outcomes when a stream RPC effect is interrupted", () =>
+    Effect.gen(function* () {
+      const started = yield* Deferred.make<void>();
+      const fiber = yield* Stream.runCollect(
+        observeRpcStreamEffect(
+          "rpc.instrumentation.stream.effect.interrupt",
+          Deferred.succeed(started, undefined).pipe(
+            Effect.andThen(Effect.never),
+            Effect.as(Stream.empty),
+          ),
+        ),
+      ).pipe(Effect.forkChild);
+      yield* Deferred.await(started);
+      yield* Fiber.interrupt(fiber);
+
+      const snapshots = yield* Metric.snapshot;
+      assert.equal(
+        hasMetricSnapshot(snapshots, "piedpiper_rpc_requests_total", {
+          method: "rpc.instrumentation.stream.effect.interrupt",
+          outcome: "interrupt",
         }),
         true,
       );

@@ -6,6 +6,7 @@ import {
   getArm64IntelBuildWarningDescription,
   getDesktopUpdateActionError,
   getDesktopUpdateButtonTooltip,
+  getDesktopUpdateDisabledReason,
   getDesktopUpdateInstallConfirmationMessage,
   isDesktopUpdateButtonDisabled,
   resolveDesktopUpdateButtonAction,
@@ -73,11 +74,36 @@ describe("desktop update button state", () => {
   it("prefers install when a downloaded version already exists", () => {
     const state: DesktopUpdateState = {
       ...baseState,
-      status: "available",
+      status: "downloaded",
       availableVersion: "1.1.0",
       downloadedVersion: "1.1.0",
     };
     expect(resolveDesktopUpdateButtonAction(state)).toBe("install");
+  });
+
+  it("offers install only when the main process would accept it", () => {
+    const queued = { availableVersion: "1.1.0", downloadedVersion: "1.1.0" };
+    expect(resolveDesktopUpdateButtonAction({ ...baseState, ...queued, status: "checking" })).toBe(
+      "none",
+    );
+    for (const errorContext of [null, "install"] as const) {
+      expect(
+        resolveDesktopUpdateButtonAction({
+          ...baseState,
+          ...queued,
+          status: "error",
+          errorContext,
+        }),
+      ).toBe("install");
+    }
+    expect(
+      resolveDesktopUpdateButtonAction({
+        ...baseState,
+        ...queued,
+        status: "error",
+        errorContext: "download",
+      }),
+    ).toBe("download");
   });
 
   it("hides the button for non-actionable check errors", () => {
@@ -223,6 +249,37 @@ describe("desktop update UI helpers", () => {
       }),
     ).toContain("Install update and restart Pied Piper?");
   });
+
+  it("promises running tasks continue only when the setting is on", () => {
+    const state = { availableVersion: "1.1.0", downloadedVersion: "1.1.0" };
+    const on = getDesktopUpdateInstallConfirmationMessage(state, "MacIntel", {
+      continueThreadsAfterRestart: true,
+    });
+    expect(on).toContain("continue when Pied Piper restarts");
+    expect(on).not.toContain("will be interrupted");
+    for (const message of [
+      getDesktopUpdateInstallConfirmationMessage(state, "MacIntel"),
+      getDesktopUpdateInstallConfirmationMessage(state, "MacIntel", {
+        continueThreadsAfterRestart: false,
+      }),
+    ]) {
+      expect(message).toContain("will be interrupted");
+      expect(message).not.toContain("continue when Pied Piper restarts");
+    }
+  });
+
+  it("warns Windows users that the silent installer may keep the app closed", () => {
+    const state = { availableVersion: "1.1.0", downloadedVersion: "1.1.0" };
+    expect(getDesktopUpdateInstallConfirmationMessage(state, "Win32")).toContain(
+      "may remain closed for several minutes",
+    );
+    expect(getDesktopUpdateInstallConfirmationMessage(state, "MacIntel")).not.toContain(
+      "may remain closed for several minutes",
+    );
+    expect(getDesktopUpdateInstallConfirmationMessage(state)).not.toContain(
+      "may remain closed for several minutes",
+    );
+  });
 });
 
 describe("canCheckForUpdate", () => {
@@ -244,7 +301,7 @@ describe("canCheckForUpdate", () => {
     );
   });
 
-  it("returns false once an update has been downloaded", () => {
+  it("returns true while a downloaded update waits, so newer releases are still found", () => {
     expect(
       canCheckForUpdate({
         ...baseState,
@@ -252,7 +309,7 @@ describe("canCheckForUpdate", () => {
         availableVersion: "1.1.0",
         downloadedVersion: "1.1.0",
       }),
-    ).toBe(false);
+    ).toBe(true);
   });
 
   it("returns true when idle", () => {
@@ -287,5 +344,73 @@ describe("getDesktopUpdateButtonTooltip", () => {
     expect(getDesktopUpdateButtonTooltip({ ...baseState, status: "up-to-date" })).toBe(
       "Up to date",
     );
+  });
+
+  it("keeps offering a queued update after a background error", () => {
+    expect(
+      getDesktopUpdateButtonTooltip({
+        ...baseState,
+        status: "error",
+        availableVersion: "1.1.0",
+        downloadedVersion: "1.1.0",
+        message: "background failure",
+      }),
+    ).toBe("Update 1.1.0 downloaded. Click to restart and install.");
+  });
+
+  describe("after an install that did not apply", () => {
+    const notApplied = (overrides: Partial<DesktopUpdateState>) => {
+      const state = { ...baseState, notAppliedVersion: "1.1.0", ...overrides };
+      return getDesktopUpdateButtonTooltip(state);
+    };
+
+    it("says so when the same version is offered again", () => {
+      const message = "Update 1.1.0 did not apply. Click to retry.";
+      expect(notApplied({ status: "available", availableVersion: "1.1.0" })).toBe(message);
+      expect(
+        notApplied({ status: "downloaded", availableVersion: "1.1.0", downloadedVersion: "1.1.0" }),
+      ).toBe(message);
+    });
+
+    it("uses the normal tooltip for a newer version and for other statuses", () => {
+      expect(notApplied({ status: "available", availableVersion: "1.2.0" })).toBe(
+        "Update 1.2.0 ready to download",
+      );
+      expect(
+        notApplied({ status: "downloaded", availableVersion: "1.2.0", downloadedVersion: "1.2.0" }),
+      ).toContain("1.2.0 downloaded");
+      expect(notApplied({ status: "idle" })).toBe("Up to date");
+    });
+  });
+});
+
+describe("getDesktopUpdateDisabledReason", () => {
+  it("returns the reason when updates are disabled", () => {
+    expect(
+      getDesktopUpdateDisabledReason({
+        ...baseState,
+        enabled: false,
+        status: "disabled",
+        message: "Automatic updates are not available in development builds.",
+      }),
+    ).toBe("Automatic updates are not available in development builds.");
+  });
+
+  it("returns null for other statuses and a missing state", () => {
+    expect(getDesktopUpdateDisabledReason(null)).toBeNull();
+    expect(
+      getDesktopUpdateDisabledReason({ ...baseState, status: "idle", message: "x" }),
+    ).toBeNull();
+    expect(
+      getDesktopUpdateDisabledReason({ ...baseState, status: "error", message: "x" }),
+    ).toBeNull();
+  });
+
+  it("keeps the disabled tooltip from claiming the app is up to date", () => {
+    const disabled: DesktopUpdateState = { ...baseState, enabled: false, status: "disabled" };
+    expect(getDesktopUpdateButtonTooltip(disabled)).toBe("Updates unavailable");
+    expect(
+      getDesktopUpdateButtonTooltip({ ...disabled, message: "No update feed configured." }),
+    ).toBe("No update feed configured.");
   });
 });

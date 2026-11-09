@@ -2,7 +2,12 @@ import { spawn, spawnSync } from "node:child_process";
 import { watch } from "node:fs";
 import { join } from "node:path";
 
-import { desktopDir, resolveElectronPath } from "./electron-launcher.mjs";
+import {
+  buildDevRootArgument,
+  buildDevRootCleanupPattern,
+  desktopDir,
+  resolveElectronLaunchCommand,
+} from "./electron-launcher.mjs";
 import { waitForResources } from "./wait-for-resources.mjs";
 
 const port = Number(process.env.ELECTRON_RENDERER_PORT ?? 5733);
@@ -16,7 +21,8 @@ const watchedDirectories = [
   { directory: "dist-electron", files: new Set(["main.js", "preload.js"]) },
   { directory: "../server/dist", files: new Set(["bin.mjs"]) },
 ];
-const forcedShutdownTimeoutMs = 1_500;
+// Electron's quit path waits up to 7s for the backend to stop; give it that before SIGKILL.
+const forcedShutdownTimeoutMs = 7_500;
 const restartDebounceMs = 120;
 const childTreeGracePeriodMs = 1_200;
 
@@ -49,7 +55,7 @@ function cleanupStaleDevApps() {
     return;
   }
 
-  spawnSync("pkill", ["-f", "--", `--piedpiper-dev-root=${desktopDir}`], { stdio: "ignore" });
+  spawnSync("pkill", ["-f", "--", buildDevRootCleanupPattern(desktopDir)], { stdio: "ignore" });
 }
 
 function startApp() {
@@ -57,18 +63,18 @@ function startApp() {
     return;
   }
 
-  const app = spawn(
-    resolveElectronPath(),
-    [`--piedpiper-dev-root=${desktopDir}`, "dist-electron/main.js"],
-    {
-      cwd: desktopDir,
-      env: {
-        ...childEnv,
-        VITE_DEV_SERVER_URL: devServerUrl,
-      },
-      stdio: "inherit",
-    },
+  const electronCommand = resolveElectronLaunchCommand(
+    [buildDevRootArgument(desktopDir), "dist-electron/main.js"],
+    { development: true },
   );
+  const app = spawn(electronCommand.electronPath, electronCommand.args, {
+    cwd: desktopDir,
+    env: {
+      ...childEnv,
+      VITE_DEV_SERVER_URL: devServerUrl,
+    },
+    stdio: "inherit",
+  });
 
   currentApp = app;
 

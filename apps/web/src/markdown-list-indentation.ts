@@ -1,0 +1,146 @@
+interface MarkdownPosition {
+  readonly start?: {
+    readonly line?: number;
+    readonly offset?: number;
+  };
+}
+
+interface MarkdownAstNode {
+  readonly type: string;
+  readonly value?: unknown;
+  position?: MarkdownPosition;
+  children?: MarkdownAstNode[];
+}
+
+function stripPositions(node: MarkdownAstNode): void {
+  delete node.position;
+  if (node.children) for (const child of node.children) stripPositions(child);
+}
+
+interface MarkdownFile {
+  readonly value?: unknown;
+}
+
+interface MarkdownParser {
+  parse(markdown: string): unknown;
+}
+
+interface RecoveredMarkdown {
+  readonly blocks: MarkdownAstNode[];
+  readonly source: string;
+}
+
+const INLINE_PARSE_PREFIX = "piedpiper-markdown-inline-prefix:";
+
+function isSameLineOverIndentedCode(
+  node: MarkdownAstNode,
+  parent: MarkdownAstNode | undefined,
+  markdown: string,
+): boolean {
+  if (
+    node.type !== "code" ||
+    parent?.type !== "listItem" ||
+    typeof node.value !== "string" ||
+    !/^[\t ]/.test(node.value)
+  ) {
+    return false;
+  }
+
+  const nodeStart = node.position?.start;
+  const parentStart = parent.position?.start;
+  if (
+    nodeStart?.line === undefined ||
+    nodeStart.offset === undefined ||
+    parentStart?.line === undefined ||
+    nodeStart.line !== parentStart.line
+  ) {
+    return false;
+  }
+
+  const sourceCharacter = markdown[nodeStart.offset];
+  return sourceCharacter !== "`" && sourceCharacter !== "~";
+}
+
+function parseRecoveredMarkdown(value: string, parser: MarkdownParser): RecoveredMarkdown {
+  // Prefix block-looking input to parse inline extensions; retain later block children after blank lines.
+  const source = `${INLINE_PARSE_PREFIX}${value}`;
+  const document = parser.parse(source) as MarkdownAstNode;
+  const blocks = document.children;
+  const paragraph = blocks?.[0];
+  const children = paragraph?.type === "paragraph" ? paragraph.children : undefined;
+  const first = children?.[0];
+  if (
+    !blocks ||
+    !children ||
+    first?.type !== "text" ||
+    typeof first.value !== "string" ||
+    !first.value.startsWith(INLINE_PARSE_PREFIX)
+  ) {
+    return { blocks: [{ type: "text", value }], source };
+  }
+
+  const firstValue = first.value.slice(INLINE_PARSE_PREFIX.length);
+  return {
+    blocks: [
+      {
+        ...paragraph,
+        type: "paragraph",
+        children: [...(firstValue ? [{ ...first, value: firstValue }] : []), ...children.slice(1)],
+      },
+      ...blocks.slice(1),
+    ],
+    source,
+  };
+}
+
+function blocksFromIndentedCode(node: MarkdownAstNode, parser: MarkdownParser): RecoveredMarkdown {
+  const value = typeof node.value === "string" ? node.value.trim() : "";
+  const recovered = parseRecoveredMarkdown(value, parser);
+  const first = recovered.blocks[0];
+  return {
+    ...recovered,
+    blocks:
+      first && node.position
+        ? [{ ...first, position: node.position }, ...recovered.blocks.slice(1)]
+        : recovered.blocks,
+  };
+}
+
+// CommonMark treats four or more spaces after a list marker as code.
+function attachListItemIndentationNormalizer(this: MarkdownParser) {
+  return (tree: MarkdownAstNode, file: MarkdownFile) => {
+    if (typeof file.value !== "string") {
+      return;
+    }
+    const markdown = file.value;
+
+    const visit = (node: MarkdownAstNode, source: string) => {
+      if (!node.children) {
+        return;
+      }
+      if (!node.children.some((child) => isSameLineOverIndentedCode(child, node, source))) {
+        for (const child of node.children) visit(child, source);
+        return;
+      }
+      node.children = node.children.flatMap((child) => {
+        if (isSameLineOverIndentedCode(child, node, source)) {
+          const recovered = blocksFromIndentedCode(child, this);
+          recovered.blocks.forEach((block, index) => {
+            visit(block, recovered.source);
+            // Recovered offsets point into the re-parsed snippet, not the message, so later
+            // plugins and renderers must not slice the message with them.
+            if (index > 0) stripPositions(block);
+            else if (block.children) for (const node of block.children) stripPositions(node);
+          });
+          return recovered.blocks;
+        }
+        visit(child, source);
+        return [child];
+      });
+    };
+
+    visit(tree, markdown);
+  };
+}
+
+export const remarkNormalizeListItemIndentation = attachListItemIndentationNormalizer;

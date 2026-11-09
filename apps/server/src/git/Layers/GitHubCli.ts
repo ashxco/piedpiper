@@ -2,6 +2,7 @@ import { Effect, Layer, Schema } from "effect";
 import { PositiveInt, TrimmedNonEmptyString } from "@piedpiper/contracts";
 
 import { runProcess } from "../../processRunner";
+import { explicitBareRepositoryEnv } from "../gitConfigEnv.ts";
 import { GitHubCliError } from "@piedpiper/contracts";
 import {
   GitHubCli,
@@ -84,8 +85,10 @@ const RawGitHubPullRequestSchema = Schema.Struct({
   url: TrimmedNonEmptyString,
   baseRefName: TrimmedNonEmptyString,
   headRefName: TrimmedNonEmptyString,
+  headRefOid: Schema.optional(Schema.NullOr(Schema.String)),
   state: Schema.optional(Schema.NullOr(Schema.String)),
   mergedAt: Schema.optional(Schema.NullOr(Schema.String)),
+  isDraft: Schema.optional(Schema.Boolean),
   isCrossRepository: Schema.optional(Schema.Boolean),
   headRepository: Schema.optional(
     Schema.NullOr(
@@ -124,7 +127,9 @@ function normalizePullRequestSummary(
     url: raw.url,
     baseRefName: raw.baseRefName,
     headRefName: raw.headRefName,
+    ...(raw.headRefOid ? { headRefOid: raw.headRefOid } : {}),
     state: normalizePullRequestState(raw),
+    ...(typeof raw.isDraft === "boolean" ? { isDraft: raw.isDraft } : {}),
     ...(typeof raw.isCrossRepository === "boolean"
       ? { isCrossRepository: raw.isCrossRepository }
       : {}),
@@ -168,6 +173,7 @@ const makeGitHubCli = Effect.sync(() => {
         runProcess("gh", input.args, {
           cwd: input.cwd,
           timeoutMs: input.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+          env: { ...process.env, ...explicitBareRepositoryEnv(process.env, process.platform) },
         }),
       catch: (error) => normalizeGitHubCliError("execute", error),
     });
@@ -187,7 +193,7 @@ const makeGitHubCli = Effect.sync(() => {
           "--limit",
           String(input.limit ?? 1),
           "--json",
-          "number,title,url,baseRefName,headRefName,state,mergedAt,isCrossRepository,headRepository,headRepositoryOwner",
+          "number,title,url,baseRefName,headRefName,state,mergedAt,isDraft,isCrossRepository,headRepository,headRepositoryOwner",
         ],
       }).pipe(
         Effect.map((result) => result.stdout.trim()),
@@ -211,7 +217,7 @@ const makeGitHubCli = Effect.sync(() => {
           "view",
           input.reference,
           "--json",
-          "number,title,url,baseRefName,headRefName,state,mergedAt,isCrossRepository,headRepository,headRepositoryOwner",
+          "number,title,url,baseRefName,headRefName,headRefOid,state,mergedAt,isDraft,isCrossRepository,headRepository,headRepositoryOwner",
         ],
       }).pipe(
         Effect.map((result) => result.stdout.trim()),
@@ -228,7 +234,13 @@ const makeGitHubCli = Effect.sync(() => {
     getRepositoryCloneUrls: (input) =>
       execute({
         cwd: input.cwd,
-        args: ["repo", "view", input.repository, "--json", "nameWithOwner,url,sshUrl"],
+        args: [
+          "repo",
+          "view",
+          input.host ? `${input.host}/${input.repository}` : input.repository,
+          "--json",
+          "nameWithOwner,url,sshUrl",
+        ],
       }).pipe(
         Effect.map((result) => result.stdout.trim()),
         Effect.flatMap((raw) =>
@@ -270,7 +282,7 @@ const makeGitHubCli = Effect.sync(() => {
     checkoutPullRequest: (input) =>
       execute({
         cwd: input.cwd,
-        args: ["pr", "checkout", input.reference, ...(input.force ? ["--force"] : [])],
+        args: ["pr", "checkout", input.reference],
       }).pipe(Effect.asVoid),
   } satisfies GitHubCliShape;
 

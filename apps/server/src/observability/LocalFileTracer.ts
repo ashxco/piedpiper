@@ -2,7 +2,7 @@ import type * as Exit from "effect/Exit";
 import { Effect, Option, Tracer } from "effect";
 
 import { spanToTraceRecord } from "./TraceRecord.ts";
-import { makeTraceSink } from "./TraceSink.ts";
+import { makeTraceSink, type TraceSink } from "./TraceSink.ts";
 
 export interface LocalFileTracerOptions {
   readonly filePath: string;
@@ -10,6 +10,8 @@ export interface LocalFileTracerOptions {
   readonly maxFiles: number;
   readonly batchWindowMs: number;
   readonly delegate?: Tracer.Tracer;
+  /** Reuses an existing sink, so a second writer does not race rotation on the same file. */
+  readonly sink?: TraceSink;
 }
 
 class LocalFileSpan implements Tracer.Span {
@@ -82,12 +84,14 @@ class LocalFileSpan implements Tracer.Span {
 export const makeLocalFileTracer = Effect.fn("makeLocalFileTracer")(function* (
   options: LocalFileTracerOptions,
 ) {
-  const sink = yield* makeTraceSink({
-    filePath: options.filePath,
-    maxBytes: options.maxBytes,
-    maxFiles: options.maxFiles,
-    batchWindowMs: options.batchWindowMs,
-  });
+  const sink =
+    options.sink ??
+    (yield* makeTraceSink({
+      filePath: options.filePath,
+      maxBytes: options.maxBytes,
+      maxFiles: options.maxFiles,
+      batchWindowMs: options.batchWindowMs,
+    }));
 
   const delegate =
     options.delegate ??

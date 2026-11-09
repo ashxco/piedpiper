@@ -1,16 +1,18 @@
 import * as OS from "node:os";
-import { Effect, FileSystem, Layer, Path } from "effect";
+import { Effect, FileSystem, Layer, Path, type PlatformError } from "effect";
 
 import {
   WorkspacePaths,
   WorkspacePathOutsideRootError,
   WorkspaceRootNotDirectoryError,
   WorkspaceRootNotExistsError,
+  WorkspaceRootStatFailedError,
   type WorkspacePathsShape,
 } from "../Services/WorkspacePaths.ts";
 
-function toPosixRelativePath(input: string): string {
-  return input.replaceAll("\\", "/");
+// Only the platform separator: on POSIX a backslash is a legal file-name character.
+function toPosixRelativePath(input: string, separator: string): string {
+  return separator === "/" ? input : input.replaceAll(separator, "/");
 }
 
 function expandHomePath(input: string, path: Path.Path): string {
@@ -23,6 +25,22 @@ function expandHomePath(input: string, path: Path.Path): string {
   return input;
 }
 
+function statErrorCode(error: PlatformError.PlatformError): string | undefined {
+  const cause = error.reason.cause;
+  if (typeof cause !== "object" || cause === null || !("code" in cause)) return undefined;
+  return typeof cause.code === "string" ? cause.code : undefined;
+}
+
+// Effect maps only EACCES to PermissionDenied; macOS privacy (TCC) denials surface as EPERM.
+function describeStatFailure(error: PlatformError.PlatformError): string {
+  const reason = error.reason;
+  const code = statErrorCode(error);
+  if (reason._tag === "PermissionDenied" || code === "EACCES" || code === "EPERM") {
+    return "permission denied";
+  }
+  return reason.description ?? code ?? reason._tag;
+}
+
 export const makeWorkspacePaths = Effect.gen(function* () {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -31,9 +49,21 @@ export const makeWorkspacePaths = Effect.gen(function* () {
     "WorkspacePaths.normalizeWorkspaceRoot",
   )(function* (workspaceRoot) {
     const normalizedWorkspaceRoot = path.resolve(expandHomePath(workspaceRoot.trim(), path));
-    const workspaceStat = yield* fileSystem
-      .stat(normalizedWorkspaceRoot)
-      .pipe(Effect.catch(() => Effect.succeed(null)));
+    const workspaceStat = yield* fileSystem.stat(normalizedWorkspaceRoot).pipe(
+      Effect.catch((cause) =>
+        // ENOTDIR: a parent component is a file, so the folder cannot exist.
+        cause.reason._tag === "NotFound" || statErrorCode(cause) === "ENOTDIR"
+          ? Effect.succeed(null)
+          : Effect.fail(
+              new WorkspaceRootStatFailedError({
+                workspaceRoot,
+                normalizedWorkspaceRoot,
+                reason: describeStatFailure(cause),
+                cause,
+              }),
+            ),
+      ),
+    );
     if (!workspaceStat) {
       return yield* new WorkspaceRootNotExistsError({
         workspaceRoot,
@@ -60,7 +90,10 @@ export const makeWorkspacePaths = Effect.gen(function* () {
       }
 
       const absolutePath = path.resolve(input.workspaceRoot, normalizedInputPath);
-      const relativeToRoot = toPosixRelativePath(path.relative(input.workspaceRoot, absolutePath));
+      const relativeToRoot = toPosixRelativePath(
+        path.relative(input.workspaceRoot, absolutePath),
+        path.sep,
+      );
       if (
         relativeToRoot.length === 0 ||
         relativeToRoot === "." ||

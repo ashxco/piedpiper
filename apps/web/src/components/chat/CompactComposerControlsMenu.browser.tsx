@@ -1,10 +1,15 @@
 import { DEFAULT_MODEL_BY_PROVIDER, ModelSelection, ThreadId } from "@piedpiper/contracts";
 import "../../index.css";
 
-import { page } from "vitest/browser";
+import { useRef } from "react";
+import { page, userEvent } from "vitest/browser";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
 
+import {
+  ComposerMenuFocusContext,
+  type ComposerMenuFocusTarget,
+} from "../ChatView.composerMenuFocus";
 import { CompactComposerControlsMenu } from "./CompactComposerControlsMenu";
 import { TraitsMenuContent } from "./TraitsPicker";
 import { useComposerDraftStore } from "../../composerDraftStore";
@@ -115,7 +120,6 @@ async function mountMenu(props?: { modelSelection?: ModelSelection; prompt?: str
     <CompactComposerControlsMenu
       activePlan={false}
       interactionMode="default"
-      isAdvisor={false}
       planSidebarOpen={false}
       runtimeMode="approval-required"
       traitsMenuContent={
@@ -131,7 +135,7 @@ async function mountMenu(props?: { modelSelection?: ModelSelection; prompt?: str
       }
       onToggleInteractionMode={vi.fn()}
       onTogglePlanSidebar={vi.fn()}
-      onToggleRuntimeMode={vi.fn()}
+      onRuntimeModeChange={vi.fn()}
     />,
     { container: host },
   );
@@ -258,5 +262,147 @@ describe("CompactComposerControlsMenu", () => {
         'Your prompt contains "ultrathink" in the text. Remove it to change effort.',
       );
     });
+  });
+
+  it("closes the compact menu after picking an effort level", async () => {
+    await using _ = await mountMenu({
+      modelSelection: {
+        provider: "claudeAgent",
+        model: "claude-opus-4-6",
+        options: { effort: "high" },
+      },
+    });
+
+    await page.getByLabelText("More composer controls").click();
+    await page.getByRole("menuitemradio", { name: "Low" }).click();
+
+    await vi.waitFor(() => {
+      expect(document.querySelector('[role="menuitemradio"]')).toBeNull();
+    });
+  });
+
+  it("lists only the controls the footer hid", async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const screen = await render(
+      <CompactComposerControlsMenu
+        activePlan={false}
+        interactionMode="default"
+        planSidebarOpen={false}
+        runtimeMode="approval-required"
+        showInteractionMode={false}
+        onToggleInteractionMode={vi.fn()}
+        onTogglePlanSidebar={vi.fn()}
+        onRuntimeModeChange={vi.fn()}
+      />,
+      { container: host },
+    );
+
+    try {
+      await page.getByLabelText("More composer controls").click();
+      await vi.waitFor(() => {
+        const text = document.body.textContent ?? "";
+        expect(text).toContain("Access");
+        expect(text).not.toContain("Mode");
+        expect(text).not.toContain("Show plan sidebar");
+        expect(document.querySelectorAll('[role="separator"]')).toHaveLength(0);
+      });
+    } finally {
+      await screen.unmount();
+      host.remove();
+    }
+  });
+
+  it("separates the sections it does list", async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const screen = await render(
+      <CompactComposerControlsMenu
+        activePlan
+        interactionMode="default"
+        planSidebarOpen={false}
+        runtimeMode="approval-required"
+        showInteractionMode={false}
+        onToggleInteractionMode={vi.fn()}
+        onTogglePlanSidebar={vi.fn()}
+        onRuntimeModeChange={vi.fn()}
+      />,
+      { container: host },
+    );
+
+    try {
+      await page.getByLabelText("More composer controls").click();
+      await vi.waitFor(() => {
+        expect(document.body.textContent ?? "").toContain("Show plan sidebar");
+        expect(document.querySelectorAll('[role="separator"]')).toHaveLength(1);
+      });
+    } finally {
+      await screen.unmount();
+      host.remove();
+    }
+  });
+
+  it("picks the Auto runtime mode directly", async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const onRuntimeModeChange = vi.fn();
+    const screen = await render(
+      <CompactComposerControlsMenu
+        activePlan={false}
+        interactionMode="default"
+        planSidebarOpen={false}
+        runtimeMode="approval-required"
+        onToggleInteractionMode={vi.fn()}
+        onTogglePlanSidebar={vi.fn()}
+        onRuntimeModeChange={onRuntimeModeChange}
+      />,
+      { container: host },
+    );
+
+    try {
+      await page.getByLabelText("More composer controls").click();
+      await page.getByRole("menuitemradio", { name: "Auto" }).click();
+      expect(onRuntimeModeChange).toHaveBeenCalledWith("auto");
+    } finally {
+      await screen.unmount();
+      host.remove();
+    }
+  });
+
+  it("returns focus to the prompt on Escape inside the composer", async () => {
+    function InComposer() {
+      const editorRef = useRef<HTMLTextAreaElement>(null);
+      const targetRef = useRef<ComposerMenuFocusTarget>({
+        focusAtEnd: () => editorRef.current?.focus(),
+      });
+      return (
+        <ComposerMenuFocusContext value={targetRef}>
+          <textarea aria-label="editor" ref={editorRef} />
+          <CompactComposerControlsMenu
+            activePlan={false}
+            interactionMode="default"
+            planSidebarOpen={false}
+            runtimeMode="approval-required"
+            onToggleInteractionMode={vi.fn()}
+            onTogglePlanSidebar={vi.fn()}
+            onRuntimeModeChange={vi.fn()}
+          />
+        </ComposerMenuFocusContext>
+      );
+    }
+    const screen = await render(<InComposer />);
+    try {
+      await page.getByRole("button", { name: "More composer controls" }).click();
+      await expect.element(page.getByRole("menuitemradio", { name: "Plan" })).toBeVisible();
+      await vi.waitFor(() => {
+        expect(document.activeElement?.closest('[data-slot="menu-popup"]')).not.toBeNull();
+      });
+      await userEvent.keyboard("{Escape}");
+      await vi.waitFor(() => {
+        expect(document.activeElement?.getAttribute("aria-label")).toBe("editor");
+      });
+    } finally {
+      await screen.unmount();
+    }
   });
 });

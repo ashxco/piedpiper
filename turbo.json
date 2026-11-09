@@ -1,5 +1,6 @@
 {
   "$schema": "https://turbo.build/schema.json",
+  "globalPassThroughEnv": ["PATHEXT"],
   "globalEnv": [
     "PORT",
     "VITE_WS_URL",
@@ -21,7 +22,8 @@
     "PIEDPIPER_OTLP_TRACES_URL",
     "PIEDPIPER_OTLP_METRICS_URL",
     "PIEDPIPER_OTLP_EXPORT_INTERVAL_MS",
-    "PIEDPIPER_OTLP_SERVICE_NAME"
+    "PIEDPIPER_OTLP_SERVICE_NAME",
+    "PIEDPIPER_TELEMETRY_ENABLED"
   ],
   "tasks": {
     "build": {
@@ -31,7 +33,13 @@
     "dev": {
       "dependsOn": ["@piedpiper/contracts#build"],
       "cache": false,
-      "persistent": true
+      "persistent": true,
+      "passThroughEnv": ["PIEDPIPER_POSTHOG_KEY", "PIEDPIPER_POSTHOG_HOST"]
+    },
+    "start": {
+      "cache": false,
+      "persistent": true,
+      "passThroughEnv": ["PIEDPIPER_POSTHOG_KEY", "PIEDPIPER_POSTHOG_HOST"]
     },
     "typecheck": {
       "dependsOn": ["^typecheck"],

@@ -1,6 +1,14 @@
 import { FolderIcon, FolderOpenIcon } from "lucide-react";
 import { useState } from "react";
 import { resolveServerUrl } from "~/lib/utils";
+import { appendAuthToken } from "~/rpc/authToken";
+import { useStore } from "~/store";
+import {
+  projectFaviconSearchParams,
+  projectFaviconToneClass,
+  readProjectFaviconPath,
+  readProjectFaviconVersion,
+} from "./ProjectFavicon.logic";
 
 const loadedProjectFaviconSrcs = new Set<string>();
 
@@ -13,11 +21,21 @@ export function ProjectFavicon({
   className?: string;
   expanded?: boolean;
 }) {
-  const src = resolveServerUrl({
-    protocol: "http",
-    pathname: "/api/project-favicon",
-    searchParams: { cwd },
-  });
+  const faviconPath = useStore((state) =>
+    readProjectFaviconPath(state.projects.find((project) => project.cwd === cwd)),
+  );
+  const faviconVersion = useStore((state) =>
+    readProjectFaviconVersion(state.projects.find((project) => project.cwd === cwd)),
+  );
+  // `<img>` requests cannot set headers, and in desktop mode no auth cookie is
+  // written, so carry the token as a query parameter.
+  const src = appendAuthToken(
+    resolveServerUrl({
+      protocol: "http",
+      pathname: "/api/project-favicon",
+      searchParams: projectFaviconSearchParams(cwd, faviconPath, faviconVersion),
+    }),
+  );
   const [status, setStatus] = useState<"loading" | "loaded" | "error">(() =>
     loadedProjectFaviconSrcs.has(src) ? "loaded" : "loading",
   );
@@ -30,9 +48,10 @@ export function ProjectFavicon({
         <FolderGlyph className={`size-3.5 shrink-0 text-white/50 ${className ?? ""}`} />
       ) : null}
       <img
+        key={src}
         src={src}
         alt=""
-        className={`size-3.5 shrink-0 rounded-sm object-contain dark:brightness-100 brightness-0 dark:invert-0 ${status === "loaded" ? "" : "hidden"} ${className ?? ""}`}
+        className={`size-3.5 shrink-0 rounded-sm object-contain ${projectFaviconToneClass(faviconPath)} ${status === "loaded" ? "" : "hidden"} ${className ?? ""}`}
         onLoad={() => {
           loadedProjectFaviconSrcs.add(src);
           setStatus("loaded");

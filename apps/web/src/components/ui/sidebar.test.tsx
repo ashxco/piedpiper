@@ -1,11 +1,16 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
+import { removeLocalStorageItem } from "~/hooks/useLocalStorage";
 import {
+  persistSidebarOpen,
+  readStoredSidebarOpen,
+  SidebarContent,
   SidebarMenuAction,
   SidebarMenuButton,
   SidebarMenuSubButton,
   SidebarProvider,
+  useSidebar,
 } from "./sidebar";
 
 function renderSidebarButton(className?: string) {
@@ -49,5 +54,47 @@ describe("sidebar interactive cursors", () => {
 
     expect(html).toContain('data-slot="sidebar-menu-sub-button"');
     expect(html).toContain("cursor-pointer");
+  });
+});
+
+describe("sidebar content scrolling", () => {
+  it("opts out of scroll anchoring so a pinned row does not move the viewport", () => {
+    const html = renderToStaticMarkup(<SidebarContent>Threads</SidebarContent>);
+
+    expect(html).toContain("[overflow-anchor:none]");
+  });
+});
+
+describe("sidebar open state persistence", () => {
+  const storageKey = "test_sidebar_open";
+
+  function SidebarStateProbe() {
+    const { state } = useSidebar();
+    return <span data-state={state} />;
+  }
+
+  function renderWithStorageKey(key: string | undefined) {
+    return renderToStaticMarkup(
+      <SidebarProvider defaultOpen {...(key ? { storageKey: key } : {})}>
+        <SidebarStateProbe />
+      </SidebarProvider>,
+    );
+  }
+
+  it("restores a persisted collapsed state on mount", () => {
+    persistSidebarOpen(storageKey, false);
+    try {
+      expect(readStoredSidebarOpen(storageKey)).toBe(false);
+      expect(renderWithStorageKey(storageKey)).toContain('data-state="collapsed"');
+    } finally {
+      removeLocalStorageItem(storageKey);
+    }
+  });
+
+  it("falls back to defaultOpen when nothing is stored or no key is given", () => {
+    removeLocalStorageItem(storageKey);
+    expect(readStoredSidebarOpen(storageKey)).toBeNull();
+    expect(renderWithStorageKey(storageKey)).toContain('data-state="expanded"');
+    expect(renderWithStorageKey(undefined)).toContain('data-state="expanded"');
   });
 });

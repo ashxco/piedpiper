@@ -1,7 +1,14 @@
 import { createRequire } from "node:module";
 
 import { Effect, FileSystem, Layer, Path } from "effect";
-import { PtyAdapter, PtyAdapterShape, PtyExitEvent, PtyProcess } from "../Services/PTY";
+import {
+  PtyAdapter,
+  PtyAdapterShape,
+  PtyExitEvent,
+  PtyProcess,
+  PtySpawnError,
+  PtySpawnInput,
+} from "../Services/PTY";
 
 let didEnsureSpawnHelperExecutable = false;
 
@@ -45,8 +52,25 @@ export const ensureNodePtySpawnHelperExecutable = Effect.fn(function* (explicitP
   yield* fs.chmod(helperPath, 0o755).pipe(Effect.orElseSucceed(() => undefined));
 });
 
-class NodePtyProcess implements PtyProcess {
-  constructor(private readonly process: import("node-pty").IPty) {}
+/**
+ * node-pty writes `name` into TERM only on Unix; ConPTY leaves the env untouched, so Windows
+ * children would otherwise see a missing TERM.
+ */
+export function nodePtySpawnTerminalOptions(
+  env: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform = globalThis.process.platform,
+): { env: NodeJS.ProcessEnv; name: string } {
+  const name = "xterm-256color";
+  if (platform !== "win32") return { env, name };
+  const termKey = Object.keys(env).find((key) => key.toUpperCase() === "TERM") ?? "TERM";
+  return { env: env[termKey] ? env : { ...env, [termKey]: name }, name };
+}
+
+export class NodePtyProcess implements PtyProcess {
+  constructor(
+    private readonly process: import("node-pty").IPty,
+    private readonly platform: NodeJS.Platform = globalThis.process.platform,
+  ) {}
 
   get pid(): number {
     return this.process.pid;
@@ -61,7 +85,8 @@ class NodePtyProcess implements PtyProcess {
   }
 
   kill(signal?: string): void {
-    this.process.kill(signal);
+    // node-pty's Windows kill() throws on any signal; it always terminates the whole process tree.
+    this.process.kill(this.platform === "win32" ? undefined : signal);
   }
 
   onData(callback: (data: string) => void): () => void {
@@ -84,6 +109,28 @@ class NodePtyProcess implements PtyProcess {
   }
 }
 
+export const spawnNodePtyProcess = (
+  spawn: typeof import("node-pty").spawn,
+  input: PtySpawnInput,
+): Effect.Effect<PtyProcess, PtySpawnError> =>
+  Effect.try({
+    try: () =>
+      new NodePtyProcess(
+        spawn(input.shell, input.args ?? [], {
+          cwd: input.cwd,
+          cols: input.cols,
+          rows: input.rows,
+          ...nodePtySpawnTerminalOptions(input.env),
+        }),
+      ),
+    catch: (cause) =>
+      new PtySpawnError({
+        adapter: "node-pty",
+        message: cause instanceof Error ? cause.message : "Failed to spawn PTY process",
+        cause,
+      }),
+  });
+
 export const layer = Layer.effect(
   PtyAdapter,
   Effect.gen(function* () {
@@ -103,14 +150,7 @@ export const layer = Layer.effect(
     return {
       spawn: Effect.fn(function* (input) {
         yield* ensureNodePtySpawnHelperExecutableCached;
-        const ptyProcess = nodePty.spawn(input.shell, input.args ?? [], {
-          cwd: input.cwd,
-          cols: input.cols,
-          rows: input.rows,
-          env: input.env,
-          name: globalThis.process.platform === "win32" ? "xterm-color" : "xterm-256color",
-        });
-        return new NodePtyProcess(ptyProcess);
+        return yield* spawnNodePtyProcess(nodePty.spawn, input);
       }),
     } satisfies PtyAdapterShape;
   }),

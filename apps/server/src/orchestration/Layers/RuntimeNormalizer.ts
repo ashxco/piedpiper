@@ -10,13 +10,21 @@
  */
 import {
   ApprovalRequestId,
+  EventId,
   isToolLifecycleItemType,
+  THREAD_GOAL_ACTIVITY_KIND,
+  THREAD_USAGE_LIMIT_ACTIVITY_KIND,
+  type ThreadGoalActivityPayload,
   ThreadId,
   type ThreadTokenUsageSnapshot,
   TurnId,
   type OrchestrationThreadActivity,
   type ProviderRuntimeEvent,
 } from "@piedpiper/contracts";
+
+import { sliceSurrogateSafe } from "@piedpiper/shared/String";
+
+import { projectToolLifecycleData } from "../ActivityPayloadProjection.ts";
 
 export function toTurnId(value: TurnId | string | undefined): TurnId | undefined {
   return value === undefined ? undefined : TurnId.makeUnsafe(String(value));
@@ -34,7 +42,15 @@ export function sameId(left: string | null | undefined, right: string | null | u
 }
 
 export function truncateDetail(value: string, limit = 180): string {
-  return value.length > limit ? `${value.slice(0, limit - 3)}...` : value;
+  return value.length > limit ? `${sliceSurrogateSafe(value, limit - 3)}...` : value;
+}
+
+const ACTIVITY_TITLE_MAX_CHARS = 120;
+
+/** One-line work-log title from free text; undefined when nothing readable remains. */
+export function toActivityTitle(value: string | undefined): string | undefined {
+  const singleLine = value?.replace(/\s+/g, " ").trim();
+  return singleLine ? truncateDetail(singleLine, ACTIVITY_TITLE_MAX_CHARS) : undefined;
 }
 
 export function normalizeProposedPlanMarkdown(
@@ -111,6 +127,7 @@ export function requestKindFromCanonicalRequestType(
   switch (requestType) {
     case "command_execution_approval":
     case "exec_command_approval":
+    case "dynamic_tool_call":
       return "command";
     case "file_read_approval":
       return "file-read";
@@ -155,7 +172,10 @@ export function runtimeEventToActivities(
             requestId: toApprovalRequestId(event.requestId),
             ...(requestKind ? { requestKind } : {}),
             requestType: event.payload.requestType,
-            ...(event.payload.detail ? { detail: truncateDetail(event.payload.detail) } : {}),
+            ...(event.payload.detail ? { detail: event.payload.detail } : {}),
+            // Claude's permission reason and no-standing-grant flag; Codex approvals set neither.
+            ...(event.payload.reason ? { reason: event.payload.reason } : {}),
+            ...(event.payload.noStandingGrant === true ? { noStandingGrant: true } : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,
@@ -194,9 +214,9 @@ export function runtimeEventToActivities(
           createdAt: event.createdAt,
           tone: "error",
           kind: "runtime.error",
-          summary: "Runtime error",
+          summary: toActivityTitle(event.payload.message) ?? "Runtime error",
           payload: {
-            message: truncateDetail(event.payload.message),
+            message: truncateDetail(event.payload.message, 400),
           },
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,
@@ -211,7 +231,7 @@ export function runtimeEventToActivities(
           createdAt: event.createdAt,
           tone: "info",
           kind: "runtime.warning",
-          summary: "Runtime warning",
+          summary: toActivityTitle(event.payload.message) ?? "Runtime warning",
           payload: {
             message: truncateDetail(event.payload.message),
             ...(event.payload.detail !== undefined ? { detail: event.payload.detail } : {}),
@@ -242,6 +262,21 @@ export function runtimeEventToActivities(
       ];
     }
 
+    case "thread.goal.updated": {
+      return [
+        {
+          id: event.eventId,
+          createdAt: event.createdAt,
+          tone: "info",
+          kind: THREAD_GOAL_ACTIVITY_KIND,
+          summary: event.payload.goal ? "Goal updated" : "Goal cleared",
+          payload: { goal: event.payload.goal } satisfies ThreadGoalActivityPayload,
+          turnId: toTurnId(event.turnId) ?? null,
+          ...maybeSequence,
+        },
+      ];
+    }
+
     case "user-input.requested": {
       return [
         {
@@ -253,6 +288,7 @@ export function runtimeEventToActivities(
           payload: {
             ...(event.requestId ? { requestId: event.requestId } : {}),
             questions: event.payload.questions,
+            ...(event.payload.responseMode ? { responseMode: event.payload.responseMode } : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,
@@ -304,16 +340,48 @@ export function runtimeEventToActivities(
       ];
     }
 
-    case "task.progress": {
+    case "turn.completed": {
+      // Absent means the turn did not stop on a usage limit; null means its reset is unknown.
+      if (event.payload.rateLimitResetAt === undefined) {
+        return [];
+      }
       return [
         {
           id: event.eventId,
           createdAt: event.createdAt,
+          tone: "error",
+          kind: THREAD_USAGE_LIMIT_ACTIVITY_KIND,
+          summary: "Usage limit reached",
+          payload: {
+            resetAt: event.payload.rateLimitResetAt,
+            ...(event.payload.rateLimitTypes !== undefined
+              ? { limitTypes: event.payload.rateLimitTypes }
+              : {}),
+          },
+          turnId: toTurnId(event.turnId) ?? null,
+          ...maybeSequence,
+        },
+      ];
+    }
+
+    case "task.progress": {
+      // Codex reports its reasoning text as the description, so it is not a task name.
+      const title =
+        event.provider === "codex" ? undefined : toActivityTitle(event.payload.description);
+      return [
+        {
+          // One live row per task, so ticks cannot evict older rows; Codex reuses a task id per turn and keeps per-event rows.
+          id:
+            event.provider === "codex"
+              ? event.eventId
+              : EventId.makeUnsafe(`task-progress:${event.threadId}:${event.payload.taskId}`),
+          createdAt: event.createdAt,
           tone: "info",
           kind: "task.progress",
-          summary: "Reasoning update",
+          summary: title ?? "Reasoning update",
           payload: {
             taskId: event.payload.taskId,
+            ...(title ? { title } : {}),
             detail: truncateDetail(event.payload.summary ?? event.payload.description),
             ...(event.payload.summary ? { summary: truncateDetail(event.payload.summary) } : {}),
             ...(event.payload.lastToolName ? { lastToolName: event.payload.lastToolName } : {}),
@@ -410,7 +478,9 @@ export function runtimeEventToActivities(
             ...(event.itemId ? { providerItemId: event.itemId } : {}),
             ...(event.payload.status ? { status: event.payload.status } : {}),
             ...(event.payload.detail ? { detail: truncateDetail(event.payload.detail) } : {}),
-            ...(event.payload.data !== undefined ? { data: event.payload.data } : {}),
+            ...(event.payload.data !== undefined
+              ? { data: projectToolLifecycleData(event.payload.data) }
+              : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,
@@ -419,6 +489,29 @@ export function runtimeEventToActivities(
     }
 
     case "item.completed": {
+      if (event.payload.itemType === "context_compaction") {
+        const failed = event.payload.status === "failed";
+        return [
+          {
+            id: event.eventId,
+            createdAt: event.createdAt,
+            tone: failed ? "error" : "info",
+            kind: failed ? "context-compaction.failed" : "context-compaction.completed",
+            summary: failed
+              ? (event.payload.title ?? "Context compaction failed")
+              : "Context compacted",
+            payload: {
+              ...(event.itemId ? { providerItemId: event.itemId } : {}),
+              ...(failed ? { status: "failed" } : {}),
+              ...(failed && event.payload.detail
+                ? { detail: truncateDetail(event.payload.detail) }
+                : {}),
+            },
+            turnId: toTurnId(event.turnId) ?? null,
+            ...maybeSequence,
+          },
+        ];
+      }
       if (!isToolLifecycleItemType(event.payload.itemType)) {
         return [];
       }
@@ -432,7 +525,13 @@ export function runtimeEventToActivities(
           payload: {
             itemType: event.payload.itemType,
             ...(event.itemId ? { providerItemId: event.itemId } : {}),
+            // Terminal status (completed/failed/declined) so the work log can flag failed calls.
+            ...(event.payload.status ? { status: event.payload.status } : {}),
             ...(event.payload.detail ? { detail: truncateDetail(event.payload.detail) } : {}),
+            // Final slimmed data, so snapshots can drop the superseded tool.updated rows.
+            ...(event.payload.data !== undefined
+              ? { data: projectToolLifecycleData(event.payload.data) }
+              : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,
@@ -441,6 +540,23 @@ export function runtimeEventToActivities(
     }
 
     case "item.started": {
+      if (event.payload.itemType === "context_compaction") {
+        return [
+          {
+            id: event.eventId,
+            createdAt: event.createdAt,
+            tone: "info",
+            kind: "context-compaction.started",
+            summary: event.payload.title ?? "Compacting context",
+            payload: {
+              ...(event.itemId ? { providerItemId: event.itemId } : {}),
+              status: "inProgress",
+            },
+            turnId: toTurnId(event.turnId) ?? null,
+            ...maybeSequence,
+          },
+        ];
+      }
       if (!isToolLifecycleItemType(event.payload.itemType)) {
         return [];
       }
@@ -459,7 +575,9 @@ export function runtimeEventToActivities(
             // a friendly action label ("Reading …") immediately instead of
             // falling back to the raw "Tool call started - X: {}" until the
             // first `tool.updated` merges in.
-            ...(event.payload.data !== undefined ? { data: event.payload.data } : {}),
+            ...(event.payload.data !== undefined
+              ? { data: projectToolLifecycleData(event.payload.data) }
+              : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,

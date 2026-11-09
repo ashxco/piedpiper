@@ -31,7 +31,27 @@ describe("parsePullRequestReference", () => {
     );
   });
 
+  it.each([
+    "https://ghe.example.com/user/repo/pull/42",
+    "https://ghe.example.com:8443/user/repo/pull/42",
+    "http://ghe.internal/user/repo/pull/42",
+    "https://ghe.example.com/user/repo/pull/42/files?w=1",
+  ])("accepts the GitHub Enterprise URL %s, bare and through gh pr checkout", (url) => {
+    expect(parsePullRequestReference(url)).toBe(url);
+    expect(parsePullRequestReference(`gh pr checkout ${url}`)).toBe(url);
+  });
+
   it("rejects non-pull-request input", () => {
     expect(parsePullRequestReference("feature/my-branch")).toBeNull();
+  });
+
+  it.each([
+    "https://ghe.example.com/user/repo",
+    "https://ghe.example.com/user/repo/issues/42",
+    "https://ghe.example.com/user/repo/pulls/42",
+    "https://ghe.example.com/repo/pull/42",
+    "ftp://ghe.example.com/user/repo/pull/42",
+  ])("rejects the non-pull-request URL %s", (url) => {
+    expect(parsePullRequestReference(url)).toBeNull();
   });
 });

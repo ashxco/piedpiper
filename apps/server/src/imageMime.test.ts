@@ -2,6 +2,14 @@ import { describe, expect, it } from "vitest";
 
 import { inferImageExtension, parseBase64DataUrl } from "./imageMime.ts";
 
+const findMaxDepth = (depth: number): number => {
+  try {
+    return findMaxDepth(depth + 1);
+  } catch {
+    return depth;
+  }
+};
+
 describe("imageMime", () => {
   it("parses base64 data URL with mime type", () => {
     expect(parseBase64DataUrl("data:image/png;base64,SGVsbG8=")).toEqual({
@@ -30,6 +38,51 @@ describe("imageMime", () => {
       mimeType: "image/png",
       base64: "SGVsbG8=",
     });
+  });
+
+  it("rejects payload with characters outside the base64 alphabet", () => {
+    expect(parseBase64DataUrl("data:image/png;base64,SGVs!bG8=")).toBeNull();
+    expect(parseBase64DataUrl("data:image/png;base64,SGVs,bG8=")).toBeNull();
+  });
+
+  it("rejects structurally malformed base64", () => {
+    expect(parseBase64DataUrl("data:image/png;base64,AB=CD===")).toBeNull();
+    expect(parseBase64DataUrl("data:image/png;base64,SGV=bG8=")).toBeNull();
+    expect(parseBase64DataUrl("data:image/png;base64,SGVsbG8=====AAA")).toBeNull();
+    expect(parseBase64DataUrl("data:image/png;base64,SGVsbG8")).toBeNull();
+  });
+
+  it("accepts base64 with zero, one or two trailing padding characters", () => {
+    expect(parseBase64DataUrl("data:image/png;base64,SGVsbA==")).toEqual({
+      mimeType: "image/png",
+      base64: "SGVsbA==",
+    });
+    expect(parseBase64DataUrl("data:image/png;base64,SGVsbG8h")).toEqual({
+      mimeType: "image/png",
+      base64: "SGVsbG8h",
+    });
+  });
+
+  it("rejects empty and whitespace-only payloads", () => {
+    expect(parseBase64DataUrl("data:image/png;base64,")).toBeNull();
+    expect(parseBase64DataUrl("data:image/png;base64, \r\n")).toBeNull();
+  });
+
+  it("parses a case-insensitive scheme and mime type", () => {
+    expect(parseBase64DataUrl("DATA:IMAGE/PNG;BASE64,SGVsbG8=")).toEqual({
+      mimeType: "image/png",
+      base64: "SGVsbG8=",
+    });
+  });
+
+  it("parses a multi-megabyte payload from a deep call stack", () => {
+    // Regression: a regex over the payload overflowed the stack inside fiber execution.
+    const dataUrl = `data:image/png;base64,${"A".repeat(14_000_000)}`;
+    const atDepth = (depth: number): ReturnType<typeof parseBase64DataUrl> =>
+      depth === 0 ? parseBase64DataUrl(dataUrl) : atDepth(depth - 1);
+    const result = atDepth(Math.floor(findMaxDepth(0) * 0.85));
+    expect(result?.mimeType).toBe("image/png");
+    expect(result?.base64.length).toBe(14_000_000);
   });
 
   it("does not read inherited keys from mime extension map", () => {

@@ -1,5 +1,9 @@
 import { assert, describe, it } from "vitest";
-import { buildVisibleToastLayout, shouldHideCollapsedToastContent } from "./toast.logic";
+import {
+  buildVisibleToastLayout,
+  resolveCopyableToastErrorText,
+  shouldHideCollapsedToastContent,
+} from "./toast.logic";
 
 describe("shouldHideCollapsedToastContent", () => {
   it("keeps a single visible toast readable", () => {
@@ -12,6 +16,32 @@ describe("shouldHideCollapsedToastContent", () => {
 
   it("hides non-front toasts until the stack is expanded", () => {
     assert.equal(shouldHideCollapsedToastContent(1, 3), true);
+  });
+});
+
+describe("resolveCopyableToastErrorText", () => {
+  it("offers the description of an error toast", () => {
+    assert.equal(resolveCopyableToastErrorText({ type: "error", description: "Boom" }), "Boom");
+  });
+
+  it("hides the button when the toast opts out", () => {
+    assert.equal(
+      resolveCopyableToastErrorText({
+        type: "error",
+        description: "Thread title",
+        data: { hideCopyButton: true },
+      }),
+      null,
+    );
+  });
+
+  it("offers nothing for other toast types", () => {
+    assert.equal(resolveCopyableToastErrorText({ type: "warning", description: "Boom" }), null);
+  });
+
+  it("offers nothing when the description is not text", () => {
+    assert.equal(resolveCopyableToastErrorText({ type: "error", description: { a: 1 } }), null);
+    assert.equal(resolveCopyableToastErrorText({ type: "error" }), null);
   });
 });
 

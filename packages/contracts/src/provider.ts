@@ -10,8 +10,8 @@ import {
 } from "./baseSchemas";
 import {
   ChatAttachment,
+  getProviderAttachmentLimitError,
   ModelSelection,
-  PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
   PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
   ProviderApprovalDecision,
   ProviderApprovalPolicy,
@@ -57,6 +57,8 @@ export const ProviderSessionStartInput = Schema.Struct({
   runtimeMode: RuntimeMode,
   systemPrompt: Schema.optional(Schema.String),
   interactionMode: Schema.optional(ProviderInteractionMode),
+  // Thread title; lets providers that name sessions themselves (Claude) skip that request.
+  title: Schema.optional(Schema.String),
 });
 export type ProviderSessionStartInput = typeof ProviderSessionStartInput.Type;
 
@@ -66,7 +68,10 @@ export const ProviderSendTurnInput = Schema.Struct({
     TrimmedNonEmptyString.check(Schema.isMaxLength(PROVIDER_SEND_TURN_MAX_INPUT_CHARS)),
   ),
   attachments: Schema.optional(
-    Schema.Array(ChatAttachment).check(Schema.isMaxLength(PROVIDER_SEND_TURN_MAX_ATTACHMENTS)),
+    // Enforces both the per-message count and the total image byte budget.
+    Schema.Array(ChatAttachment).check(
+      Schema.makeFilter((attachments) => getProviderAttachmentLimitError(attachments) ?? true),
+    ),
   ),
   modelSelection: Schema.optional(ModelSelection),
   interactionMode: Schema.optional(ProviderInteractionMode),

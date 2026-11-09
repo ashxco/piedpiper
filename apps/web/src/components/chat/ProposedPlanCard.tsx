@@ -1,4 +1,4 @@
-import { memo, useState, useId } from "react";
+import { memo, useEffect, useId, useRef, useState } from "react";
 import {
   buildCollapsedProposedPlanPreviewMarkdown,
   buildProposedPlanMarkdownFilename,
@@ -26,17 +26,22 @@ import {
 import { toastManager } from "../ui/toast";
 import { readNativeApi } from "~/nativeApi";
 import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
+import { THREAD_FIND_REVEAL_EVENT } from "./threadFindHighlights";
 
 export const ProposedPlanCard = memo(function ProposedPlanCard({
   planMarkdown,
   cwd,
   workspaceRoot,
+  threadId,
 }: {
   planMarkdown: string;
   cwd: string | undefined;
   workspaceRoot: string | undefined;
+  /** Lets a local image in the plan load through the server, checked against this thread. */
+  threadId?: string | undefined;
 }) {
   const [expanded, setExpanded] = useState(true);
+  const clipRef = useRef<HTMLDivElement>(null);
   const [isSaveDialogOpen, setIsSaveDialogOpen] = useState(false);
   const [savePath, setSavePath] = useState("");
   const [isSavingToWorkspace, setIsSavingToWorkspace] = useState(false);
@@ -59,6 +64,15 @@ export const ProposedPlanCard = memo(function ProposedPlanCard({
     : null;
   const downloadFilename = buildProposedPlanMarkdownFilename(planMarkdown);
   const saveContents = normalizePlanMarkdownForExport(planMarkdown);
+
+  // A collapsed plan holds only its preview, so thread find opens it to reach later matches.
+  useEffect(() => {
+    const clip = clipRef.current;
+    if (!clip) return;
+    const reveal = () => setExpanded(true);
+    clip.addEventListener(THREAD_FIND_REVEAL_EVENT, reveal);
+    return () => clip.removeEventListener(THREAD_FIND_REVEAL_EVENT, reveal);
+  }, []);
 
   const handleDownload = () => {
     downloadPlanAsTextFile(downloadFilename, saveContents);
@@ -152,11 +166,27 @@ export const ProposedPlanCard = memo(function ProposedPlanCard({
         </Menu>
       </div>
       <div className="mt-4">
-        <div className={cn("relative", canCollapse && !expanded && "max-h-104 overflow-hidden")}>
+        <div
+          ref={clipRef}
+          data-thread-find-fold={canCollapse && !expanded ? "" : undefined}
+          className={cn("relative", canCollapse && !expanded && "max-h-104 overflow-hidden")}
+        >
           {canCollapse && !expanded ? (
-            <ChatMarkdown text={collapsedPreview ?? ""} cwd={cwd} isStreaming={false} />
+            <ChatMarkdown
+              text={collapsedPreview ?? ""}
+              cwd={cwd}
+              isStreaming={false}
+              headingLevelOffset={3}
+              threadId={threadId}
+            />
           ) : (
-            <ChatMarkdown text={displayedPlanMarkdown} cwd={cwd} isStreaming={false} />
+            <ChatMarkdown
+              text={displayedPlanMarkdown}
+              cwd={cwd}
+              isStreaming={false}
+              headingLevelOffset={3}
+              threadId={threadId}
+            />
           )}
           {canCollapse && !expanded ? (
             <div className="pointer-events-none absolute inset-x-0 bottom-0 h-24 bg-linear-to-t from-card/95 via-card/80 to-transparent" />

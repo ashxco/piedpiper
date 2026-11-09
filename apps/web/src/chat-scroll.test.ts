@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { AUTO_SCROLL_BOTTOM_THRESHOLD_PX, isScrollContainerNearBottom } from "./chat-scroll";
+import {
+  AUTO_SCROLL_BOTTOM_THRESHOLD_PX,
+  getSmoothScrollBehavior,
+  isScrollContainerNearBottom,
+} from "./chat-scroll";
 
 describe("isScrollContainerNearBottom", () => {
   it("returns true when already at bottom", () => {
@@ -58,5 +62,30 @@ describe("isScrollContainerNearBottom", () => {
       ),
     ).toBe(true);
     expect(AUTO_SCROLL_BOTTOM_THRESHOLD_PX).toBe(64);
+  });
+});
+
+describe("getSmoothScrollBehavior", () => {
+  it("returns auto when reduced motion is requested", () => {
+    const queries: string[] = [];
+    const behavior = getSmoothScrollBehavior((query) => {
+      queries.push(query);
+      return { matches: true };
+    });
+    expect(behavior).toBe("auto");
+    expect(queries).toEqual(["(prefers-reduced-motion: reduce)"]);
+  });
+
+  it("returns smooth when reduced motion is not requested", () => {
+    expect(getSmoothScrollBehavior(() => ({ matches: false }))).toBe("smooth");
+  });
+
+  it("falls back to smooth when matchMedia is unavailable or throws", () => {
+    expect(getSmoothScrollBehavior(null)).toBe("smooth");
+    expect(
+      getSmoothScrollBehavior(() => {
+        throw new Error("unsupported");
+      }),
+    ).toBe("smooth");
   });
 });

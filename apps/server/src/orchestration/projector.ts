@@ -4,10 +4,14 @@ import {
   OrchestrationMessage,
   OrchestrationSession,
   OrchestrationThread,
+  THREAD_GOAL_ACTIVITY_KIND,
+  THREAD_MODEL_SWITCH_ACTIVITY_KIND,
+  THREAD_REASONING_ACTIVITY_KIND,
 } from "@piedpiper/contracts";
 import { Effect, Schema } from "effect";
 
 import type { ServerReadModel } from "./ServerReadModel.ts";
+import { isHeldUserInputAnswerActivity } from "./userInputRequests.ts";
 import { toProjectorDecodeError, type OrchestrationProjectorDecodeError } from "./Errors.ts";
 import {
   MessageSentPayloadSchema,
@@ -31,11 +35,118 @@ import {
 type ThreadPatch = Partial<Omit<OrchestrationThread, "id" | "projectId">>;
 const MAX_THREAD_MESSAGES = 2_000;
 const MAX_THREAD_CHECKPOINTS = 500;
+const MAX_THREAD_ACTIVITIES = 500;
+// Model-switch dividers sit above user messages, so they get the message cap instead.
+const MAX_THREAD_MODEL_SWITCH_ACTIVITIES = MAX_THREAD_MESSAGES;
+// Thinking blocks get their own window so a long reasoning run never evicts tool rows.
+const MAX_THREAD_REASONING_ACTIVITIES = 200;
+/** Goal rows get a small window of their own, so a long goal run cannot evict its Clear button. */
+const MAX_THREAD_GOAL_ACTIVITIES = 20;
+
+function activityPayloadField(
+  activity: { readonly payload?: unknown },
+  field: "requestId" | "responseMode",
+): unknown {
+  return (activity.payload as Record<string, unknown> | null | undefined)?.[field];
+}
+
+function taskIdOf(activity: { readonly payload?: unknown }): unknown {
+  return (activity.payload as { readonly taskId?: unknown } | null | undefined)?.taskId;
+}
+
+/** Keeps the newest activities per cap; expects `activities` sorted oldest first. */
+export function capThreadActivities<
+  T extends { readonly kind: string; readonly payload?: unknown },
+>(activities: ReadonlyArray<T>): ReadonlyArray<T> {
+  if (activities.length <= MAX_THREAD_REASONING_ACTIVITIES) return activities;
+  // A resolution closes its request wherever it sorts, as in readUserInputRequestState.
+  const resolvedRequestIds = new Set<unknown>();
+  for (const activity of activities) {
+    if (activity.kind === "user-input.resolved") {
+      resolvedRequestIds.add(activityPayloadField(activity, "requestId"));
+    }
+  }
+  let keptOthers = 0;
+  let keptSwitches = 0;
+  let keptReasoning = 0;
+  let keptGoals = 0;
+  const kept: T[] = [];
+  // Walked newest first, so a start seen before any completion of its id is still running.
+  const completedTaskIds = new Set<unknown>();
+  for (let index = activities.length - 1; index >= 0; index -= 1) {
+    const activity = activities[index]!;
+    if (activity.kind === "task.completed") {
+      completedTaskIds.add(taskIdOf(activity));
+    } else if (activity.kind === "task.started") {
+      const taskId = taskIdOf(activity);
+      // A running task's start cannot be recovered: task.progress does not reopen it.
+      if (!completedTaskIds.delete(taskId)) {
+        kept.push(activity);
+        continue;
+      }
+    }
+    // A long turn must not evict an open non-blocking question or an answer waiting for it to settle.
+    const isOpenNonBlockingQuestion =
+      activity.kind === "user-input.requested" &&
+      activityPayloadField(activity, "responseMode") === "message" &&
+      !resolvedRequestIds.has(activityPayloadField(activity, "requestId"));
+    if (isHeldUserInputAnswerActivity(activity) || isOpenNonBlockingQuestion) {
+      kept.push(activity);
+      continue;
+    }
+    if (activity.kind === THREAD_MODEL_SWITCH_ACTIVITY_KIND) {
+      if (keptSwitches >= MAX_THREAD_MODEL_SWITCH_ACTIVITIES) continue;
+      keptSwitches += 1;
+    } else if (activity.kind === THREAD_REASONING_ACTIVITY_KIND) {
+      if (keptReasoning >= MAX_THREAD_REASONING_ACTIVITIES) continue;
+      keptReasoning += 1;
+    } else if (activity.kind === THREAD_GOAL_ACTIVITY_KIND) {
+      if (keptGoals >= MAX_THREAD_GOAL_ACTIVITIES) continue;
+      keptGoals += 1;
+    } else {
+      if (keptOthers >= MAX_THREAD_ACTIVITIES) continue;
+      keptOthers += 1;
+    }
+    kept.push(activity);
+  }
+  return kept.toReversed();
+}
 
 function checkpointStatusToLatestTurnState(status: "ready" | "missing" | "error") {
   if (status === "error") return "error" as const;
   if (status === "missing") return "interrupted" as const;
   return "completed" as const;
+}
+
+/** State to settle still-running turns with when the session leaves "running"; null while it is starting or running. */
+export function settledTurnStateForSessionStatus(
+  status: OrchestrationSession["status"],
+): "completed" | "interrupted" | "error" | null {
+  switch (status) {
+    case "idle":
+    case "ready":
+      return "completed";
+    case "error":
+      return "error";
+    case "interrupted":
+    case "stopped":
+      return "interrupted";
+    case "starting":
+    case "running":
+      return null;
+  }
+}
+
+// Mirrors the DB projection: a session leaving "running" settles a still-running latest turn.
+function settleLatestTurn(
+  latestTurn: OrchestrationThread["latestTurn"],
+  session: Pick<OrchestrationSession, "status" | "updatedAt">,
+): OrchestrationThread["latestTurn"] {
+  if (latestTurn === null || latestTurn.state !== "running") {
+    return latestTurn;
+  }
+  const state = settledTurnStateForSessionStatus(session.status);
+  return state === null ? latestTurn : { ...latestTurn, state, completedAt: session.updatedAt };
 }
 
 function updateThread(
@@ -181,6 +292,7 @@ export function projectEvent(
             title: payload.title,
             workspaceRoot: payload.workspaceRoot,
             defaultModelSelection: payload.defaultModelSelection,
+            faviconPath: payload.faviconPath ?? null,
             scripts: payload.scripts,
             createdAt: payload.createdAt,
             updatedAt: payload.updatedAt,
@@ -208,6 +320,8 @@ export function projectEvent(
               ? { defaultModelSelection: payload.defaultModelSelection }
               : {}),
             ...(payload.scripts !== undefined ? { scripts: payload.scripts } : {}),
+            ...(payload.archivedAt !== undefined ? { archivedAt: payload.archivedAt } : {}),
+            ...(payload.faviconPath !== undefined ? { faviconPath: payload.faviconPath } : {}),
             updatedAt: payload.updatedAt,
           });
           return { ...nextBase, projects: nextProjects };
@@ -447,7 +561,7 @@ export function projectEvent(
                         ? thread.latestTurn.assistantMessageId
                         : null,
                   }
-                : thread.latestTurn,
+                : settleLatestTurn(thread.latestTurn, session),
             updatedAt: event.occurredAt,
           }),
         };
@@ -530,24 +644,36 @@ export function projectEvent(
           .toSorted((left, right) => left.checkpointTurnCount - right.checkpointTurnCount)
           .slice(-MAX_THREAD_CHECKPOINTS);
 
+        // A mid-turn placeholder records the checkpoint but cannot settle a turn the session still runs.
+        const turnStillRunning =
+          thread.session?.status === "running" && thread.session.activeTurnId === payload.turnId;
+
         return {
           ...nextBase,
           threads: updateThread(nextBase.threads, payload.threadId, {
             checkpoints,
-            latestTurn: {
-              turnId: payload.turnId,
-              state: checkpointStatusToLatestTurnState(payload.status),
-              requestedAt:
-                thread.latestTurn?.turnId === payload.turnId
-                  ? thread.latestTurn.requestedAt
-                  : payload.completedAt,
-              startedAt:
-                thread.latestTurn?.turnId === payload.turnId
-                  ? (thread.latestTurn.startedAt ?? payload.completedAt)
-                  : payload.completedAt,
-              completedAt: payload.completedAt,
-              assistantMessageId: payload.assistantMessageId,
-            },
+            latestTurn: turnStillRunning
+              ? thread.latestTurn
+              : {
+                  turnId: payload.turnId,
+                  // Keep an aborted or failed turn settled when its checkpoint lands; a "missing" placeholder's interrupted state is not sticky.
+                  state:
+                    thread.latestTurn?.turnId === payload.turnId &&
+                    (thread.latestTurn.state === "error" ||
+                      (thread.latestTurn.state === "interrupted" && existing?.status !== "missing"))
+                      ? thread.latestTurn.state
+                      : checkpointStatusToLatestTurnState(payload.status),
+                  requestedAt:
+                    thread.latestTurn?.turnId === payload.turnId
+                      ? thread.latestTurn.requestedAt
+                      : payload.completedAt,
+                  startedAt:
+                    thread.latestTurn?.turnId === payload.turnId
+                      ? (thread.latestTurn.startedAt ?? payload.completedAt)
+                      : payload.completedAt,
+                  completedAt: payload.completedAt,
+                  assistantMessageId: payload.assistantMessageId,
+                },
             updatedAt: event.occurredAt,
           }),
         };
@@ -620,14 +746,13 @@ export function projectEvent(
           const activities = [
             ...thread.activities.filter((entry) => entry.id !== payload.activity.id),
             payload.activity,
-          ]
-            .toSorted(compareThreadActivities)
-            .slice(-500);
+          ].toSorted(compareThreadActivities);
+          const cappedActivities = capThreadActivities(activities);
 
           return {
             ...nextBase,
             threads: updateThread(nextBase.threads, payload.threadId, {
-              activities,
+              activities: cappedActivities,
               updatedAt: event.occurredAt,
             }),
           };

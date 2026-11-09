@@ -1,4 +1,16 @@
-import { type ChildProcess as ChildProcessHandle, spawn, spawnSync } from "node:child_process";
+import {
+  type ChildProcess as ChildProcessHandle,
+  type ChildProcessWithoutNullStreams,
+  spawn,
+  spawnSync,
+} from "node:child_process";
+
+import {
+  hasWindowsShimUnsafeChars,
+  resolveSpawnCommand,
+  WindowsCommandLineError,
+  type ResolvedSpawnCommand,
+} from "@piedpiper/shared/windowsCommand";
 
 export interface ProcessRunOptions {
   cwd?: string | undefined;
@@ -8,6 +20,9 @@ export interface ProcessRunOptions {
   allowNonZeroExit?: boolean | undefined;
   maxBufferBytes?: number | undefined;
   outputMode?: "error" | "truncate" | undefined;
+  /** Test seams for the Windows executable resolution. */
+  platform?: NodeJS.Platform | undefined;
+  isFile?: ((filePath: string) => boolean) | undefined;
 }
 
 export interface ProcessRunResult {
@@ -37,10 +52,20 @@ function normalizeSpawnError(command: string, args: readonly string[], error: un
   return new Error(`Failed to run ${commandLabel(command, args)}: ${error.message}`);
 }
 
+// cmd.exe localizes this message; "." stands in for accented characters that vary by code page.
+const WINDOWS_COMMAND_NOT_FOUND_PATTERNS = [
+  /is not recognized as an internal or external command/i,
+  /n.o . reconhecido como um comando interno/i,
+  /non . riconosciuto come comando interno o esterno/i,
+  /n.est pas reconnu en tant que commande interne/i,
+  /no se reconoce como un comando interno o externo/i,
+  /wird nicht als interner oder externer befehl/i,
+] as const;
+
 export function isWindowsCommandNotFound(code: number | null, stderr: string): boolean {
   if (process.platform !== "win32") return false;
   if (code === 9009) return true;
-  return /is not recognized as an internal or external command/i.test(stderr);
+  return WINDOWS_COMMAND_NOT_FOUND_PATTERNS.some((pattern) => pattern.test(stderr));
 }
 
 function normalizeExitError(
@@ -76,6 +101,29 @@ function normalizeBufferError(
   return new Error(
     `${commandLabel(command, args)} exceeded ${stream} buffer limit (${maxBufferBytes} bytes).`,
   );
+}
+
+/**
+ * Resolves how runProcess spawns `command`. On Windows a `.cmd`/`.bat` shim gets
+ * one escaped cmd.exe line; arguments with quotes or control characters are
+ * refused there because the shim's `%*` re-parses them through cmd.exe.
+ */
+export function resolveProcessSpawnCommand(
+  command: string,
+  args: readonly string[],
+  options: Pick<ProcessRunOptions, "env" | "platform" | "isFile"> = {},
+): ResolvedSpawnCommand {
+  const spawnCommand = resolveSpawnCommand(command, args, {
+    env: options.env,
+    platform: options.platform,
+    isFile: options.isFile,
+  });
+  if (spawnCommand.shell && args.some(hasWindowsShimUnsafeChars)) {
+    throw new WindowsCommandLineError(
+      `Cannot run ${command} through cmd.exe: an argument contains a double quote or line break.`,
+    );
+  }
+  return spawnCommand;
 }
 
 const DEFAULT_MAX_BUFFER_BYTES = 8 * 1024 * 1024;
@@ -135,12 +183,27 @@ export async function runProcess(
   const outputMode = options.outputMode ?? "error";
 
   return new Promise<ProcessRunResult>((resolve, reject) => {
-    const child = spawn(command, args, {
-      cwd: options.cwd,
-      env: options.env,
-      stdio: "pipe",
-      shell: process.platform === "win32",
-    });
+    // Windows: real executables spawn directly; .cmd shims get one escaped cmd.exe line.
+    let spawnCommand: ResolvedSpawnCommand;
+    try {
+      spawnCommand = resolveProcessSpawnCommand(command, args, options);
+    } catch (error) {
+      reject(normalizeSpawnError(command, args, error));
+      return;
+    }
+    let child: ChildProcessWithoutNullStreams;
+    try {
+      // Node throws synchronously for some spawn failures (for example ENOTDIR on a file cwd).
+      child = spawn(spawnCommand.command, [...spawnCommand.args], {
+        cwd: options.cwd,
+        env: options.env,
+        stdio: "pipe",
+        shell: spawnCommand.shell,
+      });
+    } catch (error) {
+      reject(normalizeSpawnError(command, args, error));
+      return;
+    }
 
     let stdout = "";
     let stderr = "";

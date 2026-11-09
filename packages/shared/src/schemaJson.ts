@@ -53,20 +53,18 @@ export const formatSchemaError = (cause: Cause.Cause<Schema.SchemaError>) => {
 const parseLenientJsonGetter = SchemaGetter.onSome((input: string) =>
   Effect.try({
     try: () => {
-      // Strip single-line comments — alternation preserves quoted strings.
+      // Match comments together so URLs stay inside blocks; whitespace keeps adjacent tokens apart.
       let stripped = input.replace(
-        /("(?:[^"\\]|\\.)*")|\/\/[^\n]*/g,
-        (match, stringLiteral: string | undefined) => (stringLiteral ? match : ""),
+        /("(?:[^"\\]|\\.)*")|\/\/[^\r\n]*|\/\*[\s\S]*?\*\//g,
+        (match, stringLiteral: string | undefined) => (stringLiteral ? match : " "),
       );
 
-      // Strip multi-line comments.
+      // Strip trailing commas before `}` or `]`, leaving string literals intact.
       stripped = stripped.replace(
-        /("(?:[^"\\]|\\.)*")|\/\*[\s\S]*?\*\//g,
-        (match, stringLiteral: string | undefined) => (stringLiteral ? match : ""),
+        /("(?:[^"\\]|\\.)*")|,(\s*[}\]])/g,
+        (match, stringLiteral: string | undefined, bracket: string | undefined) =>
+          stringLiteral ? match : (bracket ?? ""),
       );
-
-      // Strip trailing commas before `}` or `]`.
-      stripped = stripped.replace(/,(\s*[}\]])/g, "$1");
 
       return Option.some(JSON.parse(stripped));
     },

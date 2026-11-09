@@ -16,9 +16,12 @@ export interface ProjectFaviconResolverShape {
   /**
    * Resolve a favicon or icon file path for the provided workspace root.
    *
+   * `faviconPath` is the project's chosen icon: workspace-relative, or absolute for a file outside
+   * the workspace. It wins when it is an existing image file; otherwise discovery runs as usual.
+   *
    * Returns `null` when no candidate icon file can be found.
    */
-  readonly resolvePath: (cwd: string) => Effect.Effect<string | null>;
+  readonly resolvePath: (cwd: string, faviconPath?: string | null) => Effect.Effect<string | null>;
 }
 
 /**

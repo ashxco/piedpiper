@@ -43,7 +43,7 @@ function CommandDialogViewport({ className, ...props }: CommandDialogPrimitive.V
   return (
     <CommandDialogPrimitive.Viewport
       className={cn(
-        "fixed inset-0 z-50 flex flex-col items-center px-4 py-[max(--spacing(4),4vh)] sm:py-[10vh]",
+        "fixed inset-0 z-50 flex flex-col items-center px-4 py-[max(--spacing(4),4vh)] sm:py-[10vh] [-webkit-app-region:no-drag]",
         className,
       )}
       data-slot="command-dialog-viewport"
@@ -90,11 +90,14 @@ function Command({
 
 function CommandInput({
   className,
+  wrapperClassName,
   placeholder = undefined,
   ...props
-}: React.ComponentProps<typeof AutocompleteInput>) {
+}: React.ComponentProps<typeof AutocompleteInput> & {
+  wrapperClassName?: string | undefined;
+}) {
   return (
-    <div className="px-2.5 py-1.5">
+    <div className={cn("px-2.5 py-1.5", wrapperClassName)}>
       <AutocompleteInput
         autoFocus
         className={cn(

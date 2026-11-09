@@ -1,12 +1,20 @@
 import { type ProjectId } from "@piedpiper/contracts";
-import { CheckIcon, ChevronDownIcon, FolderIcon, PlusIcon, SearchIcon } from "lucide-react";
+import { CheckIcon, ChevronDownIcon, PlusIcon, SearchIcon } from "lucide-react";
 import { memo, useMemo, useState } from "react";
 
+import { selectableProjects } from "~/lib/projectArchive";
+
+import { ProjectFavicon } from "../ProjectFavicon";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 
 interface NewThreadLandingProps {
   activeProject: { id: ProjectId; name: string } | null | undefined;
-  allProjects: ReadonlyArray<{ id: ProjectId; name: string }>;
+  allProjects: ReadonlyArray<{
+    id: ProjectId;
+    name: string;
+    cwd: string;
+    archivedAt?: string | null | undefined;
+  }>;
   onSwitchProject: (projectId: ProjectId) => void;
   onAddProject: () => void;
 }
@@ -20,9 +28,10 @@ export const NewThreadLanding = memo(function NewThreadLanding({
   const [search, setSearch] = useState("");
   const [open, setOpen] = useState(false);
   const filtered = useMemo(() => {
+    const projects = selectableProjects(allProjects);
     const q = search.trim().toLowerCase();
-    if (!q) return allProjects;
-    return allProjects.filter((p) => p.name.toLowerCase().includes(q));
+    if (!q) return projects;
+    return projects.filter((p) => p.name.toLowerCase().includes(q));
   }, [allProjects, search]);
 
   return (
@@ -75,7 +84,7 @@ export const NewThreadLanding = memo(function NewThreadLanding({
                       onSwitchProject(project.id);
                     }}
                   >
-                    <FolderIcon className="size-3.5 shrink-0 text-muted-foreground/70" />
+                    <ProjectFavicon cwd={project.cwd} className="text-muted-foreground/70!" />
                     <span className="flex-1 truncate">{project.name}</span>
                     {project.id === activeProject.id && (
                       <CheckIcon className="size-3.5 shrink-0 text-foreground/70" />

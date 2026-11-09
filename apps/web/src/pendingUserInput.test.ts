@@ -2,10 +2,14 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildPendingUserInputAnswers,
+  carryDisplacedCustomAnswerIntoPrompt,
   countAnsweredPendingUserInputQuestions,
   derivePendingUserInputProgress,
   findFirstUnansweredPendingUserInputQuestionIndex,
+  getPendingUserInputSelectedLabels,
   resolvePendingUserInputAnswer,
+  resolvePendingUserInputStructuredAnswer,
+  selectPendingUserInputOption,
   setPendingUserInputCustomAnswer,
 } from "./pendingUserInput";
 
@@ -187,6 +191,92 @@ describe("pending user input question progress", () => {
       isLastQuestion: false,
       isComplete: false,
       canAdvance: true,
+    });
+  });
+});
+
+describe("carryDisplacedCustomAnswerIntoPrompt", () => {
+  it("keeps the thread draft when nothing was typed into the answer", () => {
+    expect(carryDisplacedCustomAnswerIntoPrompt("draft", undefined)).toBe("draft");
+    expect(carryDisplacedCustomAnswerIntoPrompt("draft", "   ")).toBe("draft");
+  });
+
+  it("moves the typed answer into an empty thread draft", () => {
+    expect(carryDisplacedCustomAnswerIntoPrompt("", "also rename the flag ")).toBe(
+      "also rename the flag",
+    );
+  });
+
+  it("appends the typed answer after an existing thread draft", () => {
+    expect(carryDisplacedCustomAnswerIntoPrompt("first half\n", "second half")).toBe(
+      "first half\n\nsecond half",
+    );
+  });
+});
+
+describe("multi-select questions", () => {
+  const question = {
+    id: "targets",
+    header: "Targets",
+    question: "Which platforms?",
+    multiSelect: true,
+    options: [
+      { label: "macOS", description: "Apple" },
+      { label: "Linux", description: "Penguin" },
+      { label: "Windows", description: "Microsoft" },
+    ],
+  };
+  const single = { ...question, id: "single", multiSelect: false };
+
+  it("toggles picks in option order and clears the custom answer", () => {
+    let draft = selectPendingUserInputOption({ customAnswer: "typed" }, question, "Windows");
+    draft = selectPendingUserInputOption(draft, question, "macOS");
+    expect(draft).toEqual({ selectedOptionLabels: ["macOS", "Windows"], customAnswer: "" });
+    draft = selectPendingUserInputOption(draft, question, "Windows");
+    expect(draft.selectedOptionLabels).toEqual(["macOS"]);
+    draft = selectPendingUserInputOption(draft, question, "macOS");
+    expect(resolvePendingUserInputAnswer(draft)).toBeNull();
+  });
+
+  it("replaces the pick on a single-select question", () => {
+    const draft = selectPendingUserInputOption({ selectedOptionLabel: "macOS" }, single, "Linux");
+    expect(draft).toEqual({ selectedOptionLabel: "Linux", customAnswer: "" });
+  });
+
+  it("sends multi-select picks as a list and single picks as a string", () => {
+    expect(
+      buildPendingUserInputAnswers([question, single], {
+        targets: { selectedOptionLabels: ["macOS", "Linux"] },
+        single: { selectedOptionLabel: "Windows" },
+      }),
+    ).toEqual({ targets: ["macOS", "Linux"], single: "Windows" });
+    expect(
+      resolvePendingUserInputStructuredAnswer(question, {
+        selectedOptionLabels: ["macOS"],
+        customAnswer: "  all of them ",
+      }),
+    ).toBe("all of them");
+  });
+
+  it("exposes every pick in progress and joins them for display", () => {
+    const progress = derivePendingUserInputProgress(
+      [question],
+      { targets: { selectedOptionLabels: ["macOS", "Linux"] } },
+      0,
+    );
+    expect(progress.selectedOptionLabels).toEqual(["macOS", "Linux"]);
+    expect(progress.resolvedAnswer).toBe("macOS, Linux");
+    expect(progress.canAdvance).toBe(true);
+    expect(getPendingUserInputSelectedLabels({ selectedOptionLabel: "Linux" })).toEqual(["Linux"]);
+  });
+
+  it("keeps multi-select picks while the custom answer is empty", () => {
+    expect(setPendingUserInputCustomAnswer({ selectedOptionLabels: ["macOS"] }, "")).toEqual({
+      customAnswer: "",
+      selectedOptionLabels: ["macOS"],
+    });
+    expect(setPendingUserInputCustomAnswer({ selectedOptionLabels: ["macOS"] }, "x")).toEqual({
+      customAnswer: "x",
     });
   });
 });

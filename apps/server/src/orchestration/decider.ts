@@ -1,5 +1,16 @@
-import type { OrchestrationCommand, OrchestrationEvent } from "@piedpiper/contracts";
-import { Effect } from "effect";
+import {
+  EventId,
+  MAX_SCRIPT_ID_LENGTH,
+  SCRIPT_RUN_COMMAND_PATTERN,
+  THREAD_USAGE_LIMIT_RESUME_CANCELLED_ACTIVITY_KIND,
+  type OrchestrationCommand,
+  type OrchestrationEvent,
+  type OrchestrationProject,
+  type ProviderInteractionMode,
+  type RuntimeMode,
+} from "@piedpiper/contracts";
+import { normalizeWorktreePathForComparison } from "@piedpiper/shared/path";
+import { Effect, Schema } from "effect";
 
 import type { ServerReadModel } from "./ServerReadModel.ts";
 import { OrchestrationCommandInvariantError } from "./Errors.ts";
@@ -11,6 +22,19 @@ import {
   requireThreadAbsent,
   requireThreadNotArchived,
 } from "./commandInvariants.ts";
+import {
+  asyncAnswerMessageId,
+  formatUserInputAnswerPairs,
+  readUserInputAnswerPairs,
+  readUserInputRequestState,
+  resolvedActivitySequence,
+  userInputActivityPayload,
+  findHeldUserInputAnswerActivity,
+  readAsyncAnswerRequestId,
+  withoutHeldUserInputAnswer,
+} from "./userInputRequests.ts";
+
+const isScriptRunCommand = Schema.is(SCRIPT_RUN_COMMAND_PATTERN);
 
 const nowIso = () => new Date().toISOString();
 const defaultMetadata: Omit<OrchestrationEvent, "sequence" | "type" | "payload"> = {
@@ -44,6 +68,68 @@ function withEventBase(
   };
 }
 
+type TurnStartCommand = Extract<OrchestrationCommand, { type: "thread.turn.start" }>;
+
+function makeTurnStartEvents(input: {
+  readonly command: Pick<
+    TurnStartCommand,
+    | "commandId"
+    | "threadId"
+    | "message"
+    | "createdAt"
+    | "modelSelection"
+    | "titleSeed"
+    | "sourceProposedPlan"
+  >;
+  readonly runtimeMode: RuntimeMode;
+  readonly interactionMode: ProviderInteractionMode;
+}): ReadonlyArray<Omit<OrchestrationEvent, "sequence">> {
+  const { command } = input;
+  const userMessageEvent: Omit<OrchestrationEvent, "sequence"> = {
+    ...withEventBase({
+      aggregateKind: "thread",
+      aggregateId: command.threadId,
+      occurredAt: command.createdAt,
+      commandId: command.commandId,
+    }),
+    type: "thread.message-sent",
+    payload: {
+      threadId: command.threadId,
+      messageId: command.message.messageId,
+      role: "user",
+      text: command.message.text,
+      attachments: command.message.attachments,
+      turnId: null,
+      streaming: false,
+      createdAt: command.createdAt,
+      updatedAt: command.createdAt,
+    },
+  };
+  const turnStartRequestedEvent: Omit<OrchestrationEvent, "sequence"> = {
+    ...withEventBase({
+      aggregateKind: "thread",
+      aggregateId: command.threadId,
+      occurredAt: command.createdAt,
+      commandId: command.commandId,
+    }),
+    causationEventId: userMessageEvent.eventId,
+    type: "thread.turn-start-requested",
+    payload: {
+      threadId: command.threadId,
+      messageId: command.message.messageId,
+      ...(command.modelSelection !== undefined ? { modelSelection: command.modelSelection } : {}),
+      ...(command.titleSeed !== undefined ? { titleSeed: command.titleSeed } : {}),
+      runtimeMode: input.runtimeMode,
+      interactionMode: input.interactionMode,
+      ...(command.sourceProposedPlan !== undefined
+        ? { sourceProposedPlan: command.sourceProposedPlan }
+        : {}),
+      createdAt: command.createdAt,
+    },
+  };
+  return [userMessageEvent, turnStartRequestedEvent];
+}
+
 export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand")(function* ({
   command,
   readModel,
@@ -56,16 +142,41 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
 > {
   switch (command.type) {
     case "project.create": {
-      // Dedup by workspace root — silently skip if a project with this path already exists
-      let existingByPath = false;
+      // Dedup by workspace root; the Normalizer resolved it, but Windows casing can still differ.
+      const workspaceRootKey = normalizeWorktreePathForComparison(command.workspaceRoot);
+      let existingByPath: OrchestrationProject | undefined;
       for (const p of readModel.projects.values()) {
-        if (p.workspaceRoot === command.workspaceRoot && p.deletedAt === null) {
-          existingByPath = true;
+        if (
+          normalizeWorktreePathForComparison(p.workspaceRoot) === workspaceRootKey &&
+          p.deletedAt === null
+        ) {
+          existingByPath = p;
           break;
         }
       }
       if (existingByPath) {
-        return [];
+        if (!existingByPath.archivedAt) {
+          return yield* new OrchestrationCommandInvariantError({
+            commandType: command.type,
+            detail: `A project already exists at '${existingByPath.workspaceRoot}'.`,
+          });
+        }
+        // Re-adding an archived project's folder brings it back.
+        const occurredAt = nowIso();
+        return {
+          ...withEventBase({
+            aggregateKind: "project",
+            aggregateId: existingByPath.id,
+            occurredAt,
+            commandId: command.commandId,
+          }),
+          type: "project.meta-updated",
+          payload: {
+            projectId: existingByPath.id,
+            archivedAt: null,
+            updatedAt: occurredAt,
+          },
+        };
       }
 
       yield* requireProjectAbsent({
@@ -95,11 +206,23 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
     }
 
     case "project.meta.update": {
-      yield* requireProject({
+      const project = yield* requireProject({
         readModel,
         command,
         projectId: command.projectId,
       });
+      if (command.scripts !== undefined) {
+        // Already-persisted IDs predate this check; keep them editable/removable but admit no new invalid IDs.
+        const existingIds = new Set(project.scripts.map((script) => script.id));
+        for (const script of command.scripts) {
+          if (!existingIds.has(script.id) && !isScriptRunCommand(`script.${script.id}.run`)) {
+            return yield* new OrchestrationCommandInvariantError({
+              commandType: command.type,
+              detail: `Script ID '${script.id}' must be 1-${MAX_SCRIPT_ID_LENGTH} lowercase letters, digits or hyphens, starting with a letter or digit.`,
+            });
+          }
+        }
+      }
       const occurredAt = nowIso();
       return {
         ...withEventBase({
@@ -117,6 +240,14 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
             ? { defaultModelSelection: command.defaultModelSelection }
             : {}),
           ...(command.scripts !== undefined ? { scripts: command.scripts } : {}),
+          // A repeated archive keeps the first time, so "Archived <time>" stays when it happened.
+          ...(command.archivedAt !== undefined
+            ? {
+                archivedAt:
+                  command.archivedAt === null ? null : (project.archivedAt ?? command.archivedAt),
+              }
+            : {}),
+          ...(command.faviconPath !== undefined ? { faviconPath: command.faviconPath } : {}),
           updatedAt: occurredAt,
         },
       };
@@ -247,11 +378,16 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
     }
 
     case "thread.meta.update": {
-      yield* requireThread({
+      const thread = yield* requireThread({
         readModel,
         command,
         threadId: command.threadId,
       });
+      // A stale git sync (e.g. the pre-rename temp branch) must not overwrite newer server state.
+      const staleBranchSync =
+        command.expectedBranch !== undefined && thread.branch !== command.expectedBranch;
+      const branch = staleBranchSync ? undefined : command.branch;
+      const worktreePath = staleBranchSync ? undefined : command.worktreePath;
       const occurredAt = nowIso();
       return {
         ...withEventBase({
@@ -267,8 +403,8 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           ...(command.modelSelection !== undefined
             ? { modelSelection: command.modelSelection }
             : {}),
-          ...(command.branch !== undefined ? { branch: command.branch } : {}),
-          ...(command.worktreePath !== undefined ? { worktreePath: command.worktreePath } : {}),
+          ...(branch !== undefined ? { branch } : {}),
+          ...(worktreePath !== undefined ? { worktreePath } : {}),
           updatedAt: occurredAt,
         },
       };
@@ -350,49 +486,35 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           detail: `Proposed plan '${sourceProposedPlan?.planId}' belongs to thread '${sourceThread.id}' in a different project.`,
         });
       }
-      const userMessageEvent: Omit<OrchestrationEvent, "sequence"> = {
-        ...withEventBase({
-          aggregateKind: "thread",
-          aggregateId: command.threadId,
-          occurredAt: command.createdAt,
-          commandId: command.commandId,
-        }),
-        type: "thread.message-sent",
-        payload: {
-          threadId: command.threadId,
-          messageId: command.message.messageId,
-          role: "user",
-          text: command.message.text,
-          attachments: command.message.attachments,
-          turnId: null,
-          streaming: false,
-          createdAt: command.createdAt,
-          updatedAt: command.createdAt,
+      const turnStartEvents = makeTurnStartEvents({
+        command,
+        runtimeMode: targetThread.runtimeMode,
+        interactionMode: targetThread.interactionMode,
+      });
+      const heldAnswer = readAsyncAnswerRequestId(command.message.messageId);
+      const heldRow =
+        heldAnswer === null
+          ? undefined
+          : findHeldUserInputAnswerActivity(targetThread.activities, heldAnswer);
+      if (!heldRow) return turnStartEvents;
+      // Delivery is durable: a message later lost to a revert or the message cap is never picked
+      // again, so it cannot re-dispatch the deduped command and leave the delivery marked in flight.
+      return [
+        {
+          ...withEventBase({
+            aggregateKind: "thread",
+            aggregateId: command.threadId,
+            occurredAt: command.createdAt,
+            commandId: command.commandId,
+          }),
+          type: "thread.activity-appended",
+          payload: {
+            threadId: command.threadId,
+            activity: withoutHeldUserInputAnswer(heldRow),
+          },
         },
-      };
-      const turnStartRequestedEvent: Omit<OrchestrationEvent, "sequence"> = {
-        ...withEventBase({
-          aggregateKind: "thread",
-          aggregateId: command.threadId,
-          occurredAt: command.createdAt,
-          commandId: command.commandId,
-        }),
-        causationEventId: userMessageEvent.eventId,
-        type: "thread.turn-start-requested",
-        payload: {
-          threadId: command.threadId,
-          messageId: command.message.messageId,
-          ...(command.modelSelection !== undefined
-            ? { modelSelection: command.modelSelection }
-            : {}),
-          ...(command.titleSeed !== undefined ? { titleSeed: command.titleSeed } : {}),
-          runtimeMode: targetThread.runtimeMode,
-          interactionMode: targetThread.interactionMode,
-          ...(sourceProposedPlan !== undefined ? { sourceProposedPlan } : {}),
-          createdAt: command.createdAt,
-        },
-      };
-      return [userMessageEvent, turnStartRequestedEvent];
+        ...turnStartEvents,
+      ];
     }
 
     case "thread.turn.interrupt": {
@@ -444,11 +566,95 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
     }
 
     case "thread.user-input.respond": {
-      yield* requireThread({
+      const thread = yield* requireThread({
         readModel,
         command,
         threadId: command.threadId,
       });
+      const request = readUserInputRequestState(thread.activities, command.requestId);
+      if (
+        request.status === "resolved" &&
+        userInputActivityPayload(request.activity)?.responseMode === "message"
+      ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "This question has already been answered.",
+        });
+      }
+      if (
+        request.status === "open" &&
+        userInputActivityPayload(request.activity)?.responseMode === "message"
+      ) {
+        // Non-blocking: Codex has no pending request to answer, so the reply is a user message.
+        const { questionCount, pairs } = readUserInputAnswerPairs(
+          request.activity,
+          command.answers,
+        );
+        if (questionCount === 0 || pairs.length !== questionCount) {
+          return yield* new OrchestrationCommandInvariantError({
+            commandType: command.type,
+            detail: "Answer each question before sending.",
+          });
+        }
+        const replyText = formatUserInputAnswerPairs(pairs);
+        // No steering: a turn start on a live turn is untested, so the turn-settle path sends it.
+        const held =
+          thread.session !== null &&
+          (thread.session.activeTurnId !== null ||
+            thread.session.status === "running" ||
+            thread.session.status === "starting");
+        const resolvedEvent: Omit<OrchestrationEvent, "sequence"> = {
+          ...withEventBase({
+            aggregateKind: "thread",
+            aggregateId: command.threadId,
+            occurredAt: command.createdAt,
+            commandId: command.commandId,
+            metadata: {
+              requestId: command.requestId,
+            },
+          }),
+          type: "thread.activity-appended",
+          payload: {
+            threadId: command.threadId,
+            activity: {
+              id: EventId.makeUnsafe(`async-answer:${command.requestId}`),
+              tone: "info",
+              kind: "user-input.resolved",
+              summary: "User input submitted",
+              payload: {
+                requestId: command.requestId,
+                responseMode: "message",
+                answers: command.answers,
+                ...(held ? { held: true, replyText } : {}),
+              },
+              turnId: request.activity.turnId,
+              ...resolvedActivitySequence(request.activity),
+              createdAt: command.createdAt,
+            },
+          },
+        };
+        if (held) {
+          return resolvedEvent;
+        }
+        return [
+          resolvedEvent,
+          ...makeTurnStartEvents({
+            command: {
+              commandId: command.commandId,
+              threadId: command.threadId,
+              message: {
+                messageId: asyncAnswerMessageId(command.requestId),
+                role: "user",
+                text: replyText,
+                attachments: [],
+              },
+              createdAt: command.createdAt,
+            },
+            runtimeMode: thread.runtimeMode,
+            interactionMode: thread.interactionMode,
+          }),
+        ];
+      }
       return {
         ...withEventBase({
           aggregateKind: "thread",
@@ -465,6 +671,64 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           requestId: command.requestId,
           answers: command.answers,
           createdAt: command.createdAt,
+        },
+      };
+    }
+
+    case "thread.user-input.dismiss": {
+      const thread = yield* requireThread({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      const request = readUserInputRequestState(thread.activities, command.requestId);
+      if (request.status === "resolved") {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "This question has already been answered.",
+        });
+      }
+      // A blocking question leaves the provider waiting, so only a reply or a stop can end it. With
+      // no live turn nothing is waiting any more. Matches canDismissPendingUserInput on the web.
+      const hasNoLiveTurn =
+        thread.session === null ||
+        ((thread.session.status === "stopped" || thread.session.status === "error") &&
+          thread.session.activeTurnId === null);
+      if (
+        request.status !== "open" ||
+        (userInputActivityPayload(request.activity)?.responseMode !== "message" && !hasNoLiveTurn)
+      ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "This question needs an answer. Answer it or stop the turn.",
+        });
+      }
+      return {
+        ...withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+          metadata: {
+            requestId: command.requestId,
+          },
+        }),
+        type: "thread.activity-appended",
+        payload: {
+          threadId: command.threadId,
+          activity: {
+            id: EventId.makeUnsafe(`async-dismiss:${command.requestId}`),
+            tone: "info",
+            kind: "user-input.resolved",
+            summary: "User input dismissed",
+            payload: {
+              requestId: command.requestId,
+              responseMode: "message",
+            },
+            turnId: request.activity.turnId,
+            ...resolvedActivitySequence(request.activity),
+            createdAt: command.createdAt,
+          },
         },
       };
     }
@@ -486,6 +750,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         payload: {
           threadId: command.threadId,
           turnCount: command.turnCount,
+          ...(command.restoreFiles === false ? { restoreFiles: false } : {}),
           createdAt: command.createdAt,
         },
       };
@@ -507,6 +772,89 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         type: "thread.session-stop-requested",
         payload: {
           threadId: command.threadId,
+          createdAt: command.createdAt,
+          ...(command.keepUsageLimitResume ? { keepUsageLimitResume: true } : {}),
+        },
+      };
+    }
+
+    case "thread.usage-limit-resume.cancel": {
+      yield* requireThread({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      return {
+        ...withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        }),
+        type: "thread.activity-appended",
+        payload: {
+          threadId: command.threadId,
+          activity: {
+            id: EventId.makeUnsafe(
+              `usage-limit-resume-cancelled:${command.threadId}:${command.turnId}`,
+            ),
+            tone: "info",
+            kind: THREAD_USAGE_LIMIT_RESUME_CANCELLED_ACTIVITY_KIND,
+            summary: "Auto-resume cancelled",
+            payload: {},
+            turnId: command.turnId,
+            createdAt: command.createdAt,
+          },
+        },
+      };
+    }
+
+    case "thread.title.regenerate": {
+      const thread = yield* requireThread({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      if (thread.deletedAt !== null) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Thread '${command.threadId}' is deleted and cannot regenerate its title.`,
+        });
+      }
+      return {
+        ...withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        }),
+        type: "thread.title-regeneration-requested",
+        payload: {
+          threadId: command.threadId,
+          createdAt: command.createdAt,
+        },
+      };
+    }
+
+    case "thread.title.regeneration.settle": {
+      // A deleted thread still settles: the run may have raced with the delete.
+      yield* requireThread({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      return {
+        ...withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        }),
+        type: "thread.title-regeneration-settled",
+        payload: {
+          threadId: command.threadId,
+          outcome: command.outcome,
+          ...(command.detail !== undefined ? { detail: command.detail } : {}),
           createdAt: command.createdAt,
         },
       };
@@ -530,6 +878,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         payload: {
           threadId: command.threadId,
           session: command.session,
+          ...(command.failedTurnStartMessageId !== undefined
+            ? { failedTurnStartMessageId: command.failedTurnStartMessageId }
+            : {}),
         },
       };
     }
@@ -580,6 +931,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           messageId: command.messageId,
           role: "assistant",
           text: "",
+          ...(command.attachments !== undefined ? { attachments: command.attachments } : {}),
           turnId: command.turnId ?? null,
           streaming: false,
           createdAt: command.createdAt,

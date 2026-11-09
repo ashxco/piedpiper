@@ -6,6 +6,8 @@ import type { GitBranch } from "@piedpiper/contracts";
  */
 export function sanitizeBranchFragment(raw: string): string {
   const normalized = raw
+    .normalize("NFKD")
+    .replace(/\p{M}+/gu, "")
     .trim()
     .toLowerCase()
     .replace(/['"`]/g, "")
@@ -37,8 +39,9 @@ export function sanitizeFeatureBranchName(raw: string): string {
 const AUTO_FEATURE_BRANCH_FALLBACK = "feature/update";
 
 /**
- * Resolve a unique `feature/…` branch name that doesn't collide with
- * any existing branch. Appends a numeric suffix when needed.
+ * Resolve a unique generated branch name, suffixing only the path component
+ * blocked by an existing branch or, for the final component, its descendants
+ * (git stores refs as paths, so `feature` blocks `feature/x` and vice versa).
  */
 export function resolveAutoFeatureBranchName(
   existingBranchNames: readonly string[],
@@ -48,18 +51,53 @@ export function resolveAutoFeatureBranchName(
   const resolvedBase = sanitizeFeatureBranchName(
     preferred && preferred.length > 0 ? preferred : AUTO_FEATURE_BRANCH_FALLBACK,
   );
-  const existingNames = new Set(existingBranchNames.map((branch) => branch.toLowerCase()));
+  const existingNames = existingBranchNames.map((branch) => branch.toLowerCase());
+  const existingRefs = new Set(existingNames);
+  const parts = resolvedBase.split("/");
+  let resolved = "";
 
-  if (!existingNames.has(resolvedBase)) {
-    return resolvedBase;
+  for (const [index, part] of parts.entries()) {
+    const base = resolved ? `${resolved}/${part}` : part;
+    let candidate = base;
+    let suffix = 2;
+    while (
+      existingRefs.has(candidate) ||
+      (index === parts.length - 1 &&
+        existingNames.some((branch) => branch.startsWith(`${candidate}/`)))
+    ) {
+      candidate = `${base}-${suffix}`;
+      suffix += 1;
+    }
+    resolved = candidate;
   }
 
-  let suffix = 2;
-  while (existingNames.has(`${resolvedBase}-${suffix}`)) {
-    suffix += 1;
-  }
+  return resolved;
+}
 
-  return `${resolvedBase}-${suffix}`;
+/** Namespace of the placeholder branch a new worktree thread starts on. */
+export const TEMPORARY_WORKTREE_BRANCH_PREFIX = "piedpiper";
+
+// `piedpiper-<8 hex>` is the fallback when a plain `piedpiper` branch blocks the namespace.
+const TEMPORARY_WORKTREE_BRANCH_PATTERN = new RegExp(
+  `^${TEMPORARY_WORKTREE_BRANCH_PREFIX}[/-][0-9a-f]{8}$`,
+);
+
+/** Whether `branch` is a placeholder worktree branch awaiting its generated name. */
+export function isTemporaryWorktreeBranch(branch: string): boolean {
+  return TEMPORARY_WORKTREE_BRANCH_PATTERN.test(branch.trim().toLowerCase());
+}
+
+/**
+ * Git stores refs as paths, so a plain `piedpiper` branch makes every
+ * `piedpiper/<hex>` ref impossible. This moves a placeholder name to the flat
+ * `piedpiper-<hex>` sibling, which `isTemporaryWorktreeBranch` still accepts.
+ */
+export function flattenTemporaryWorktreeBranchName(branch: string): string {
+  const token = branch
+    .trim()
+    .toLowerCase()
+    .slice(TEMPORARY_WORKTREE_BRANCH_PREFIX.length + 1);
+  return `${TEMPORARY_WORKTREE_BRANCH_PREFIX}-${token}`;
 }
 
 /**

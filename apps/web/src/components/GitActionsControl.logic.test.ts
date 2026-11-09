@@ -7,6 +7,7 @@ import {
   resolveLiveThreadBranchUpdate,
   resolveQuickAction,
   resolveThreadBranchUpdate,
+  viewPrLabel,
 } from "./GitActionsControl.logic";
 
 function status(overrides: Partial<GitStatusResult> = {}): GitStatusResult {
@@ -74,6 +75,26 @@ describe("when: branch is clean and has an open PR", () => {
       false,
     );
     assert.deepInclude(quick, { kind: "open_pr", label: "View PR", disabled: false });
+  });
+
+  it("labels an open draft PR as a draft in the quick action and menu", () => {
+    const draftPr = {
+      number: 11,
+      title: "Draft PR",
+      url: "https://example.com/pr/11",
+      baseBranch: "main",
+      headBranch: "feature/test",
+      state: "open" as const,
+      isDraft: true,
+    };
+    const draftStatus = status({ pr: draftPr });
+    assert.deepInclude(resolveQuickAction(draftStatus, false), {
+      kind: "open_pr",
+      label: "View draft PR",
+    });
+    const prItem = buildMenuItems(draftStatus, false).find((item) => item.id === "pr");
+    assert.equal(prItem?.label, "View draft PR");
+    assert.equal(viewPrLabel({ ...draftPr, isDraft: false }), "View PR");
   });
 
   it("buildMenuItems disables commit/push and surfaces View PR", () => {
@@ -241,7 +262,7 @@ describe("when: working tree has local changes", () => {
     });
   });
 
-  it("resolveQuickAction falls back to commit when no origin remote exists", () => {
+  it("resolveQuickAction falls back to commit when no remote exists", () => {
     const quick = resolveQuickAction(
       status({ hasWorkingTreeChanges: true, hasUpstream: false }),
       false,
@@ -277,8 +298,58 @@ describe("when: working tree has local changes", () => {
     });
   });
 
+  it("resolveQuickAction offers commit only when the branch is behind upstream", () => {
+    const quick = resolveQuickAction(
+      status({ hasWorkingTreeChanges: true, behindCount: 1 }),
+      false,
+    );
+    assert.deepInclude(quick, {
+      kind: "run_action",
+      action: "commit",
+      label: "Commit",
+      disabled: false,
+    });
+  });
+
+  it("resolveQuickAction offers commit only when behind upstream with an open PR", () => {
+    const quick = resolveQuickAction(
+      status({
+        hasWorkingTreeChanges: true,
+        aheadCount: 1,
+        behindCount: 2,
+        pr: {
+          number: 16,
+          title: "Existing PR",
+          url: "https://example.com/pr/16",
+          baseBranch: "main",
+          headBranch: "feature/test",
+          state: "open",
+        },
+      }),
+      false,
+    );
+    assert.deepInclude(quick, {
+      kind: "run_action",
+      action: "commit",
+      label: "Commit",
+    });
+  });
+
   it("buildMenuItems enables commit and disables push", () => {
     const items = buildMenuItems(status({ hasWorkingTreeChanges: true }), false);
+    assert.deepEqual(items, [COMMIT_MENU_ITEM(false), PUSH_MENU_ITEM(true)]);
+  });
+
+  it("buildMenuItems keeps push enabled for existing commits on a dirty tree", () => {
+    const items = buildMenuItems(status({ hasWorkingTreeChanges: true, aheadCount: 1 }), false);
+    assert.deepEqual(items, [COMMIT_MENU_ITEM(false), PUSH_MENU_ITEM(false)]);
+  });
+
+  it("buildMenuItems disables push on a dirty tree that is behind upstream", () => {
+    const items = buildMenuItems(
+      status({ hasWorkingTreeChanges: true, aheadCount: 1, behindCount: 1 }),
+      false,
+    );
     assert.deepEqual(items, [COMMIT_MENU_ITEM(false), PUSH_MENU_ITEM(true)]);
   });
 });
@@ -413,7 +484,7 @@ describe("when: branch has no upstream configured", () => {
     });
   });
 
-  it("resolveQuickAction disables push when no origin remote exists", () => {
+  it("resolveQuickAction disables push when no remote exists", () => {
     const quick = resolveQuickAction(
       status({
         hasUpstream: false,
@@ -426,7 +497,7 @@ describe("when: branch has no upstream configured", () => {
     assert.deepEqual(quick, {
       kind: "show_hint",
       label: "Push",
-      hint: 'Add an "origin" remote before pushing.',
+      hint: "Add a remote before pushing.",
       disabled: true,
     });
   });
@@ -436,7 +507,7 @@ describe("when: branch has no upstream configured", () => {
     assert.deepEqual(items, [COMMIT_MENU_ITEM(true), PUSH_MENU_ITEM(false)]);
   });
 
-  it("buildMenuItems disables push when no origin remote exists", () => {
+  it("buildMenuItems disables push when no remote exists", () => {
     const items = buildMenuItems(
       status({ hasUpstream: false, pr: null, aheadCount: 2 }),
       false,
@@ -546,6 +617,50 @@ describe("resolveThreadBranchUpdate", () => {
 });
 
 describe("resolveLiveThreadBranchUpdate", () => {
+  it("leaves a local-mode thread's recorded branch alone when the checkout moves", () => {
+    assert.equal(
+      resolveLiveThreadBranchUpdate({
+        threadBranch: "feature/old-branch",
+        gitStatus: status({ branch: "main" }),
+        threadWorktreePath: null,
+      }),
+      null,
+    );
+  });
+
+  it("records the checkout's branch on a local-mode thread that has none yet", () => {
+    assert.deepEqual(
+      resolveLiveThreadBranchUpdate({
+        threadBranch: null,
+        gitStatus: status({ branch: "main" }),
+        threadWorktreePath: null,
+      }),
+      { branch: "main" },
+    );
+  });
+
+  it("leaves a branchless local-mode thread alone on a detached HEAD", () => {
+    assert.equal(
+      resolveLiveThreadBranchUpdate({
+        threadBranch: null,
+        gitStatus: status({ branch: null }),
+        threadWorktreePath: null,
+      }),
+      null,
+    );
+  });
+
+  it("keeps syncing a worktree thread with its own dedicated checkout (intended deviation from upstream)", () => {
+    assert.deepEqual(
+      resolveLiveThreadBranchUpdate({
+        threadBranch: "feature/old-branch",
+        gitStatus: status({ branch: "feature/renamed" }),
+        threadWorktreePath: "/repo/.worktrees/a",
+      }),
+      { branch: "feature/renamed" },
+    );
+  });
+
   it("returns a branch update when live git status differs from stored thread metadata", () => {
     const update = resolveLiveThreadBranchUpdate({
       threadBranch: "feature/old-branch",
@@ -582,6 +697,24 @@ describe("resolveLiveThreadBranchUpdate", () => {
     });
 
     assert.equal(update, null);
+  });
+
+  it("returns null when git status still reports the temporary branch the thread was renamed from", () => {
+    const update = resolveLiveThreadBranchUpdate({
+      threadBranch: "feature/renamed",
+      gitStatus: status({ branch: "piedpiper/1234abcd" }),
+    });
+
+    assert.equal(update, null);
+  });
+
+  it("still syncs a real git branch onto a thread that is on a temporary branch", () => {
+    const update = resolveLiveThreadBranchUpdate({
+      threadBranch: "piedpiper/1234abcd",
+      gitStatus: status({ branch: "feature/renamed" }),
+    });
+
+    assert.deepEqual(update, { branch: "feature/renamed" });
   });
 });
 

@@ -34,6 +34,22 @@ export function formatInlineTerminalContextLabel(header: string): string {
   });
 }
 
+/** Markdown trims a segment's edges, so the whitespace around a chip is rendered beside it. */
+export function splitInlineSegmentWhitespace(text: string): {
+  leading: string;
+  content: string;
+  trailing: string;
+} {
+  const content = text.trim();
+  if (content.length === 0) return { leading: text, content: "", trailing: "" };
+  const start = text.indexOf(content);
+  return {
+    leading: text.slice(0, start),
+    content,
+    trailing: text.slice(start + content.length),
+  };
+}
+
 export function textContainsInlineTerminalContextLabels(
   text: string,
   contexts: ReadonlyArray<{

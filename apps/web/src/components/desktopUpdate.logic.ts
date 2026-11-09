@@ -1,11 +1,18 @@
 import type { DesktopUpdateActionResult, DesktopUpdateState } from "@piedpiper/contracts";
+import { isWindowsPlatform } from "../lib/utils";
 
 export type DesktopUpdateButtonAction = "download" | "install" | "none";
 
 export function resolveDesktopUpdateButtonAction(
   state: DesktopUpdateState,
 ): DesktopUpdateButtonAction {
-  if (state.downloadedVersion) {
+  // Mirrors canInstallDownloadedUpdate in the desktop main process, which refuses anything else.
+  if (
+    state.downloadedVersion &&
+    (state.status === "downloaded" ||
+      (state.status === "error" &&
+        (state.errorContext === null || state.errorContext === "install")))
+  ) {
     return "install";
   }
   if (state.status === "available") {
@@ -53,6 +60,15 @@ export function getArm64IntelBuildWarningDescription(state: DesktopUpdateState):
 }
 
 export function getDesktopUpdateButtonTooltip(state: DesktopUpdateState): string {
+  // A different, newer version falls through to the normal tooltip.
+  const { notAppliedVersion } = state;
+  if (
+    notAppliedVersion !== undefined &&
+    (state.status === "available" || state.status === "downloaded") &&
+    (state.downloadedVersion ?? state.availableVersion) === notAppliedVersion
+  ) {
+    return `Update ${notAppliedVersion} did not apply. Click to retry.`;
+  }
   if (state.status === "available") {
     return `Update ${state.availableVersion ?? "available"} ready to download`;
   }
@@ -71,16 +87,34 @@ export function getDesktopUpdateButtonTooltip(state: DesktopUpdateState): string
     if (state.errorContext === "install" && state.downloadedVersion) {
       return `Install failed for ${state.downloadedVersion}. Click to retry.`;
     }
+    if (state.downloadedVersion) {
+      return `Update ${state.downloadedVersion} downloaded. Click to restart and install.`;
+    }
     return state.message ?? "Update failed";
+  }
+  if (state.status === "disabled") {
+    return state.message ?? "Updates unavailable";
   }
   return "Up to date";
 }
 
+/** Why updates are off (dev build, env opt-out, unsupported Linux package, no feed), if known. */
+export function getDesktopUpdateDisabledReason(state: DesktopUpdateState | null): string | null {
+  return state?.status === "disabled" ? state.message : null;
+}
+
 export function getDesktopUpdateInstallConfirmationMessage(
   state: Pick<DesktopUpdateState, "availableVersion" | "downloadedVersion">,
+  platform = "",
+  options?: { readonly continueThreadsAfterRestart?: boolean },
 ): string {
   const version = state.downloadedVersion ?? state.availableVersion;
-  return `Install update${version ? ` ${version}` : ""} and restart Pied Piper?\n\nAny running tasks will be interrupted. Make sure you're ready before continuing.`;
+  const consequence = options?.continueThreadsAfterRestart
+    ? "Running tasks will stop for the update and continue when Pied Piper restarts."
+    : "Any running tasks will be interrupted. Make sure you're ready before continuing.";
+  const message = `Install update${version ? ` ${version}` : ""} and restart Pied Piper?\n\n${consequence}`;
+  if (!isWindowsPlatform(platform)) return message;
+  return `${message}\n\nOn Windows, Pied Piper may remain closed for several minutes while the update installs, and no installer window may appear. Pied Piper will reopen automatically when installation finishes.`;
 }
 
 export function getDesktopUpdateActionError(result: DesktopUpdateActionResult): string | null {
@@ -102,9 +136,6 @@ export function shouldHighlightDesktopUpdateError(state: DesktopUpdateState | nu
 export function canCheckForUpdate(state: DesktopUpdateState | null): boolean {
   if (!state || !state.enabled) return false;
   return (
-    state.status !== "checking" &&
-    state.status !== "downloading" &&
-    state.status !== "downloaded" &&
-    state.status !== "disabled"
+    state.status !== "checking" && state.status !== "downloading" && state.status !== "disabled"
   );
 }

@@ -1,7 +1,7 @@
 import { MAX_KEYBINDING_VALUE_LENGTH, type KeybindingCommand } from "@piedpiper/contracts";
 import { describe, expect, it } from "vitest";
 
-import { commandForProjectScript } from "../projectScripts";
+import { commandForProjectScriptSafe } from "../projectScripts";
 import {
   decodeProjectScriptKeybindingRule,
   keybindingValueForCommand,
@@ -12,7 +12,7 @@ describe("projectScriptKeybindings", () => {
   it("decodes and trims valid keybinding rules", () => {
     const rule = decodeProjectScriptKeybindingRule({
       keybinding: "  mod+k  ",
-      command: commandForProjectScript("lint"),
+      command: commandForProjectScriptSafe("lint")!,
     });
 
     expect(rule).toEqual({
@@ -25,7 +25,7 @@ describe("projectScriptKeybindings", () => {
     expect(
       decodeProjectScriptKeybindingRule({
         keybinding: "   ",
-        command: commandForProjectScript("lint"),
+        command: commandForProjectScriptSafe("lint")!,
       }),
     ).toBeNull();
   });
@@ -34,7 +34,7 @@ describe("projectScriptKeybindings", () => {
     expect(() =>
       decodeProjectScriptKeybindingRule({
         keybinding: "k".repeat(MAX_KEYBINDING_VALUE_LENGTH + 1),
-        command: commandForProjectScript("lint"),
+        command: commandForProjectScriptSafe("lint")!,
       }),
     ).toThrowError(PROJECT_SCRIPT_KEYBINDING_INVALID_MESSAGE);
   });
@@ -49,7 +49,7 @@ describe("projectScriptKeybindings", () => {
   });
 
   it("reads latest matching keybinding value for a command", () => {
-    const command = commandForProjectScript("test");
+    const command = commandForProjectScriptSafe("test")!;
     const value = keybindingValueForCommand(
       [
         {

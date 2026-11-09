@@ -1,27 +1,30 @@
 import { type EditorId, type ResolvedKeybindingsConfig, type ThreadId } from "@piedpiper/contracts";
-import { Suspense, lazy, memo } from "react";
-import { isElectron } from "../../env";
-import { advisorAvatarSrc } from "../../lib/advisorIdentity";
-const GitActionsControl = lazy(() => import("../GitActionsControl"));
 import {
-  ArrowLeftIcon,
-  DiffIcon,
-  FolderIcon,
-  HistoryIcon,
-  SquarePenIcon,
-  TerminalSquareIcon,
-} from "lucide-react";
+  Suspense,
+  lazy,
+  memo,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type MouseEvent as ReactMouseEvent,
+} from "react";
+import { isElectron } from "../../env";
+import { newCommandId } from "../../lib/utils";
+import { readNativeApi } from "../../nativeApi";
+import { useStore } from "../../store";
+import { toastManager } from "../ui/toast";
+import { useThreadActionMenu } from "../../hooks/useThreadActionMenu";
+const GitActionsControl = lazy(() => import("../GitActionsControl"));
+import { ChevronDownIcon, DiffIcon, TerminalSquareIcon } from "lucide-react";
 import { Badge } from "../ui/badge";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { Toggle } from "../ui/toggle";
 import { SidebarTrigger, useSidebar } from "../ui/sidebar";
+import { useElectronHeaderInsetPx } from "../../hooks/useElectronHeaderInset";
+import { isImeComposingKeyboardEvent } from "~/lib/imeComposition";
+import { textDirection } from "~/markdown-text-direction";
 import { OpenInPicker } from "./OpenInPicker";
-
-export interface ChatHeaderAdvisorContext {
-  readonly id: string;
-  readonly displayName: string;
-  readonly shortName: string;
-}
 
 interface ChatHeaderProps {
   activeThreadId: ThreadId;
@@ -39,23 +42,161 @@ interface ChatHeaderProps {
   diffOpen: boolean;
   onToggleTerminal: () => void;
   onToggleDiff: () => void;
-  /**
-   * When set, the chat is an advisor chat: the header renders only the
-   * advisor's avatar + display name on the left and skips the git badge,
-   * git button, open-in picker, terminal toggle, and diff toggle entirely.
-   * It also exposes the new-chat + history buttons in the top-right.
-   */
-  advisor?: ChatHeaderAdvisorContext | null;
-  /** Starts a new chat with the same advisor (advisor branch only). */
-  onNewAdvisorChat?: () => void;
-  /** Opens the advisor history right overlay (advisor branch only). */
-  onOpenAdvisorHistory?: () => void;
-  /** Navigate back to the /advisors page (advisor branch only). */
-  onBackToAdvisors?: () => void;
-  /** Advisor skill role label (e.g. "Office Hours"). */
-  advisorRole?: string | null;
-  /** Project name for advisor context badge. */
-  advisorProjectName?: string | null;
+  /** Local draft threads have no server thread to rename yet. */
+  canRename?: boolean;
+}
+
+export type HeaderRenameCommit =
+  | { readonly kind: "empty" }
+  | { readonly kind: "unchanged" }
+  | { readonly kind: "rename"; readonly title: string };
+
+export function resolveHeaderRenameCommit(
+  draft: string,
+  originalTitle: string,
+): HeaderRenameCommit {
+  const trimmed = draft.trim();
+  if (trimmed.length === 0) return { kind: "empty" };
+  if (trimmed === originalTitle) return { kind: "unchanged" };
+  return { kind: "rename", title: trimmed };
+}
+
+async function renameThreadFromHeader(threadId: ThreadId, draft: string, originalTitle: string) {
+  const commit = resolveHeaderRenameCommit(draft, originalTitle);
+  if (commit.kind === "empty") {
+    toastManager.add({ type: "warning", title: "Thread title cannot be empty" });
+    return;
+  }
+  if (commit.kind === "unchanged") return;
+  const api = readNativeApi();
+  if (!api) return;
+  try {
+    await api.orchestration.dispatchCommand({
+      type: "thread.meta.update",
+      commandId: newCommandId(),
+      threadId,
+      title: commit.title,
+    });
+    useStore.getState().markThreadUserRenamed(threadId, commit.title);
+  } catch (error) {
+    toastManager.add({
+      type: "error",
+      title: "Failed to rename thread",
+      description: error instanceof Error ? error.message : "An error occurred.",
+    });
+  }
+}
+
+function ChatHeaderTitle({
+  title,
+  canRename,
+  draft,
+  onDraftChange,
+  onFinishRename,
+  onTitleClick,
+  onTitleDoubleClick,
+  onTitleBlur,
+}: {
+  title: string;
+  canRename: boolean;
+  draft: string | null;
+  onDraftChange: (draft: string) => void;
+  onFinishRename: (commit: boolean) => void;
+  onTitleClick: (event: ReactMouseEvent<HTMLButtonElement>) => void;
+  onTitleDoubleClick: (event: ReactMouseEvent<HTMLButtonElement>) => void;
+  onTitleBlur: () => void;
+}) {
+  if (draft !== null) {
+    return (
+      <input
+        ref={(element) => {
+          if (element && document.activeElement !== element) {
+            element.focus();
+            element.select();
+          }
+        }}
+        aria-label="Thread title"
+        className="min-w-0 flex-1 truncate rounded border border-ring bg-transparent px-0.5 text-sm font-medium text-foreground outline-none"
+        value={draft}
+        onChange={(event) => onDraftChange(event.target.value)}
+        onKeyDown={(event) => {
+          event.stopPropagation();
+          if (isImeComposingKeyboardEvent(event.nativeEvent)) return;
+          if (event.key === "Enter") {
+            event.preventDefault();
+            onFinishRename(true);
+          } else if (event.key === "Escape") {
+            event.preventDefault();
+            onFinishRename(false);
+          }
+        }}
+        onBlur={() => onFinishRename(true)}
+      />
+    );
+  }
+
+  if (!canRename) {
+    return (
+      <h2
+        dir={textDirection(title) ?? "auto"}
+        className="min-w-0 shrink truncate text-sm font-medium text-foreground"
+        title={title}
+      >
+        {title}
+      </h2>
+    );
+  }
+
+  // Sized to its content (no flex-1) so the rest of the header stays a window drag area.
+  return (
+    <button
+      type="button"
+      title={title}
+      aria-label={`Thread actions for ${title}`}
+      aria-haspopup="menu"
+      className="group/thread-title inline-flex min-w-0 shrink cursor-pointer items-center gap-1 rounded-sm text-left focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+      onClick={onTitleClick}
+      onDoubleClick={onTitleDoubleClick}
+      onBlur={onTitleBlur}
+    >
+      <h2
+        dir={textDirection(title) ?? "auto"}
+        className="min-w-0 truncate text-sm font-medium text-foreground"
+      >
+        {title}
+      </h2>
+      <ChevronDownIcon
+        aria-hidden
+        data-thread-title-chevron
+        className="size-3.5 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover/thread-title:opacity-100 group-focus-visible/thread-title:opacity-100"
+      />
+    </button>
+  );
+}
+
+// A click on the title waits this long so a double-click (rename) can cancel the menu. The
+// native desktop menu swallows input while open, so it must cover the OS double-click interval.
+const TITLE_MENU_OPEN_DELAY_MS = isElectron ? 500 : 250;
+const TITLE_CHEVRON_SELECTOR = "[data-thread-title-chevron]";
+
+export type TitleClickAction = "ignore" | "open-now" | "open-delayed";
+
+/**
+ * What a click on the header title does: the trailing click of a double-click belongs to
+ * rename, while keyboard activation (detail 0) and the chevron open the menu straight away.
+ */
+export function resolveTitleClickAction(input: {
+  readonly detail: number;
+  readonly onChevron: boolean;
+}): TitleClickAction {
+  if (input.detail > 1) return "ignore";
+  if (input.detail === 0 || input.onChevron) return "open-now";
+  return "open-delayed";
+}
+
+/** Keep the toggle usable while the panel is open so a non-git project can still close it. */
+export function isDiffToggleDisabled(isGitRepo: boolean, diffOpen: boolean): boolean {
+  return !isGitRepo && !diffOpen;
 }
 
 export const ChatHeader = memo(function ChatHeader({
@@ -74,105 +215,111 @@ export const ChatHeader = memo(function ChatHeader({
   diffOpen,
   onToggleTerminal,
   onToggleDiff,
-  advisor,
-  onNewAdvisorChat,
-  onOpenAdvisorHistory,
-  onBackToAdvisors,
-  advisorRole,
-  advisorProjectName,
+  canRename = true,
 }: ChatHeaderProps) {
-  const { state } = useSidebar();
-  const collapsedInElectron = isElectron && state === "collapsed";
-
-  if (advisor) {
-    return (
-      <div
-        className="flex min-w-0 flex-1 items-center gap-2"
-        style={collapsedInElectron ? { paddingLeft: 128 } : undefined}
-      >
-        <SidebarTrigger className="size-7 shrink-0 md:hidden" />
-        {onBackToAdvisors && (
-          <Tooltip>
-            <TooltipTrigger
-              render={
-                <button
-                  type="button"
-                  aria-label="Back to advisors"
-                  onClick={onBackToAdvisors}
-                  className="inline-flex size-7 shrink-0 cursor-pointer items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-                />
-              }
-            >
-              <ArrowLeftIcon className="size-3.5" />
-            </TooltipTrigger>
-            <TooltipPopup side="bottom">Advisors</TooltipPopup>
-          </Tooltip>
-        )}
-        <img
-          src={advisorAvatarSrc(advisor.id)}
-          alt=""
-          draggable={false}
-          className="size-7 shrink-0 object-contain"
-        />
-        <h2
-          className="min-w-0 flex-1 shrink truncate text-sm font-medium text-foreground"
-          title={advisor.displayName}
-        >
-          {advisor.shortName}
-          {advisorRole && (
-            <span className="text-muted-foreground/60">
-              <span className="mx-1.5 text-muted-foreground/30">&middot;</span>
-              {advisorRole}
-            </span>
-          )}
-          {advisorProjectName && (
-            <span className="text-muted-foreground/60">
-              <span className="mx-1.5 text-muted-foreground/30">&middot;</span>
-              <FolderIcon className="mb-px inline size-3" /> {advisorProjectName}
-            </span>
-          )}
-        </h2>
-        <div className="flex shrink-0 items-center gap-1">
-          {onNewAdvisorChat && (
-            <button
-              type="button"
-              aria-label={`New chat with ${advisor.displayName}`}
-              onClick={onNewAdvisorChat}
-              className="inline-flex cursor-pointer items-center gap-1.5 rounded-full bg-white px-4 py-1.5 text-sm font-medium text-black transition-all hover:bg-white/90"
-            >
-              <SquarePenIcon className="size-3" />
-              New Chat
-            </button>
-          )}
-          {onOpenAdvisorHistory && (
-            <button
-              type="button"
-              aria-label={`Show past sessions with ${advisor.displayName}`}
-              onClick={onOpenAdvisorHistory}
-              className="inline-flex cursor-pointer items-center gap-1.5 rounded-full border border-border px-4 py-1.5 text-sm font-medium text-foreground/80 transition-all hover:bg-accent hover:text-foreground"
-            >
-              <HistoryIcon className="size-3" />
-              {advisorRole ? "Past Sessions" : "History"}
-            </button>
-          )}
-        </div>
-      </div>
-    );
-  }
+  const { isMobile } = useSidebar();
+  const headerInsetPx = useElectronHeaderInsetPx();
+  // Tagged with the thread so switching threads drops an in-progress rename.
+  // originalTitle is the title when the rename started, so a title that changes meanwhile is kept.
+  const [renaming, setRenaming] = useState<{
+    threadId: ThreadId;
+    draft: string;
+    originalTitle: string;
+  } | null>(null);
+  // The input unmounts without a reliable blur, so drop the stale rename instead of keeping it.
+  if (renaming !== null && renaming.threadId !== activeThreadId) setRenaming(null);
+  const renameDraft = renaming?.threadId === activeThreadId ? renaming.draft : null;
+  const renameSettledRef = useRef(false);
+  const startRename = useCallback((threadId: ThreadId, title: string) => {
+    renameSettledRef.current = false;
+    setRenaming({ threadId, draft: title, originalTitle: title });
+  }, []);
+  const finishRename = (commit: boolean) => {
+    // Enter/Escape unmount the input, which can also fire blur.
+    if (renameSettledRef.current || renameDraft === null || renaming === null) return;
+    renameSettledRef.current = true;
+    setRenaming(null);
+    if (commit) void renameThreadFromHeader(activeThreadId, renameDraft, renaming.originalTitle);
+  };
+  const { openThreadActionMenu } = useThreadActionMenu({
+    onStartRename: startRename,
+    canFindInThread: true,
+  });
+  const titleMenuTimerRef = useRef<number | null>(null);
+  const cancelPendingTitleMenu = () => {
+    if (titleMenuTimerRef.current === null) return;
+    window.clearTimeout(titleMenuTimerRef.current);
+    titleMenuTimerRef.current = null;
+  };
+  // A pending menu must never open for a thread the user already left.
+  useEffect(
+    () => () => {
+      if (titleMenuTimerRef.current === null) return;
+      window.clearTimeout(titleMenuTimerRef.current);
+      titleMenuTimerRef.current = null;
+    },
+    [activeThreadId],
+  );
+  const openMenu = (position: { x: number; y: number }) => {
+    cancelPendingTitleMenu();
+    void openThreadActionMenu(activeThreadId, position);
+  };
+  const onTitleClick = (event: ReactMouseEvent<HTMLButtonElement>) => {
+    const button = event.currentTarget;
+    const action = resolveTitleClickAction({
+      detail: event.detail,
+      onChevron: (event.target as Element).closest(TITLE_CHEVRON_SELECTOR) !== null,
+    });
+    if (action === "ignore") return;
+    const openBelowTitle = () => {
+      const rect = button.getBoundingClientRect();
+      openMenu({ x: rect.left, y: rect.bottom + 4 });
+    };
+    if (action === "open-now") {
+      openBelowTitle();
+      return;
+    }
+    cancelPendingTitleMenu();
+    titleMenuTimerRef.current = window.setTimeout(() => {
+      titleMenuTimerRef.current = null;
+      openBelowTitle();
+    }, TITLE_MENU_OPEN_DELAY_MS);
+  };
+  const onTitleDoubleClick = (event: ReactMouseEvent<HTMLButtonElement>) => {
+    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    // The chevron is the explicit menu affordance; only the title text renames.
+    if ((event.target as Element).closest(TITLE_CHEVRON_SELECTOR) !== null) return;
+    cancelPendingTitleMenu();
+    startRename(activeThreadId, activeThreadTitle);
+  };
 
   return (
     <div
       className="@container/header-actions flex min-w-0 flex-1 items-center gap-2"
-      style={collapsedInElectron ? { paddingLeft: 128 } : undefined}
+      style={headerInsetPx !== undefined ? { paddingLeft: headerInsetPx } : undefined}
     >
-      <div className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden sm:gap-3">
-        <SidebarTrigger className="size-7 shrink-0 md:hidden" />
-        <h2
-          className="min-w-0 shrink truncate text-sm font-medium text-foreground"
+      <div
+        className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden sm:gap-3"
+        onContextMenu={(event) => {
+          if (!canRename || renameDraft !== null) return;
+          event.preventDefault();
+          openMenu({ x: event.clientX, y: event.clientY });
+        }}
+      >
+        {/* Electron always renders the fixed AppSidebarLayout toggle; only the web sheet needs one. */}
+        {!isElectron && isMobile ? <SidebarTrigger className="size-7 shrink-0" /> : null}
+        <ChatHeaderTitle
           title={activeThreadTitle}
-        >
-          {activeThreadTitle}
-        </h2>
+          canRename={canRename}
+          draft={renameDraft}
+          onDraftChange={(draft) =>
+            setRenaming((current) => (current === null ? current : { ...current, draft }))
+          }
+          onFinishRename={finishRename}
+          onTitleClick={onTitleClick}
+          onTitleDoubleClick={onTitleDoubleClick}
+          onTitleBlur={cancelPendingTitleMenu}
+        />
         {!isGitRepo && activeProjectName && (
           <Badge variant="outline" className="shrink-0 text-[10px] text-amber-700">
             No Git
@@ -226,14 +373,14 @@ export const ChatHeader = memo(function ChatHeader({
                 aria-label="Toggle diff panel"
                 variant="outline"
                 size="xs"
-                disabled={!isGitRepo}
+                disabled={isDiffToggleDisabled(isGitRepo, diffOpen)}
               >
                 <DiffIcon className="size-3" />
               </Toggle>
             }
           />
           <TooltipPopup side="bottom">
-            {!isGitRepo
+            {isDiffToggleDisabled(isGitRepo, diffOpen)
               ? "Diff panel is unavailable because this project is not a git repository."
               : diffToggleShortcutLabel
                 ? `Toggle diff panel (${diffToggleShortcutLabel})`

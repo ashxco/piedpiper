@@ -1,6 +1,7 @@
-import type { ReactNode } from "react";
+import type { KeyboardEventHandler, ReactNode, Ref } from "react";
 
 import { isElectron } from "~/env";
+import { DIFF_FIND_SCOPE_ATTRIBUTE } from "~/lib/diffFind";
 import { cn } from "~/lib/utils";
 
 import { Skeleton } from "./ui/skeleton";
@@ -10,22 +11,35 @@ export type DiffPanelMode = "inline" | "sheet" | "sidebar";
 function getDiffPanelHeaderRowClassName(mode: DiffPanelMode) {
   const needsElectronHeight = isElectron && mode !== "sheet";
   return cn(
-    "flex items-center justify-between gap-2 px-4",
+    // The native window buttons cover this corner in every mode, including the sheet.
+    "flex items-center justify-between gap-2 px-4 wco:pr-[calc(100vw-env(titlebar-area-width)-env(titlebar-area-x)+1em)]",
     needsElectronHeight ? "h-[52px] border-b border-border" : "h-12",
   );
 }
 
-export function DiffPanelShell(props: {
+export function DiffPanelShell({
+  rootRef,
+  ...props
+}: {
   mode: DiffPanelMode;
   header: ReactNode;
   children: ReactNode;
+  rootRef?: Ref<HTMLDivElement>;
+  /** Whether this panel answers the find chord right now. */
+  findEnabled?: boolean;
+  onKeyDown?: KeyboardEventHandler<HTMLDivElement>;
 }) {
   const needsBorderWrapper = !isElectron || props.mode === "sheet";
 
   return (
     <div
+      ref={rootRef}
+      // Focusable, so clicking into a diff puts keyboard events on this panel rather than body.
+      tabIndex={-1}
+      {...(props.findEnabled ? { [DIFF_FIND_SCOPE_ATTRIBUTE]: "" } : {})}
+      onKeyDown={props.onKeyDown}
       className={cn(
-        "flex h-full min-w-0 flex-col bg-background",
+        "flex h-full min-w-0 flex-col bg-background outline-none",
         props.mode === "inline"
           ? "w-[42vw] min-w-[360px] max-w-[560px] shrink-0 border-l border-border"
           : "w-full",
