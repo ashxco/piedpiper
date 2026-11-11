@@ -5,7 +5,6 @@ import {
   EventId,
   MessageId,
   ModelSelection,
-  type OrchestrationEvent,
   type OrchestrationThread,
   type ProjectId,
   type ProviderGoal,
@@ -19,7 +18,18 @@ import {
   type RuntimeMode,
   type TurnId,
 } from "@piedpiper/contracts";
-import { Cache, Cause, Duration, Effect, Layer, Option, PubSub, Schedule, Schema } from "effect";
+import {
+  Cache,
+  Cause,
+  Duration,
+  Effect,
+  Exit,
+  Layer,
+  Option,
+  PubSub,
+  Schedule,
+  Schema,
+} from "effect";
 import { access } from "node:fs/promises";
 import { makeDrainableWorker } from "@piedpiper/shared/DrainableWorker";
 import { stripImageOnlyBootstrapPrompt } from "@piedpiper/shared/imageOnlyBootstrapPrompt";
@@ -56,6 +66,12 @@ import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { makeProviderSessionReaper } from "../../provider/Layers/ProviderSessionReaper.ts";
 import { ProviderSessionRuntimeRepositoryLive } from "../../persistence/Layers/ProviderSessionRuntime.ts";
 import { ProviderSessionRuntimeRepository } from "../../persistence/Services/ProviderSessionRuntime.ts";
+import { EffectOutboxV2, layer as EffectOutboxLive } from "../../orchestration-v2/EffectOutbox.ts";
+import { readV2Entity } from "../../orchestration-v2/ProjectionStore.ts";
+import {
+  isDurableProviderIntent,
+  type ProviderIntentEvent,
+} from "../../orchestration-v2/RuntimeIntent.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import {
   ProviderCommandReactor,
@@ -73,21 +89,6 @@ import {
   readUserInputRequestState,
   resolvedActivitySequence,
 } from "../userInputRequests.ts";
-
-type ProviderIntentEvent = Extract<
-  OrchestrationEvent,
-  {
-    type:
-      | "thread.runtime-mode-set"
-      | "thread.turn-start-requested"
-      | "thread.turn-interrupt-requested"
-      | "thread.approval-response-requested"
-      | "thread.user-input-response-requested"
-      | "thread.session-stop-requested"
-      | "thread.title-regeneration-requested"
-      | "thread.session-set";
-  }
->;
 
 // Delivers held question answers for threads that may have settled before this process started.
 interface HeldAnswersRescan {
@@ -253,6 +254,9 @@ const make = Effect.gen(function* () {
   const serverConfig = yield* ServerConfig;
   const textGeneration = yield* TextGeneration;
   const serverSettingsService = yield* ServerSettingsService;
+  const effectOutbox = yield* EffectOutboxV2;
+  yield* effectOutbox.reconcileAfterProcessLoss;
+  const effectWorkerId = `provider-worker:${crypto.randomUUID()}`;
   const handledTurnStartKeys = yield* Cache.make<string, true>({
     capacity: HANDLED_TURN_START_KEY_MAX,
     timeToLive: HANDLED_TURN_START_KEY_TTL,
@@ -2013,19 +2017,83 @@ const make = Effect.gen(function* () {
       }),
     );
 
-  const processWorkItem = (item: ProviderIntentEvent | HeldAnswersRescan) =>
-    item.type === "held-answers.rescan"
-      ? deliverNextHeldAnswer(item.threadId).pipe(
-          Effect.catchCause((cause) =>
-            Cause.hasInterruptsOnly(cause)
-              ? Effect.failCause(cause)
-              : Effect.logWarning("provider command reactor failed to deliver a held answer", {
-                  threadId: item.threadId,
-                  cause: Cause.pretty(cause),
-                }),
-          ),
-        )
-      : processDomainEventSafely(item);
+  const drainDurableEffects = Effect.fn("orchestrationV2.drainProviderEffects")(function* () {
+    while (true) {
+      const claimed = yield* effectOutbox.claimNext({
+        workerId: effectWorkerId,
+        effectTypes: ["provider-turn.start", "provider-command.execute"],
+      });
+      if (Option.isNone(claimed)) return;
+      const effect = claimed.value;
+      const executed = yield* Effect.exit(
+        Effect.gen(function* () {
+          if (
+            effect.request.type === "provider-command.execute" &&
+            isDurableProviderIntent(effect.request.intent)
+          ) {
+            yield* processDomainEvent(effect.request.intent);
+            return;
+          }
+          if (effect.request.type !== "provider-turn.start") {
+            return yield* new ProviderAdapterRequestError({
+              provider: "claudeAgent",
+              method: effect.request.type,
+              detail: "Unsupported orchestration effect.",
+            });
+          }
+          const input = yield* readV2Entity("run-input.updated", effect.request.runId);
+          if (input?.type !== "run-input.updated") {
+            return yield* new ProviderAdapterRequestError({
+              provider: "claudeAgent",
+              method: "turn/start",
+              detail: "The saved run input is missing.",
+            });
+          }
+          yield* processDomainEvent({
+            type: "thread.turn-start-requested",
+            eventId: input.eventId,
+            aggregateKind: "thread",
+            aggregateId: input.threadId,
+            sequence: 0,
+            commandId: input.commandId,
+            correlationId: input.commandId,
+            causationEventId: null,
+            occurredAt: input.occurredAt,
+            metadata: {},
+            payload: input.payload.request,
+          });
+        }),
+      );
+      if (Exit.isFailure(executed)) {
+        if (Cause.hasInterruptsOnly(executed.cause)) return yield* Effect.failCause(executed.cause);
+        yield* effectOutbox.fail({
+          effectId: effect.id,
+          workerId: effectWorkerId,
+          error: Cause.pretty(executed.cause),
+        });
+      } else {
+        yield* effectOutbox.succeed({ effectId: effect.id, workerId: effectWorkerId });
+      }
+    }
+  });
+
+  const processWorkItem = (
+    item: ProviderIntentEvent | HeldAnswersRescan | { readonly type: "effects.poll" },
+  ) =>
+    item.type === "effects.poll"
+      ? drainDurableEffects()
+      : item.type === "held-answers.rescan"
+        ? deliverNextHeldAnswer(item.threadId).pipe(
+            Effect.catchCause((cause) =>
+              Cause.hasInterruptsOnly(cause)
+                ? Effect.failCause(cause)
+                : Effect.logWarning("provider command reactor failed to deliver a held answer", {
+                    threadId: item.threadId,
+                    cause: Cause.pretty(cause),
+                  }),
+            ),
+          )
+        : processDomainEventSafely(item);
 
   const worker = yield* makeDrainableWorker(processWorkItem);
   // Wired here (not in server.ts) so the reaper shares this reactor's lifecycle.
@@ -2036,24 +2104,19 @@ const make = Effect.gen(function* () {
     // CheckpointReactor.start for why this matters.
     const domainEventQueue = yield* orchestrationEngine.subscribeDomainEvents();
     yield* sessionReaper.start();
+    yield* worker.enqueue({ type: "effects.poll" });
+    yield* Effect.forever(
+      Effect.sleep("1 second").pipe(Effect.andThen(worker.enqueue({ type: "effects.poll" }))),
+    ).pipe(Effect.forkScoped);
 
     yield* Effect.forkScoped(
       Effect.forever(
         PubSub.take(domainEventQueue).pipe(
           Effect.flatMap((event) => {
+            if (event.type === "thread.turn-start-requested" || isDurableProviderIntent(event))
+              return worker.enqueue({ type: "effects.poll" });
             if (event.type === "thread.session-set") {
               return isSessionSettled(event.payload.session) ? worker.enqueue(event) : Effect.void;
-            }
-            if (
-              event.type === "thread.runtime-mode-set" ||
-              event.type === "thread.turn-start-requested" ||
-              event.type === "thread.turn-interrupt-requested" ||
-              event.type === "thread.approval-response-requested" ||
-              event.type === "thread.user-input-response-requested" ||
-              event.type === "thread.session-stop-requested" ||
-              event.type === "thread.title-regeneration-requested"
-            ) {
-              return worker.enqueue(event);
             }
             return Effect.void;
           }),
@@ -2071,11 +2134,12 @@ const make = Effect.gen(function* () {
 
   return {
     start,
-    drain: worker.drain,
+    drain: worker.enqueue({ type: "effects.poll" }).pipe(Effect.andThen(worker.drain)),
   } satisfies ProviderCommandReactorShape;
 });
 
 // The repository lets the embedded session reaper drop bindings of deleted threads.
 export const ProviderCommandReactorLive = Layer.effect(ProviderCommandReactor, make).pipe(
   Layer.provide(ProviderSessionRuntimeRepositoryLive),
+  Layer.provide(EffectOutboxLive),
 );

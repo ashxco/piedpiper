@@ -180,6 +180,15 @@ Codex uses a procedural `CodexAppServerManager` that owns the JSON-RPC stdio bri
 
 Codex App Server docs: https://developers.openai.com/codex/sdk/#app-server
 
+## T3 Code upstream reviews
+
+- Read `docs/t3code-upstream.json` before reviewing or adopting changes from `pingdotgg/t3code`.
+- Use `reviewedThrough.sha` as the exclusive starting commit and pin the current upstream `main` SHA as the review endpoint. Use a commit comparison or full paginated history, so commit dates and merge order cannot create gaps.
+- Resume `activeReview` when present. Retain existing local changes and consult recorded dispositions before applying an upstream change.
+- Record each reviewed commit as `adopted`, `already_present`, `not_applicable`, or `deferred`, with a reason. For adopted commits, record the affected local files and verification results. Keep deferred items visible for future follow-up.
+- Advance `reviewedThrough` only after every commit in the pinned range has a disposition and adopted changes pass the required checks. This checkpoint records review coverage. The individual dispositions record which changes were implemented.
+- If upstream history no longer contains the checkpoint, record the divergence and identify the common ancestor before choosing a new range.
+
 ## Reference Repos
 
 - Codex-Monitor (Tauri, feature-complete, strong reference implementation for the codex side): https://github.com/Dimillian/CodexMonitor

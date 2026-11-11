@@ -72,6 +72,7 @@ import {
   createRendererRecoveryPolicy,
 } from "./rendererRecovery";
 import { createShellEnvironmentSync } from "./syncShellEnvironment";
+import { guardDesktopIpc } from "./trustedIpc";
 import {
   getAutoUpdateDisabledReason,
   resolveUpdateCheckMenuDialog,
@@ -1384,19 +1385,20 @@ function revealWindow(window: BrowserWindow): void {
 }
 
 function registerIpcHandlers(): void {
+  const trustedIpc = guardDesktopIpc(ipcMain, () => mainWindow);
   ipcMain.removeAllListeners(GET_WS_URL_CHANNEL);
-  ipcMain.on(GET_WS_URL_CHANNEL, (event) => {
+  trustedIpc.on(GET_WS_URL_CHANNEL, (event) => {
     event.returnValue = backendWsUrl;
   });
 
   ipcMain.removeAllListeners(GET_WINDOW_FULLSCREEN_STATE_CHANNEL);
-  ipcMain.on(GET_WINDOW_FULLSCREEN_STATE_CHANNEL, (event) => {
+  trustedIpc.on(GET_WINDOW_FULLSCREEN_STATE_CHANNEL, (event) => {
     const window = BrowserWindow.fromWebContents(event.sender);
     event.returnValue = window !== null && !window.isDestroyed() && window.isFullScreen();
   });
 
   ipcMain.removeAllListeners(GET_SYSTEM_LOCALE_CHANNEL);
-  ipcMain.on(GET_SYSTEM_LOCALE_CHANNEL, (event) => {
+  trustedIpc.on(GET_SYSTEM_LOCALE_CHANNEL, (event) => {
     event.returnValue = resolveSystemLocaleTag({
       platform: process.platform,
       env: process.env,
@@ -1406,23 +1408,23 @@ function registerIpcHandlers(): void {
   });
 
   ipcMain.removeAllListeners(SYNC_WINDOW_BUTTONS_CHANNEL);
-  ipcMain.on(SYNC_WINDOW_BUTTONS_CHANNEL, (event) => {
+  trustedIpc.on(SYNC_WINDOW_BUTTONS_CHANNEL, (event) => {
     const window = BrowserWindow.fromWebContents(event.sender);
     if (window) syncMacosWindowButtons(window, process.platform);
   });
 
   ipcMain.removeAllListeners(SET_QUIT_CONFIRMATION_MODE_CHANNEL);
-  ipcMain.on(SET_QUIT_CONFIRMATION_MODE_CHANNEL, (_event, mode: unknown) => {
+  trustedIpc.on(SET_QUIT_CONFIRMATION_MODE_CHANNEL, (_event, mode: unknown) => {
     if (isQuitConfirmationMode(mode)) quitConfirmationMode = mode;
   });
 
   ipcMain.removeHandler(SET_BADGE_COUNT_CHANNEL);
-  ipcMain.handle(SET_BADGE_COUNT_CHANNEL, async (_event, count: unknown) => {
+  trustedIpc.handle(SET_BADGE_COUNT_CHANNEL, async (_event, count: unknown) => {
     app.setBadgeCount(normalizeBadgeCount(count));
   });
 
   ipcMain.removeHandler(REVEAL_WINDOW_CHANNEL);
-  ipcMain.handle(
+  trustedIpc.handle(
     REVEAL_WINDOW_CHANNEL,
     makeRevealWindowHandler({
       getMainWindow: () =>
@@ -1432,7 +1434,7 @@ function registerIpcHandlers(): void {
   );
 
   ipcMain.removeHandler(PICK_FOLDER_CHANNEL);
-  ipcMain.handle(PICK_FOLDER_CHANNEL, async () => {
+  trustedIpc.handle(PICK_FOLDER_CHANNEL, async () => {
     const owner = BrowserWindow.getFocusedWindow() ?? mainWindow;
     const result = owner
       ? await dialog.showOpenDialog(owner, {
@@ -1446,7 +1448,7 @@ function registerIpcHandlers(): void {
   });
 
   ipcMain.removeHandler(PICK_PROJECT_FAVICON_CHANNEL);
-  ipcMain.handle(PICK_PROJECT_FAVICON_CHANNEL, async (_event, initialPath: unknown) => {
+  trustedIpc.handle(PICK_PROJECT_FAVICON_CHANNEL, async (_event, initialPath: unknown) => {
     const owner = BrowserWindow.getFocusedWindow() ?? mainWindow;
     const options: Electron.OpenDialogOptions = {
       properties: ["openFile"],
@@ -1465,7 +1467,7 @@ function registerIpcHandlers(): void {
   });
 
   ipcMain.removeHandler(CONFIRM_CHANNEL);
-  ipcMain.handle(CONFIRM_CHANNEL, async (_event, message: unknown) => {
+  trustedIpc.handle(CONFIRM_CHANNEL, async (_event, message: unknown) => {
     if (typeof message !== "string") {
       return false;
     }
@@ -1475,7 +1477,7 @@ function registerIpcHandlers(): void {
   });
 
   ipcMain.removeHandler(SET_THEME_CHANNEL);
-  ipcMain.handle(SET_THEME_CHANNEL, async (_event, rawTheme: unknown) => {
+  trustedIpc.handle(SET_THEME_CHANNEL, async (_event, rawTheme: unknown) => {
     const theme = getSafeTheme(rawTheme);
     if (!theme) {
       return;
@@ -1485,7 +1487,7 @@ function registerIpcHandlers(): void {
   });
 
   ipcMain.removeHandler(CONTEXT_MENU_CHANNEL);
-  ipcMain.handle(
+  trustedIpc.handle(
     CONTEXT_MENU_CHANNEL,
     async (_event, items: ContextMenuItem[], position?: { x: number; y: number }) => {
       const normalizedItems = items
@@ -1540,7 +1542,7 @@ function registerIpcHandlers(): void {
   );
 
   ipcMain.removeHandler(OPEN_EXTERNAL_CHANNEL);
-  ipcMain.handle(OPEN_EXTERNAL_CHANNEL, async (_event, rawUrl: unknown) => {
+  trustedIpc.handle(OPEN_EXTERNAL_CHANNEL, async (_event, rawUrl: unknown) => {
     const externalUrl = getSafeExternalUrl(rawUrl);
     if (!externalUrl) {
       return false;
@@ -1555,10 +1557,10 @@ function registerIpcHandlers(): void {
   });
 
   ipcMain.removeHandler(UPDATE_GET_STATE_CHANNEL);
-  ipcMain.handle(UPDATE_GET_STATE_CHANNEL, async () => updateState);
+  trustedIpc.handle(UPDATE_GET_STATE_CHANNEL, async () => updateState);
 
   ipcMain.removeHandler(UPDATE_DOWNLOAD_CHANNEL);
-  ipcMain.handle(UPDATE_DOWNLOAD_CHANNEL, async () => {
+  trustedIpc.handle(UPDATE_DOWNLOAD_CHANNEL, async () => {
     const result = await downloadAvailableUpdate();
     return {
       accepted: result.accepted,
@@ -1568,7 +1570,7 @@ function registerIpcHandlers(): void {
   });
 
   ipcMain.removeHandler(UPDATE_INSTALL_CHANNEL);
-  ipcMain.handle(UPDATE_INSTALL_CHANNEL, async () => {
+  trustedIpc.handle(UPDATE_INSTALL_CHANNEL, async () => {
     if (isQuitting) {
       return {
         accepted: false,
@@ -1585,7 +1587,7 @@ function registerIpcHandlers(): void {
   });
 
   ipcMain.removeHandler(UPDATE_CHECK_CHANNEL);
-  ipcMain.handle(UPDATE_CHECK_CHANNEL, async () => {
+  trustedIpc.handle(UPDATE_CHECK_CHANNEL, async () => {
     if (!updaterConfigured) {
       return {
         checked: false,
@@ -1761,6 +1763,8 @@ function createWindow(): BrowserWindow {
     }, RENDERER_RECOVERY_RELOAD_DELAY_MS);
   });
 
+  // Register the owner before preload can issue its first synchronous IPC request.
+  mainWindow = window;
   loadMainWindowContent(window);
 
   window.on("closed", () => {

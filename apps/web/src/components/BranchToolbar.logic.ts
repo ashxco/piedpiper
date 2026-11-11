@@ -10,6 +10,14 @@ export {
 export const EnvMode = Schema.Literals(["local", "worktree"]);
 export type EnvMode = typeof EnvMode.Type;
 
+export function isWorktreeChangeBlocked(input: {
+  isRunning: boolean;
+  currentWorktreePath: string | null;
+  nextWorktreePath: string | null;
+}): boolean {
+  return input.isRunning && input.currentWorktreePath !== input.nextWorktreePath;
+}
+
 export function resolveEffectiveEnvMode(input: {
   activeWorktreePath: string | null;
   hasServerThread: boolean;

@@ -1703,6 +1703,31 @@ it.layer(TestLayer)("git integration", (it) => {
       }),
     );
 
+    it.effect("refreshes a new worktree index before returning it", () =>
+      Effect.gen(function* () {
+        const tmp = yield* makeTmpDir();
+        const { initialBranch } = yield* initRepoWithCommit(tmp);
+        const realCore = yield* GitCore;
+        const calls: Array<{ operation: string; args: ReadonlyArray<string> }> = [];
+        const core = yield* makeIsolatedGitCore((input) => {
+          calls.push({ operation: input.operation, args: input.args });
+          return realCore.execute(input);
+        });
+        const worktreePath = path.join(tmp, "refreshed-worktree");
+        yield* core.createWorktree({
+          cwd: tmp,
+          branch: initialBranch,
+          newBranch: "refreshed",
+          path: worktreePath,
+        });
+        expect(
+          calls.find((call) => call.operation === "GitCore.createWorktree.refreshIndex")?.args,
+        ).toEqual(["update-index", "-q", "--refresh", "--force-write-index"]);
+        expect(yield* git(worktreePath, ["status", "--porcelain"])).toBe("");
+        yield* core.removeWorktree({ cwd: tmp, path: worktreePath });
+      }),
+    );
+
     it.effect("worktree has the new branch checked out", () =>
       Effect.gen(function* () {
         const tmp = yield* makeTmpDir();

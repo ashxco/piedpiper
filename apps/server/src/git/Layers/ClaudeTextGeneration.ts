@@ -28,7 +28,7 @@ import {
   normalizeCliError,
   sanitizeCommitSubject,
   sanitizePrTitle,
-  sanitizeThreadTitle,
+  generatedThreadTitle,
   toJsonSchemaObject,
 } from "../Utils.ts";
 import { normalizeClaudeModelOptionsWithCapabilities } from "@piedpiper/shared/model";
@@ -452,7 +452,7 @@ const makeClaudeTextGeneration = Effect.gen(function* () {
     });
 
     return {
-      title: sanitizeThreadTitle(generated.title),
+      title: yield* generatedThreadTitle(generated.title),
     };
   });
 

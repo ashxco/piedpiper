@@ -21,6 +21,11 @@ const GIT_BRANCHES_REFETCH_INTERVAL_MS = 60_000;
 const GIT_BRANCHES_PAGE_SIZE = 100;
 const GIT_DIFF_PREVIEW_STALE_TIME_MS = 5_000;
 
+/** The chat does not render file counts or the working-tree file list. */
+export function selectChatGitStatus(status: GitStatusResult) {
+  return { isRepo: status.isRepo, branch: status.branch, pr: status.pr };
+}
+
 export function gitCommitHistoryQueryOptions(cwd: string | null, enabled: boolean) {
   return infiniteQueryOptions({
     queryKey: ["git", "commits", cwd],

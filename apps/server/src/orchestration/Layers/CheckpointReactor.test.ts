@@ -292,7 +292,7 @@ describe("CheckpointReactor", () => {
       Layer.provide(OrchestrationProjectionPipelineLive),
       Layer.provide(OrchestrationEventStoreLive),
       Layer.provide(OrchestrationCommandReceiptRepositoryLive),
-      Layer.provide(SqlitePersistenceMemory),
+      Layer.provideMerge(SqlitePersistenceMemory),
     );
 
     const ServerConfigLayer = ServerConfig.layerTest(process.cwd(), {
@@ -389,7 +389,35 @@ describe("CheckpointReactor", () => {
 
     return {
       engine,
-      provider,
+      provider: {
+        ...provider,
+        emit: async (event: LegacyProviderRuntimeEvent) => {
+          // Completion-only fixtures represent turns started before this reactor subscribed.
+          if (
+            event.type === "turn.completed" &&
+            event.turnId &&
+            !(await Effect.runPromise(
+              engine.getRunForTurn!(event.threadId, asTurnId(event.turnId)),
+            ))
+          ) {
+            await Effect.runPromise(
+              engine.ingestProviderEvent!({
+                ...event,
+                eventId: EventId.makeUnsafe(`${event.eventId}:start`),
+                type: "turn.started",
+                payload: {},
+              } as ProviderRuntimeEvent),
+            );
+          }
+          await Effect.runPromise(
+            engine.ingestProviderEvent!({
+              ...event,
+              payload: event.payload ?? {},
+            } as ProviderRuntimeEvent),
+          );
+          provider.emit(event);
+        },
+      },
       cwd,
       drain,
       refreshMissingPullRequest,
@@ -419,7 +447,7 @@ describe("CheckpointReactor", () => {
       }),
     );
 
-    harness.provider.emit({
+    await harness.provider.emit({
       type: "turn.started",
       eventId: EventId.makeUnsafe("evt-turn-started-1"),
       provider: "codex",
@@ -434,7 +462,7 @@ describe("CheckpointReactor", () => {
     );
 
     fs.writeFileSync(path.join(harness.cwd, "README.md"), "v2\n", "utf8");
-    harness.provider.emit({
+    await harness.provider.emit({
       type: "turn.completed",
       eventId: EventId.makeUnsafe("evt-turn-completed-1"),
       provider: "codex",
@@ -502,7 +530,7 @@ describe("CheckpointReactor", () => {
         }),
       );
 
-      harness.provider.emit({
+      await harness.provider.emit({
         type: "turn.completed",
         eventId: EventId.makeUnsafe("evt-turn-completed-pr-refresh"),
         provider: "codex",
@@ -529,7 +557,7 @@ describe("CheckpointReactor", () => {
       seedFilesystemCheckpoints: false,
       threadBranch: "feature/pr",
     });
-    harness.provider.emit({
+    await harness.provider.emit({
       type: "turn.started",
       eventId: EventId.makeUnsafe("evt-turn-started-pr-abort"),
       provider: "codex",
@@ -538,7 +566,7 @@ describe("CheckpointReactor", () => {
       turnId: asTurnId("turn-1"),
     });
     await harness.drain();
-    harness.provider.emit({
+    await harness.provider.emit({
       type: "turn.aborted",
       eventId: EventId.makeUnsafe("evt-turn-aborted-pr-abort"),
       provider: "codex",
@@ -574,7 +602,7 @@ describe("CheckpointReactor", () => {
       }),
     );
 
-    harness.provider.emit({
+    await harness.provider.emit({
       type: "turn.started",
       eventId: EventId.makeUnsafe("evt-turn-started-main"),
       provider: "codex",
@@ -590,7 +618,7 @@ describe("CheckpointReactor", () => {
 
     fs.writeFileSync(path.join(harness.cwd, "README.md"), "v2\n", "utf8");
 
-    harness.provider.emit({
+    await harness.provider.emit({
       type: "turn.completed",
       eventId: EventId.makeUnsafe("evt-turn-completed-aux"),
       provider: "codex",
@@ -606,7 +634,7 @@ describe("CheckpointReactor", () => {
     const midThread = midReadModel.threads.get(ThreadId.makeUnsafe("thread-1"));
     expect(midThread?.checkpoints).toHaveLength(0);
 
-    harness.provider.emit({
+    await harness.provider.emit({
       type: "turn.completed",
       eventId: EventId.makeUnsafe("evt-turn-completed-main"),
       provider: "codex",
@@ -649,7 +677,7 @@ describe("CheckpointReactor", () => {
       }),
     );
 
-    harness.provider.emit({
+    await harness.provider.emit({
       type: "turn.started",
       eventId: EventId.makeUnsafe("evt-turn-started-claude-1"),
       provider: "claudeAgent",
@@ -663,7 +691,7 @@ describe("CheckpointReactor", () => {
     );
 
     fs.writeFileSync(path.join(harness.cwd, "README.md"), "v2\n", "utf8");
-    harness.provider.emit({
+    await harness.provider.emit({
       type: "turn.completed",
       eventId: EventId.makeUnsafe("evt-turn-completed-claude-1"),
       provider: "claudeAgent",
@@ -710,7 +738,7 @@ describe("CheckpointReactor", () => {
     const harness = await createHarness({ seedFilesystemCheckpoints: false });
     await setReadySession(harness, "missing-baseline");
 
-    harness.provider.emit({
+    await harness.provider.emit({
       type: "turn.completed",
       eventId: EventId.makeUnsafe("evt-turn-completed-missing-baseline"),
       provider: "codex",
@@ -751,7 +779,7 @@ describe("CheckpointReactor", () => {
     execFileSync("git", ["commit", "-m", "upstream"], { cwd: harness.cwd, env: oldCommitEnv });
     runGit(harness.cwd, ["checkout", "main"]);
 
-    harness.provider.emit({
+    await harness.provider.emit({
       type: "turn.started",
       eventId: EventId.makeUnsafe("evt-turn-started-pulled-files"),
       provider: "codex",
@@ -766,7 +794,7 @@ describe("CheckpointReactor", () => {
     await harness.drain();
     runGit(harness.cwd, ["merge", "--ff-only", "upstream"]);
     fs.writeFileSync(path.join(harness.cwd, "README.md"), "edited\n", "utf8");
-    harness.provider.emit({
+    await harness.provider.emit({
       type: "turn.completed",
       eventId: EventId.makeUnsafe("evt-turn-completed-pulled-files"),
       provider: "codex",
@@ -804,7 +832,7 @@ describe("CheckpointReactor", () => {
     });
     await setReadySession(harness, "lookup-failure");
 
-    harness.provider.emit({
+    await harness.provider.emit({
       type: "turn.started",
       eventId: EventId.makeUnsafe("evt-turn-started-lookup-failure"),
       provider: "codex",
@@ -819,7 +847,7 @@ describe("CheckpointReactor", () => {
     await harness.drain();
     fs.writeFileSync(path.join(harness.cwd, "README.md"), "new snapshot\n", "utf8");
     failLookup = true;
-    harness.provider.emit({
+    await harness.provider.emit({
       type: "turn.completed",
       eventId: EventId.makeUnsafe("evt-turn-completed-lookup-failure"),
       provider: "codex",
@@ -861,7 +889,7 @@ describe("CheckpointReactor", () => {
     });
     await setReadySession(harness, "unsupported");
 
-    harness.provider.emit({
+    await harness.provider.emit({
       type: "turn.started",
       eventId: EventId.makeUnsafe("evt-turn-started-unsupported"),
       provider: "codex",
@@ -869,7 +897,7 @@ describe("CheckpointReactor", () => {
       threadId: ThreadId.makeUnsafe("thread-1"),
       turnId: asTurnId("turn-unsupported"),
     });
-    harness.provider.emit({
+    await harness.provider.emit({
       type: "turn.completed",
       eventId: EventId.makeUnsafe("evt-turn-completed-unsupported"),
       provider: "codex",
@@ -956,7 +984,7 @@ describe("CheckpointReactor", () => {
     );
 
     fs.writeFileSync(path.join(harness.cwd, "README.md"), "v2\n", "utf8");
-    harness.provider.emit({
+    await harness.provider.emit({
       type: "turn.completed",
       eventId: EventId.makeUnsafe("evt-turn-completed-missing-provider-cwd"),
       provider: "codex",
@@ -1002,7 +1030,7 @@ describe("CheckpointReactor", () => {
       }),
     );
 
-    harness.provider.emit({
+    await harness.provider.emit({
       type: "checkpoint.captured",
       eventId: EventId.makeUnsafe("evt-checkpoint-captured-3"),
       provider: "codex",
@@ -1052,7 +1080,7 @@ describe("CheckpointReactor", () => {
       }),
     );
 
-    harness.provider.emit({
+    await harness.provider.emit({
       type: "turn.completed",
       eventId: EventId.makeUnsafe("evt-runtime-capture-failure"),
       provider: "codex",
@@ -1063,7 +1091,7 @@ describe("CheckpointReactor", () => {
       payload: { state: "completed" },
     });
 
-    harness.provider.emit({
+    await harness.provider.emit({
       type: "turn.started",
       eventId: EventId.makeUnsafe("evt-turn-started-after-runtime-failure"),
       provider: "codex",
@@ -1857,7 +1885,7 @@ describe("CheckpointReactor", () => {
         createdAt,
       }),
     );
-    harness.provider.emit({
+    await harness.provider.emit({
       type: "turn.started",
       eventId: EventId.makeUnsafe("evt-turn-started-placeholder"),
       provider: "codex",
@@ -1891,7 +1919,7 @@ describe("CheckpointReactor", () => {
     ).toBe(false);
 
     fs.writeFileSync(path.join(harness.cwd, "later.txt"), "one\ntwo\n", "utf8");
-    harness.provider.emit({
+    await harness.provider.emit({
       type: "turn.completed",
       eventId: EventId.makeUnsafe("evt-turn-completed-placeholder"),
       provider: "codex",
@@ -1958,7 +1986,7 @@ describe("CheckpointReactor", () => {
           createdAt,
         }),
       );
-      harness.provider.emit({
+      await harness.provider.emit({
         type: "turn.started",
         eventId: EventId.makeUnsafe("evt-turn-started-pointer"),
         provider: "codex",
@@ -2011,7 +2039,7 @@ describe("CheckpointReactor", () => {
         }),
       );
 
-      harness.provider.emit({
+      await harness.provider.emit({
         type: "turn.completed",
         eventId: EventId.makeUnsafe("evt-turn-completed-pointer"),
         provider: "codex",
@@ -2044,7 +2072,7 @@ describe("CheckpointReactor", () => {
   it("captures a checkpoint when the tracked turn is aborted and ignores unrelated aborts", async () => {
     const harness = await createHarness({ seedFilesystemCheckpoints: false });
     const createdAt = new Date().toISOString();
-    harness.provider.emit({
+    await harness.provider.emit({
       type: "turn.aborted",
       eventId: EventId.makeUnsafe("evt-turn-aborted-unrelated"),
       provider: "codex",
@@ -2053,7 +2081,7 @@ describe("CheckpointReactor", () => {
       turnId: asTurnId("turn-unrelated"),
       payload: { reason: "interrupted" },
     });
-    harness.provider.emit({
+    await harness.provider.emit({
       type: "turn.started",
       eventId: EventId.makeUnsafe("evt-turn-started-aborted"),
       provider: "codex",
@@ -2067,7 +2095,7 @@ describe("CheckpointReactor", () => {
     ).toBe(false);
 
     fs.writeFileSync(path.join(harness.cwd, "README.md"), "partial\n", "utf8");
-    harness.provider.emit({
+    await harness.provider.emit({
       type: "turn.aborted",
       eventId: EventId.makeUnsafe("evt-turn-aborted-1"),
       provider: "codex",

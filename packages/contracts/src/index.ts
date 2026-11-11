@@ -11,6 +11,7 @@ export * from "./settings";
 export * from "./git";
 export * from "./gitClone";
 export * from "./orchestration";
+export * from "./orchestrationV2";
 export * from "./editor";
 export * from "./project";
 export * from "./projectBrowse";

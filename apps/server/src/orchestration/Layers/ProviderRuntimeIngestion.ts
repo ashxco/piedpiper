@@ -957,6 +957,9 @@ const make = Effect.fn("make")(function* () {
     const readModel = yield* orchestrationEngine.getReadModel();
     const thread = readModel.threads.get(event.threadId);
     if (!thread) return;
+    const nativeDecision = orchestrationEngine.ingestProviderEvent
+      ? yield* orchestrationEngine.ingestProviderEvent(event)
+      : undefined;
 
     const now = event.createdAt;
     const eventTurnId = toTurnId(event.turnId);
@@ -978,33 +981,35 @@ const make = Effect.fn("make")(function* () {
       activeTurnId !== null && eventTurnId !== undefined && !sameId(activeTurnId, eventTurnId);
     const missingTurnForActiveTurn = activeTurnId !== null && eventTurnId === undefined;
 
-    const shouldApplyThreadLifecycle = (() => {
-      if (!STRICT_PROVIDER_LIFECYCLE_GUARD) {
-        return true;
-      }
-      switch (event.type) {
-        case "session.exited":
+    const shouldApplyThreadLifecycle =
+      nativeDecision?.acceptLifecycle ??
+      (() => {
+        if (!STRICT_PROVIDER_LIFECYCLE_GUARD) {
           return true;
-        case "session.started":
-        case "thread.started":
-          return true;
-        case "turn.started":
-          return !conflictsWithActiveTurn;
-        case "turn.completed":
-          if (conflictsWithActiveTurn || missingTurnForActiveTurn) {
-            return false;
-          }
-          // Only the active turn may close the lifecycle state.
-          if (activeTurnId !== null && eventTurnId !== undefined) {
-            return sameId(activeTurnId, eventTurnId);
-          }
-          // No active turn tracked: an untargeted completion cannot prove it
-          // belongs to a turn this thread ran and would stomp a "starting" state.
-          return eventTurnId !== undefined;
-        default:
-          return true;
-      }
-    })();
+        }
+        switch (event.type) {
+          case "session.exited":
+            return true;
+          case "session.started":
+          case "thread.started":
+            return true;
+          case "turn.started":
+            return !conflictsWithActiveTurn;
+          case "turn.completed":
+            if (conflictsWithActiveTurn || missingTurnForActiveTurn) {
+              return false;
+            }
+            // Only the active turn may close the lifecycle state.
+            if (activeTurnId !== null && eventTurnId !== undefined) {
+              return sameId(activeTurnId, eventTurnId);
+            }
+            // No active turn tracked: an untargeted completion cannot prove it
+            // belongs to a turn this thread ran and would stomp a "starting" state.
+            return eventTurnId !== undefined;
+          default:
+            return true;
+        }
+      })();
     const acceptedTurnStartedSourcePlan =
       event.type === "turn.started" && shouldApplyThreadLifecycle
         ? yield* getSourceProposedPlanReferenceForAcceptedTurnStart(thread.id, eventTurnId)

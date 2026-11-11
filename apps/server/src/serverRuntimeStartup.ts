@@ -221,6 +221,7 @@ export const reconcileProviderSessions = Effect.gen(function* () {
   const liveThreadIds = new Set(
     (yield* providerService.listSessions()).map((session) => session.threadId),
   );
+  yield* orchestrationEngine.reconcileRuntime?.(liveThreadIds) ?? Effect.void;
   const readModel = yield* orchestrationEngine.getReadModel();
   const orphanedThreads = [...readModel.threads.values()].filter(
     (thread) =>
@@ -255,16 +256,21 @@ export const reconcileProviderSessions = Effect.gen(function* () {
     );
 
     yield* Effect.gen(function* () {
-      const reconciledAt = new Date().toISOString();
+      const nativeRun =
+        session.activeTurnId && orchestrationEngine.getRunForTurn
+          ? yield* orchestrationEngine.getRunForTurn(thread.id, session.activeTurnId)
+          : null;
+      const completed = nativeRun?.status === "completed";
+      const reconciledAt = nativeRun?.completedAt ?? new Date().toISOString();
       yield* orchestrationEngine.dispatch({
         type: "thread.session.set",
         commandId: CommandId.makeUnsafe(crypto.randomUUID()),
         threadId: thread.id,
         session: {
           ...session,
-          status: "error",
+          status: completed ? "ready" : "error",
           activeTurnId: null,
-          lastError: ORPHANED_PROVIDER_SESSION_ERROR,
+          lastError: completed ? null : ORPHANED_PROVIDER_SESSION_ERROR,
           updatedAt: reconciledAt,
         },
         createdAt: reconciledAt,

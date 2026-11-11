@@ -35,7 +35,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { useQuery } from "@tanstack/react-query";
 import { useDebouncedValue } from "@tanstack/react-pacer";
 import { useNavigate, useSearch } from "@tanstack/react-router";
-import { gitStatusQueryOptions } from "~/lib/gitReactQuery";
+import { gitStatusQueryOptions, selectChatGitStatus } from "~/lib/gitReactQuery";
 import { buildAssistantQuoteInsertion } from "~/lib/assistantTextSelection";
 import { projectSearchEntriesQueryOptions } from "~/lib/projectReactQuery";
 import { isElectron } from "../env";
@@ -1471,7 +1471,10 @@ export default function ChatView({ threadId }: ChatViewProps) {
     (debouncerState) => ({ isPending: debouncerState.isPending }),
   );
   const effectivePathQuery = pathTriggerQuery.length > 0 ? debouncedPathQuery : "";
-  const gitStatusQuery = useQuery(gitStatusQueryOptions(gitCwd));
+  const gitStatusQuery = useQuery({
+    ...gitStatusQueryOptions(gitCwd),
+    select: selectChatGitStatus,
+  });
   const keybindings = useServerKeybindings();
   const availableEditors = useServerAvailableEditors();
   const modelOptionsByProvider = useMemo(

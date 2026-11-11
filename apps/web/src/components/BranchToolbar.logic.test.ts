@@ -1,4 +1,6 @@
 import type { GitBranch } from "@piedpiper/contracts";
+import { isWorktreeChangeBlocked } from "./BranchToolbar.logic";
+
 import { describe, expect, it } from "vitest";
 import {
   branchMismatchKey,
@@ -616,5 +618,38 @@ describe("isContextMenuPress", () => {
 
   it("leaves a plain left press to the picker", () => {
     expect(isContextMenuPress({ button: 0, ctrlKey: false }, "MacIntel")).toBe(false);
+  });
+});
+
+describe("isWorktreeChangeBlocked", () => {
+  it("keeps active turns in their workspace while permitting branch metadata changes there", () => {
+    expect(
+      isWorktreeChangeBlocked({
+        isRunning: true,
+        currentWorktreePath: "/a",
+        nextWorktreePath: "/b",
+      }),
+    ).toBe(true);
+    expect(
+      isWorktreeChangeBlocked({
+        isRunning: true,
+        currentWorktreePath: "/a",
+        nextWorktreePath: "/a",
+      }),
+    ).toBe(false);
+    expect(
+      isWorktreeChangeBlocked({
+        isRunning: true,
+        currentWorktreePath: null,
+        nextWorktreePath: "/b",
+      }),
+    ).toBe(true);
+    expect(
+      isWorktreeChangeBlocked({
+        isRunning: false,
+        currentWorktreePath: "/a",
+        nextWorktreePath: "/b",
+      }),
+    ).toBe(false);
   });
 });

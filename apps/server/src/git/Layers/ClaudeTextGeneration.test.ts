@@ -493,6 +493,24 @@ it.layer(ClaudeTextGenerationTestLayer)("ClaudeTextGenerationLive", (it) => {
     ),
   );
 
+  it.effect("rejects a schema-key echo without replacing the thread title", () =>
+    withFakeClaudeEnv(
+      { output: JSON.stringify({ structured_output: { title: '  "TITLE"  ' } }) },
+      Effect.gen(function* () {
+        const textGeneration = yield* TextGeneration;
+        const error = yield* textGeneration
+          .generateThreadTitle({
+            cwd: process.cwd(),
+            message: "Fix login",
+            modelSelection: { provider: "claudeAgent", model: "claude-sonnet-4-6" },
+          })
+          .pipe(Effect.flip);
+        expect(error._tag).toBe("TextGenerationError");
+        expect(error.detail).toContain("placeholder title");
+      }),
+    ),
+  );
+
   it.effect("passes linked context into the title prompt", () =>
     withFakeClaudeEnv(
       {

@@ -3977,6 +3977,15 @@ const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     };
 
     const updatedAt = yield* nowIso;
+    // Settings and provider control calls above can outlive the query. Claim the turn only
+    // while this context is still registered, before yielding to any further work.
+    if (context.stopped || sessions.get(input.threadId) !== context) {
+      return yield* new ProviderAdapterRequestError({
+        provider: PROVIDER,
+        method: "turn/start",
+        detail: "Claude provider query ended before the turn could start.",
+      });
+    }
     context.turnState = turnState;
     context.interruptAckTimedOut = false;
     context.session = {
@@ -4022,7 +4031,14 @@ const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           message,
         }).pipe(Effect.mapError((cause) => toRequestError(input.threadId, "turn/start", cause)));
         if (queued) reservation.commit();
-        else reservation.rollback();
+        else {
+          reservation.rollback();
+          return yield* new ProviderAdapterRequestError({
+            provider: PROVIDER,
+            method: "turn/start",
+            detail: "Claude provider query ended before it accepted the message.",
+          });
+        }
       }),
     );
 

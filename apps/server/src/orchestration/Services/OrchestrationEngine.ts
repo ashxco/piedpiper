@@ -10,7 +10,14 @@
  *
  * @module OrchestrationEngineService
  */
-import type { OrchestrationCommand, OrchestrationEvent } from "@piedpiper/contracts";
+import type {
+  OrchestrationCommand,
+  OrchestrationEvent,
+  ProviderRuntimeEvent,
+  OrchestrationV2Run,
+  ThreadId,
+  TurnId,
+} from "@piedpiper/contracts";
 import { ServiceMap } from "effect";
 import type { Effect, PubSub, Scope, Stream } from "effect";
 
@@ -22,6 +29,18 @@ import type { OrchestrationEventStoreError } from "../../persistence/Errors.ts";
  * OrchestrationEngineShape - Service API for orchestration command and event flow.
  */
 export interface OrchestrationEngineShape {
+  readonly reconcileRuntime?: (
+    liveThreadIds: ReadonlySet<ThreadId>,
+  ) => Effect.Effect<void, OrchestrationDispatchError>;
+  readonly getRunForTurn?: (
+    threadId: ThreadId,
+    turnId: TurnId,
+  ) => Effect.Effect<OrchestrationV2Run | null, OrchestrationDispatchError>;
+
+  /** Native lifecycle decisions are committed in the same serial lane as application commands. */
+  readonly ingestProviderEvent?: (
+    event: ProviderRuntimeEvent,
+  ) => Effect.Effect<{ readonly acceptLifecycle: boolean }, OrchestrationDispatchError>;
   /**
    * Read the current in-memory orchestration read model.
    *

@@ -25,6 +25,7 @@ import {
   SynchronizedRef,
 } from "effect";
 
+import packageJson from "../../../package.json" with { type: "json" };
 import { ServerConfig } from "../../config";
 import {
   increment,
@@ -488,8 +489,16 @@ export function createTerminalSpawnEnv(
   for (const [key, value] of Object.entries(baseEnv)) {
     if (value === undefined) continue;
     if (shouldExcludeTerminalEnvKey(key)) continue;
+    if (
+      platform === "win32" &&
+      ["TERM_PROGRAM", "TERM_PROGRAM_VERSION"].includes(key.toUpperCase())
+    )
+      continue;
     spawnEnv[key] = value;
   }
+  // Shells inherit the integrated terminal's identity, including when launched from another terminal.
+  spawnEnv.TERM_PROGRAM = "piedpiper";
+  spawnEnv.TERM_PROGRAM_VERSION = packageJson.version;
   if (runtimeEnv) {
     for (const [key, value] of Object.entries(runtimeEnv)) {
       if (platform === "win32") {

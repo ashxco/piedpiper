@@ -28,7 +28,7 @@ import {
   normalizeCliError,
   sanitizeCommitSubject,
   sanitizePrTitle,
-  sanitizeThreadTitle,
+  generatedThreadTitle,
   toJsonSchemaObject,
 } from "../Utils.ts";
 import {
@@ -665,7 +665,7 @@ const makeCodexTextGeneration = Effect.gen(function* () {
     });
 
     return {
-      title: sanitizeThreadTitle(generated.title),
+      title: yield* generatedThreadTitle(generated.title),
     } satisfies ThreadTitleGenerationResult;
   });
 

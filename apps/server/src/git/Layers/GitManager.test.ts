@@ -1479,6 +1479,33 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
     }),
   );
 
+  it.effect.each(["release/base", "origin/release/base", "refs/remotes/origin/release/base"])(
+    "status does not show the PR of worktree base %s",
+    (base) =>
+      Effect.gen(function* () {
+        const repoDir = yield* makeTempDir("piedpiper-git-manager-");
+        yield* initRepo(repoDir);
+        yield* runGit(repoDir, ["remote", "add", "origin", yield* createBareRemote()]);
+        yield* runGit(repoDir, ["checkout", "-b", "release/base"]);
+        yield* runGit(repoDir, ["push", "-u", "origin", "release/base"]);
+        yield* runGit(repoDir, [
+          "checkout",
+          "--track",
+          "-b",
+          "feature/work",
+          "origin/release/base",
+        ]);
+        yield* runGit(repoDir, ["config", "branch.feature/work.gh-merge-base", base]);
+        const { manager, ghCalls } = yield* makeManager({
+          ghScenario: {
+            prListByHeadSelector: { "release/base": lastKnownPrJson(450, "release/base") },
+          },
+        });
+        expect((yield* manager.status({ cwd: repoDir })).pr).toBeNull();
+        expect(ghCalls.some((call) => call.startsWith("pr list "))).toBe(false);
+      }),
+  );
+
   it.effect("status finds the PR of a stacked branch once it is pushed under its own name", () =>
     Effect.gen(function* () {
       const repoDir = yield* makeTempDir("piedpiper-git-manager-");

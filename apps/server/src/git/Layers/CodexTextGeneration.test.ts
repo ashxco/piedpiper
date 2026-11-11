@@ -494,6 +494,24 @@ it.layer(CodexTextGenerationTestLayer)("CodexTextGenerationLive", (it) => {
     ),
   );
 
+  it.effect("rejects a schema-key echo without replacing the thread title", () =>
+    withFakeCodexEnv(
+      { output: JSON.stringify({ title: '  "TITLE"  ' }) },
+      Effect.gen(function* () {
+        const textGeneration = yield* TextGeneration;
+        const error = yield* textGeneration
+          .generateThreadTitle({
+            cwd: process.cwd(),
+            message: "Fix login",
+            modelSelection: DEFAULT_TEST_MODEL_SELECTION,
+          })
+          .pipe(Effect.flip);
+        expect(error._tag).toBe("TextGenerationError");
+        expect(error.detail).toContain("placeholder title");
+      }),
+    ),
+  );
+
   it.effect("passes linked context into the title prompt", () =>
     withFakeCodexEnv(
       {

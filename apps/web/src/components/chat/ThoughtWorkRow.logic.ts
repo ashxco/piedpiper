@@ -33,7 +33,7 @@ const MARKDOWN_NOISE: ReadonlyArray<readonly [RegExp, string]> = [
 
 /** The block as one line of plain text, for the collapsed row. */
 export function thoughtPreviewLine(text: string): string {
-  let preview = text.replace(/\n{3,}/g, "\n\n").slice(0, PREVIEW_INPUT_MAX_CHARS);
+  let preview = text.slice(0, PREVIEW_INPUT_MAX_CHARS).replace(/\n{3,}/g, "\n\n");
   for (const [pattern, replacement] of MARKDOWN_NOISE) {
     preview = preview.replace(pattern, replacement);
   }

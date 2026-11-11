@@ -42,7 +42,7 @@ describe("thoughtPreviewLine", () => {
 
   it("stays fast on long runs of blank lines", () => {
     const startedAt = performance.now();
-    expect(thoughtPreviewLine(`start${"\n".repeat(16_000)}end`)).toBe("start end");
+    expect(thoughtPreviewLine(`start${"\n".repeat(16_000)}end`)).toBe("start");
     expect(performance.now() - startedAt).toBeLessThan(1_000);
   });
 });

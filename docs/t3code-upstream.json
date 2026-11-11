@@ -1,0 +1,537 @@
+{
+  "schemaVersion": 1,
+  "repository": "https://github.com/pingdotgg/t3code",
+  "branch": "main",
+  "reviewedThrough": {
+    "sha": "7e565c510d6dfaef2e1fd97bf9d89a97ce9cece7",
+    "committedAt": "2026-11-11T17:35:03Z",
+    "reviewedAt": "2026-11-11T17:53:28Z"
+  },
+  "reviews": [
+    {
+      "fromExclusive": "46afd69a8b6dd4149747fd04d86576af009f7eec",
+      "toInclusive": "7e565c510d6dfaef2e1fd97bf9d89a97ce9cece7",
+      "startedAt": "2026-11-11T17:44:38Z",
+      "status": "completed",
+      "commits": [
+        {
+          "sha": "5bb5d533122dcc0434b630ccb8d53c9c3682286c",
+          "subject": "fix(web): full-screen HTML pages fit their content and zoom by reflowing (#22349)",
+          "status": "deferred",
+          "reason": "Full-screen HTML rendering uses a different local preview implementation and needs viewport/zoom coverage."
+        },
+        {
+          "sha": "1bdf470328bceb4cf41c734a91fcc8a443880aa0",
+          "subject": "fix(web): project actions auto-open Preview in web clients (#34048)",
+          "status": "deferred",
+          "reason": "Auto-opening previews from project scripts changes the local terminal workflow. Deferred for a dedicated UX decision."
+        },
+        {
+          "sha": "24e77473ecf41bc1f7142529c7911c1c1aae1d76",
+          "subject": "fix(server): a follow-up delegated task waits for a run its child queued on its own thread (#32504)",
+          "status": "not_applicable",
+          "reason": "External-agent delegated completion and queued-child workflow are absent."
+        },
+        {
+          "sha": "25631c3c838daf468005e825a034bd75bbb42372",
+          "subject": "fix(server): new worktrees refresh their index once, so captures and status stop re-hashing every file (#21341)",
+          "status": "adopted",
+          "reason": "Refresh newly checked-out worktree indexes before handing them to agents and setup scripts.",
+          "localFiles": [
+            "apps/server/src/git/Layers/GitCore.ts",
+            "apps/server/src/git/Layers/GitCore.test.ts"
+          ],
+          "verification": {
+            "status": "passed",
+            "tests": ["apps/server/src/git/Layers/GitCore.test.ts"]
+          }
+        },
+        {
+          "sha": "e2a781477afd2aea1741f720afa9067294e7a1b7",
+          "subject": "fix(usage): Grok and Cursor usage limits show pace and the even-spend line (#21897)",
+          "status": "not_applicable",
+          "reason": "Grok/Cursor usage providers are absent."
+        },
+        {
+          "sha": "996b43f01b2bfe3720e2a974940ed963ff144f25",
+          "subject": "fix(web): retain diff selection across navigation (#22347)",
+          "status": "deferred",
+          "reason": "Diff selection persistence spans navigation and the local diff store. Track with the comparison-label change."
+        },
+        {
+          "sha": "0d36f2b48e88676d27ebef8c380ec64f3e8e1c37",
+          "subject": "fix(mobile): subscription widget no longer expires on a window that already reset (#22993)",
+          "status": "not_applicable",
+          "reason": "Native mobile subscription widgets are absent."
+        },
+        {
+          "sha": "b5256ad09c0553347a6ddfd2d30de9b9c12c79d5",
+          "subject": "fix(opencode): verify CLI updates when loopback server is still running (#22839)",
+          "status": "not_applicable",
+          "reason": "OpenCode maintenance and loopback server are absent."
+        },
+        {
+          "sha": "729f6757d91d9c45614150da297ea7d919bbe81d",
+          "subject": "fix(usage): Claude subagent output is no longer undercounted (#20276)",
+          "status": "not_applicable",
+          "reason": "Historical per-subagent usage aggregation is absent; local providers expose live usage limits."
+        },
+        {
+          "sha": "d0d0608b6be8c50cdc38b5045de76c5d0b9407cb",
+          "subject": "fix(server): a remote update points the service unit at the runtime it committed (#19652)",
+          "status": "not_applicable",
+          "reason": "Remote system-service update installer is absent."
+        },
+        {
+          "sha": "8d236998d074799a6e88a495ba3112e87d6ab696",
+          "subject": "fix(server): a limited provider's queue stays held after another provider's turn succeeds (#22425)",
+          "status": "not_applicable",
+          "reason": "Upstream multi-provider held-run queue is absent."
+        },
+        {
+          "sha": "9ef52de2930782e413ca9d2b5fef7500496d7123",
+          "subject": "fix(shared): keep spreadsheet shorthand as inline code (#23203)",
+          "status": "deferred",
+          "reason": "Spreadsheet shorthand handling requires a local markdown-link parser regression before porting."
+        },
+        {
+          "sha": "25f4c9d44e98ca3a4b0e51cfecc1db122cc4d87b",
+          "subject": "fix(web): offer retry while an environment reconnects (#23194)",
+          "status": "not_applicable",
+          "reason": "Remote-environment reconnection workflow is absent."
+        },
+        {
+          "sha": "c9dfc404ccde9a4c8be901b287026dd19e4ed19a",
+          "subject": "fix(server): custom Codex providers no longer report native quota (#18622)",
+          "status": "not_applicable",
+          "reason": "Configurable custom Codex provider instances are absent."
+        },
+        {
+          "sha": "e93f6ea36178f18b4cd38a9ec4939151c086f440",
+          "subject": "fix(desktop): Cmd+F now searches the page in the integrated browser (#22960)",
+          "status": "deferred",
+          "reason": "Integrated-browser find is a separate desktop capability requiring Electron guest-view lifecycle and shortcut work."
+        },
+        {
+          "sha": "f6433dba45ae0022f17513e2c0cfc76a632eb835",
+          "subject": "fix(desktop): an SSH password prompt that ended leaves the dialog instead of stacking (#34192)",
+          "status": "not_applicable",
+          "reason": "SSH authentication dialogs are absent."
+        },
+        {
+          "sha": "2c74ea6915e4f8013992816697c4b27905e88e7e",
+          "subject": "fix(web): render Claude insight blocks as a callout (#22239)",
+          "status": "deferred",
+          "reason": "Insight blocks require a markdown presentation decision and matching text-search handling."
+        },
+        {
+          "sha": "ba32aabf62e6d33b55656bf8b836d407303a70fe",
+          "subject": "fix(scheduler): show short server timezone on fixed-time labels (#23111)",
+          "status": "not_applicable",
+          "reason": "Scheduled-task settings and native mobile scheduler UI are absent."
+        },
+        {
+          "sha": "43821388a9af0bdd2e41c36af31cbc859fba5a71",
+          "subject": "fix(web): focus the primary action when confirmation dialogs open (#18187)",
+          "status": "deferred",
+          "reason": "Confirmation focus policy affects multiple local dialogs. Deferred for keyboard and accessible-focus verification."
+        },
+        {
+          "sha": "49bab9936e7ea335c31508fa5b2b5ca1a9e1ccc3",
+          "subject": "fix(web): Changes row matches the diff comparison (#19553)",
+          "status": "deferred",
+          "reason": "The local diff toolbar and comparison store differ. Review the displayed comparison together with selection restoration."
+        },
+        {
+          "sha": "75c7fb28af1d80d0941fa276d5d8f67c2f85c379",
+          "subject": "fix(server): imported ACP sessions show their native history (#22155)",
+          "status": "not_applicable",
+          "reason": "ACP registry session importing is absent."
+        },
+        {
+          "sha": "c266631bde2a77e4c5bb52f0e56a115af205889f",
+          "subject": "fix(preview): always return evaluated results by value (#22948)",
+          "status": "not_applicable",
+          "reason": "Server-side preview evaluator is absent."
+        },
+        {
+          "sha": "afb4f91a7d3ec7707293a07d54e300b9639f2b5e",
+          "subject": "fix(provider-core): a model reply of \"title\" no longer replaces the thread title (#25743)",
+          "status": "adopted",
+          "reason": "Reject the generated placeholder title through one helper shared by Claude and Codex.",
+          "localFiles": [
+            "apps/server/src/git/Utils.ts",
+            "apps/server/src/git/Layers/ClaudeTextGeneration.ts",
+            "apps/server/src/git/Layers/CodexTextGeneration.ts"
+          ],
+          "verification": {
+            "status": "passed",
+            "tests": [
+              "apps/server/src/git/Layers/ClaudeTextGeneration.test.ts",
+              "apps/server/src/git/Layers/CodexTextGeneration.test.ts"
+            ]
+          }
+        },
+        {
+          "sha": "52d621a6f10f5a80ec433e3f3515eafbeabac74b",
+          "subject": "fix(desktop,web): Open in runs locally for a background service sharing the desktop's T3 home (#21661)",
+          "status": "not_applicable",
+          "reason": "Remote background-service routing from a shared T3 data home is absent."
+        },
+        {
+          "sha": "d835e430dbc2863fb5bd9f2c76456e4773b0e0ef",
+          "subject": "fix(web): question answers submit while normal sends are blocked (#22874)",
+          "status": "deferred",
+          "reason": "Pending-question submission uses local send handlers. Deferred for an end-to-end blocked-send answer regression."
+        },
+        {
+          "sha": "fd9b2c3eaabd72e852e068c9d41c467e07c11ee1",
+          "subject": "fix(server): cancelling a background-only delegated task reports it interrupted (#21676)",
+          "status": "not_applicable",
+          "reason": "External-agent delegated-task orchestration service is absent."
+        },
+        {
+          "sha": "54a5c51a58a9b3f7cd123eab967ec87922198113",
+          "subject": "fix(web): fall back to a readable server for shared repositories (#21530)",
+          "status": "not_applicable",
+          "reason": "Multi-server shared-repository PR management is absent."
+        },
+        {
+          "sha": "2828f28145e1611e7f50274e8049e04e8fa0b7f5",
+          "subject": "fix(web): composer follows an optionless thread instead of the settings default (#16546)",
+          "status": "deferred",
+          "reason": "Optionless-thread fallback needs a targeted audit of the local composer draft resolver."
+        },
+        {
+          "sha": "fcddd737e2923f695d6b37b7577c7e653bcb49c0",
+          "subject": "fix(web): don't save retention age until committed (#22208)",
+          "status": "not_applicable",
+          "reason": "Upstream storage-retention settings UI is absent."
+        },
+        {
+          "sha": "faa8ad681861430740c5adfc225540eaf3e46272",
+          "subject": "fix(server): one dropped probe no longer lists a live linked peer as unreachable (#34208)",
+          "status": "not_applicable",
+          "reason": "Linked peer discovery service is absent."
+        },
+        {
+          "sha": "ab9df1d6ff7023412c276e1988a46296067804c5",
+          "subject": "chore(release): prepare v0.1.9",
+          "status": "not_applicable",
+          "reason": "Upstream release-version bump; local version remains independently managed."
+        },
+        {
+          "sha": "36f4e07e037083cff4eb6e497fbae37e542f29a8",
+          "subject": "fix(server): preview automation reports ambiguous selectors instead of calling them invalid (#34205)",
+          "status": "not_applicable",
+          "reason": "Server-side preview automation API is absent."
+        },
+        {
+          "sha": "1530bec29af48c73b7ab1a5bb19d68945ddd5ef5",
+          "subject": "fix(opencode): a context overflow that OpenCode compacts no longer fails the turn (#26743)",
+          "status": "not_applicable",
+          "reason": "OpenCode provider is absent."
+        },
+        {
+          "sha": "691b9709b0d73dedd714d38fca8c2ea803595298",
+          "subject": "fix(web): Ctrl + \"+\" zooms on keyboard layouts with a dedicated plus key (#26408)",
+          "status": "deferred",
+          "reason": "Dedicated-plus-key zoom handling spans keyboard matching and embedded content. Deferred for keyboard-layout coverage."
+        },
+        {
+          "sha": "ea5f85e7cc74aa7d5467afa2e7b05706db9d2332",
+          "subject": "fix(ci): release version bump push retries when main moves (#34326)",
+          "status": "not_applicable",
+          "reason": "Upstream release version-push workflow differs from this repository's release workflow."
+        },
+        {
+          "sha": "5da53f87d9feba9717bca516215aa3dedd0a694a",
+          "subject": "fix(server): CLI commands no longer migrate the database of a running server (#26763)",
+          "status": "not_applicable",
+          "reason": "Upstream database-reading administrative CLI commands are absent; local startup already owns the state directory before serving."
+        },
+        {
+          "sha": "d56b82c7084cc4b5e5015c2f9ff1a5279bda74b7",
+          "subject": "fix(web): keep saved default model when changing effort (#22193)",
+          "status": "deferred",
+          "reason": "Model defaults and effort options use a different local settings/composer flow. Needs local behavior coverage before porting."
+        },
+        {
+          "sha": "6700cf6f894b34cc76bf93ea3bdd33f0573c6855",
+          "subject": "fix(web): reveal expanded work rows hidden behind the composer (#21968)",
+          "status": "deferred",
+          "reason": "The local timeline uses separate scrolling and virtualization. Deferred for a focused row-expansion viewport regression."
+        },
+        {
+          "sha": "b3f5d52701430c8458ee4893c6d523bc9d59e85b",
+          "subject": "fix(composer): steer instead of queueing during automatic compaction (#24138)",
+          "status": "deferred",
+          "reason": "Automatic-compaction steering depends on upstream V2 queue dispatch capabilities that differ from the local command reactor."
+        },
+        {
+          "sha": "f3da8ff63b734917b6a9875b24ef1197707de6ec",
+          "subject": "feat(gitlab): resolve overview threads from Summary and Timeline (#30575)",
+          "status": "not_applicable",
+          "reason": "GitLab source-control provider and overview discussion UI are absent."
+        },
+        {
+          "sha": "27188274e7513babfa5ee1112a5d3032ff299584",
+          "subject": "fix(web): pull request search keeps partial-word matches after GitHub answers (#26992)",
+          "status": "not_applicable",
+          "reason": "Upstream pull-request list/search page is absent."
+        },
+        {
+          "sha": "835e72683ba6d7eb5bac3fef7db0990438ae1f37",
+          "subject": "fix(server): Claude subagents no longer show the parent's effort (#17042)",
+          "status": "deferred",
+          "reason": "Subagent model/effort presentation uses the local Claude event adapter. Review local event ownership before applying upstream adapter fields."
+        },
+        {
+          "sha": "d806251188fed764490359bd22bd2d0111a8681f",
+          "subject": "fix(server): runs cancelled by a server restart say why in the thread (#27192)",
+          "status": "already_present",
+          "reason": "Startup recovery already writes the orphaned-session reason into the visible thread session and completes interrupted messages.",
+          "localFiles": ["apps/server/src/serverRuntimeStartup.ts"]
+        },
+        {
+          "sha": "a74ee4cc7c0ee9729f58dfff6cc2a118692cf8ea",
+          "subject": "fix(client-runtime): server updates stop waiting 32 minutes when the host returns without this update's outcome (#27275)",
+          "status": "not_applicable",
+          "reason": "Linked-host update protocol is absent."
+        },
+        {
+          "sha": "cbc68c9dc1de5d13fadc204188a431a61e157da4",
+          "subject": "fix(web): Stop shows a pending state and repeat clicks no longer resume (#20809)",
+          "status": "already_present",
+          "reason": "Stop already retains a pending control, suppresses repeated clicks, and offers force stop for unresponsive runs.",
+          "localFiles": ["apps/web/src/components/chat/ComposerPrimaryActions.tsx"]
+        },
+        {
+          "sha": "e0379fbf5c48737210a98fd5e542eaf1c5246089",
+          "subject": "fix(web): collapsed reasoning previews no longer process the whole block (#23001)",
+          "status": "adopted",
+          "reason": "Bound thought-preview source text before newline normalization and markdown flattening.",
+          "localFiles": [
+            "apps/web/src/components/chat/ThoughtWorkRow.logic.ts",
+            "apps/web/src/components/chat/ThoughtWorkRow.test.tsx"
+          ],
+          "verification": {
+            "status": "passed",
+            "tests": ["apps/web/src/components/chat/ThoughtWorkRow.test.tsx"]
+          }
+        },
+        {
+          "sha": "52e878829cdd5c3a2c548466c597ad91b1a86b2e",
+          "subject": "fix(server): storage cleanup skips stale worktree paths under a regular file (#26594)",
+          "status": "not_applicable",
+          "reason": "Automatic storage-cleanup worktree inspector is absent."
+        },
+        {
+          "sha": "dab06c0be19b9d6e109f5538c6ddc92f7f15fb6b",
+          "subject": "fix(terminal): use a byte budget for Ghostty scrollback (#8766)",
+          "status": "already_present",
+          "reason": "The local xterm terminal already uses bounded byte and line history.",
+          "localFiles": ["apps/server/src/terminal/Layers/BoundedTerminalHistory.ts"]
+        },
+        {
+          "sha": "bc8583bc6409e608557c33d42e02b2d1f1e2072f",
+          "subject": "fix(server): storage cleanup keeps worktrees whose file listing exceeds the inspection limit (#26593)",
+          "status": "not_applicable",
+          "reason": "Automatic storage-cleanup worktree inspector is absent."
+        },
+        {
+          "sha": "a577e9404ebcaa92011c9053ba4a7ebed2a944a0",
+          "subject": "fix(server): delete temporary ACP health probe sessions (#25397)",
+          "status": "not_applicable",
+          "reason": "ACP registry health-probe sessions are absent."
+        },
+        {
+          "sha": "ad0b2a9d2f0e4ab6384c9ce601e7f2e755ab5117",
+          "subject": "perf(client): streamed text no longer republishes thread queue and checkpoints (#27425)",
+          "status": "already_present",
+          "reason": "Streaming reducers already retain unchanged latest-turn objects and checkpoint summary references.",
+          "localFiles": ["apps/web/src/lib/storeUpdateHelpers.ts"]
+        },
+        {
+          "sha": "8f4166b28c530fea77685d82423033c7309e391b",
+          "subject": "fix(web): convert composer list markers completed later (#22997)",
+          "status": "deferred",
+          "reason": "The composer editor has diverged. Deferred until its late-marker transformation can be tested against the local editor."
+        },
+        {
+          "sha": "49013438a9b316d68874ed22cb4fea08d492bf29",
+          "subject": "test: remove tests that repeat another case or restate the source (#34170)",
+          "status": "not_applicable",
+          "reason": "Upstream test-pruning sweep does not justify deleting this fork's divergent regression coverage."
+        },
+        {
+          "sha": "0af2d21647416e3092347d4be82af6cfa6fa6b2d",
+          "subject": "fix(server): drop stale queued pull-request watch wakes (#21239)",
+          "status": "not_applicable",
+          "reason": "Upstream pull-request watch reactor is absent."
+        },
+        {
+          "sha": "d50a6fdc30a3e789bd62c39471c29510768429be",
+          "subject": "fix(web): preview recordings stay decodable after a viewport resize (#10495)",
+          "status": "not_applicable",
+          "reason": "Preview video recording and compositor are absent."
+        },
+        {
+          "sha": "896e64f82da835533f797468150be0624d129458",
+          "subject": "fix(server): only offer claude update for native Claude installs (#14170)",
+          "status": "deferred",
+          "reason": "Native-install detection should be reviewed against this fork's Claude executable resolver and update flow."
+        },
+        {
+          "sha": "d2c25950b4d9183ea342d5d5fc14c326b9e0172a",
+          "subject": "fix(server): tell outside agents which MCP tools need a thread and that t3_thread_list takes allProjects (#26525)",
+          "status": "not_applicable",
+          "reason": "Upstream external-agent orchestration MCP service is absent."
+        },
+        {
+          "sha": "fb7e558943215ba2649c88a7ba62b19e0aa90acd",
+          "subject": "test(web): theme search test no longer flakes on slow runners (#34417)",
+          "status": "not_applicable",
+          "reason": "Upstream-only theme-search browser test adjustment."
+        },
+        {
+          "sha": "afa617b4655361ccdee49a6bfe21696188f0d5ce",
+          "subject": "fix(web): branch picker no longer interrupts a running turn (#15255)",
+          "status": "adopted",
+          "reason": "Prevent worktree changes from interrupting a running turn, including a fresh store check before applying the selection.",
+          "localFiles": [
+            "apps/web/src/components/BranchToolbar.tsx",
+            "apps/web/src/components/BranchToolbarBranchSelector.tsx",
+            "apps/web/src/components/BranchToolbar.logic.ts"
+          ],
+          "verification": {
+            "status": "passed",
+            "tests": [
+              "apps/web/src/components/BranchToolbar.logic.test.ts",
+              "apps/web/src/components/BranchToolbarBranchSelector.browser.tsx",
+              "apps/web/src/components/BranchToolbar.browser.tsx"
+            ]
+          }
+        },
+        {
+          "sha": "a68bd772a04ddac6c9aff26c2cd722fbb11d09bc",
+          "subject": "fix(grok): apply the selected reasoning effort to ACP sessions (#19573)",
+          "status": "not_applicable",
+          "reason": "Grok ACP provider is absent from this fork."
+        },
+        {
+          "sha": "429c0ac2d369fe27e21d697813950756ba260371",
+          "subject": "fix(server): timed-out git commands that ignore SIGTERM no longer stall other git work (#26601)",
+          "status": "already_present",
+          "reason": "GitCore already escalates timed-out processes from SIGTERM to SIGKILL using a scoped finalizer.",
+          "localFiles": ["apps/server/src/git/Layers/GitCore.ts"]
+        },
+        {
+          "sha": "1d152c3df4c54419c0e85070d8f89bc302f36658",
+          "subject": "fix(desktop): Group Linux windows under the installed launcher (#10895)",
+          "status": "deferred",
+          "reason": "Linux launcher grouping needs platform-specific packaged-build validation."
+        },
+        {
+          "sha": "479ee74135a9dce9e59ac0c01a9306604450fe28",
+          "subject": "fix(web): a thread started from a pull request links it (#15848)",
+          "status": "deferred",
+          "reason": "Explicit source-PR association requires a thread schema and creation-flow change beyond the selected reliability fixes."
+        },
+        {
+          "sha": "5534467f2bd9bd0c946931d3dc43cad0e47c08ac",
+          "subject": "fix(mobile): browser address bar and Take control no longer hide under the header (#34258)",
+          "status": "not_applicable",
+          "reason": "Native mobile browser UI is absent from this fork."
+        },
+        {
+          "sha": "0629735d37ca8ce876f4e7b0fcbc5afa8ecfc230",
+          "subject": "fix(web): thread controls hide while the mobile sidebar is open (#27490)",
+          "status": "deferred",
+          "reason": "The mobile sidebar and thread-control layout differ. A focused narrow-layout review is needed before changing control visibility."
+        },
+        {
+          "sha": "4c68fdcaa9983595b4fe1556842a371b54a6a57b",
+          "subject": "fix(web): the terminal cursor no longer leaves faint lines when it blinks off (#21641)",
+          "status": "not_applicable",
+          "reason": "Uses upstream Ghostty renderer; this fork uses xterm."
+        },
+        {
+          "sha": "3ed5fb29bd2ffdb31cf146f016300e26ca237f99",
+          "subject": "fix(shared): Claude plugin skills no longer show their name twice (#26311)",
+          "status": "deferred",
+          "reason": "The fork has a different slash-command and skill-label pipeline. The upstream helper has no direct local counterpart."
+        },
+        {
+          "sha": "a625e0b531e30ca1f9bd78c7123c2f2054f24982",
+          "subject": "fix(terminal): identify T3 Code terminal sessions (#9954)",
+          "status": "adopted",
+          "reason": "Set Pied Piper's terminal identity with case-insensitive Windows handling and explicit override support.",
+          "localFiles": [
+            "apps/server/src/terminal/Layers/Manager.ts",
+            "apps/server/src/terminal/Layers/Manager.test.ts"
+          ],
+          "verification": {
+            "status": "passed",
+            "tests": ["apps/server/src/terminal/Layers/Manager.test.ts"]
+          }
+        },
+        {
+          "sha": "7e565c510d6dfaef2e1fd97bf9d89a97ce9cece7",
+          "subject": "fix(git): stop new threads inheriting historical branch PRs (#34218)",
+          "status": "deferred",
+          "reason": "Historical PR filtering depends on explicit per-thread PR associations, which this fork currently derives from branch status. Track as a separate association change."
+        }
+      ],
+      "comparison": {
+        "status": "ahead",
+        "commitCount": 69
+      },
+      "localOptimizations": [
+        {
+          "description": "Avoid serializing unchanged V2 event snapshots twice.",
+          "localFiles": ["apps/server/src/orchestration-v2/ProjectionStore.ts"]
+        },
+        {
+          "description": "Use selective V2 active-run and ordinal indexes through migration 026.",
+          "localFiles": [
+            "apps/server/src/persistence/Migrations/026_OrchestrationV2RunIndexes.ts",
+            "apps/server/src/orchestration-v2/ProjectionStore.ts",
+            "apps/server/src/orchestration-v2/ProjectionStore.test.ts"
+          ]
+        },
+        {
+          "description": "Subscribe the branch toolbar to the metadata and runtime fields it renders.",
+          "localFiles": ["apps/web/src/components/BranchToolbar.tsx"]
+        }
+      ],
+      "completedAt": "2026-11-11T17:53:28Z",
+      "verification": {
+        "server": {
+          "files": 195,
+          "passed": 3805,
+          "skipped": 6
+        },
+        "web": {
+          "files": 253,
+          "passed": 4394
+        },
+        "branchToolbarBrowser": {
+          "files": 2,
+          "passed": 19
+        },
+        "typecheck": "passed across 7 workspaces",
+        "format": "passed",
+        "lint": {
+          "errors": 0,
+          "existingWarnings": 24
+        }
+      }
+    }
+  ],
+  "baselineReview": {
+    "sha": "46afd69a8b6dd4149747fd04d86576af009f7eec",
+    "committedAt": "2026-11-11T08:55:49Z",
+    "note": "Checkpoint from the prior seven-day review. Selected fixes and the V2 execution adaptation are already present locally."
+  }
+}

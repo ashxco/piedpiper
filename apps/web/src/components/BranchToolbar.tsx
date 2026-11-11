@@ -1,6 +1,7 @@
 import type { ThreadId } from "@piedpiper/contracts";
 import { FolderIcon, GitForkIcon } from "lucide-react";
 import { type Ref, useCallback, useImperativeHandle, useRef, useState } from "react";
+import { useShallow } from "zustand/react/shallow";
 
 import { shortcutLabelForCommand } from "../keybindings";
 import { newCommandId } from "../lib/utils";
@@ -8,9 +9,10 @@ import { readNativeApi } from "../nativeApi";
 import { useComposerDraftStore } from "../composerDraftStore";
 import { useServerKeybindings } from "../rpc/serverState";
 import { useStore } from "../store";
-import { useProjectById, useThreadById } from "../storeSelectors";
+import { useProjectById } from "../storeSelectors";
 import {
   EnvMode,
+  isWorktreeChangeBlocked,
   resolveDraftEnvModeAfterBranchChange,
   resolveEffectiveEnvMode,
 } from "./BranchToolbar.logic";
@@ -19,6 +21,7 @@ import {
   type BranchToolbarBranchSelectorHandle,
 } from "./BranchToolbarBranchSelector";
 import { useComposerMultiModelStore } from "./chat/composerMultiModelStore";
+import { toastManager } from "./ui/toast";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "./ui/select";
 
 const envModeItems = [
@@ -50,7 +53,20 @@ export default function BranchToolbar({
   onCheckoutPullRequestRequest,
   onComposerFocusRequest,
 }: BranchToolbarProps) {
-  const serverThread = useThreadById(threadId);
+  const serverThread = useStore(
+    useShallow((state) => {
+      const thread = state.threads.find((entry) => entry.id === threadId);
+      if (!thread) return undefined;
+      return {
+        id: thread.id,
+        projectId: thread.projectId,
+        branch: thread.branch,
+        worktreePath: thread.worktreePath,
+        session: thread.session,
+        latestTurn: thread.latestTurn,
+      };
+    }),
+  );
   const setThreadBranchAction = useStore((store) => store.setThreadBranch);
   const draftThread = useComposerDraftStore((store) => store.getDraftThread(threadId));
   const setDraftThreadContext = useComposerDraftStore((store) => store.setDraftThreadContext);
@@ -59,7 +75,9 @@ export default function BranchToolbar({
   const activeProject = useProjectById(activeProjectId);
   const activeThreadId = serverThread?.id ?? (draftThread ? threadId : undefined);
   const activeThreadBranch = serverThread?.branch ?? draftThread?.branch ?? null;
-  const activeWorktreePath = serverThread?.worktreePath ?? draftThread?.worktreePath ?? null;
+  const activeWorktreePath = serverThread
+    ? serverThread.worktreePath
+    : (draftThread?.worktreePath ?? null);
   const branchCwd = activeWorktreePath ?? activeProject?.cwd ?? null;
   const hasServerThread = serverThread !== undefined;
   const effectiveEnvMode = resolveEffectiveEnvMode({
@@ -94,14 +112,36 @@ export default function BranchToolbar({
     },
   }));
 
+  const blocksWorktreeChange = useCallback(
+    (nextWorktreePath: string | null) => {
+      const latest =
+        useStore.getState().threads.find((thread) => thread.id === activeThreadId) ?? serverThread;
+      return isWorktreeChangeBlocked({
+        isRunning:
+          latest?.session?.status === "running" ||
+          latest?.session?.status === "connecting" ||
+          latest?.latestTurn?.state === "running",
+        currentWorktreePath: latest ? latest.worktreePath : activeWorktreePath,
+        nextWorktreePath,
+      });
+    },
+    [activeThreadId, serverThread, activeWorktreePath],
+  );
+
   const setThreadBranch = useCallback(
     (branch: string | null, worktreePath: string | null) => {
-      if (!activeThreadId) return;
+      if (!activeThreadId) return false;
+      if (blocksWorktreeChange(worktreePath)) {
+        toastManager.add({ type: "warning", title: "Stop the current turn to switch worktrees." });
+        return false;
+      }
+      const latest =
+        useStore.getState().threads.find((thread) => thread.id === activeThreadId) ?? serverThread;
       const api = readNativeApi();
       // If the effective cwd is about to change, stop the running session so the
       // next message creates a new one with the correct cwd. A worktree switch from the toolbar
       // ends Claude background work on purpose (it bypasses the server's live-task restart guard).
-      if (serverThread?.session && worktreePath !== activeWorktreePath && api) {
+      if (latest?.session && worktreePath !== latest.worktreePath && api) {
         void api.orchestration
           .dispatchCommand({
             type: "thread.session.stop",
@@ -124,7 +164,7 @@ export default function BranchToolbar({
       }
       if (hasServerThread) {
         setThreadBranchAction(activeThreadId, branch, worktreePath);
-        return;
+        return true;
       }
       const nextDraftEnvMode = resolveDraftEnvModeAfterBranchChange({
         nextWorktreePath: worktreePath,
@@ -136,10 +176,12 @@ export default function BranchToolbar({
         worktreePath,
         envMode: nextDraftEnvMode,
       });
+      return true;
     },
     [
       activeThreadId,
-      serverThread?.session,
+      serverThread,
+      blocksWorktreeChange,
       activeWorktreePath,
       hasServerThread,
       setThreadBranchAction,
@@ -222,6 +264,7 @@ export default function BranchToolbar({
         effectiveEnvMode={forceNewWorktree ? "worktree" : effectiveEnvMode}
         envLocked={envLocked}
         onSetThreadBranch={setThreadBranch}
+        isWorktreeChangeBlocked={blocksWorktreeChange}
         {...(onCheckoutPullRequestRequest ? { onCheckoutPullRequestRequest } : {})}
         {...(onComposerFocusRequest ? { onComposerFocusRequest } : {})}
       />

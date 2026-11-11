@@ -142,6 +142,18 @@ export function sanitizeThreadTitle(raw: string): string {
   return `${sliceSurrogateSafe(normalized, 47).trimEnd()}...`;
 }
 
+/** A schema-key echo is a failed generation and must not overwrite a saved title. */
+export const generatedThreadTitle = Effect.fn("generatedThreadTitle")(function* (raw: string) {
+  const title = sanitizeThreadTitle(raw);
+  if (title.toLowerCase() === "title") {
+    return yield* new TextGenerationError({
+      operation: "generateThreadTitle",
+      detail: 'The model returned the placeholder title "title".',
+    });
+  }
+  return title;
+});
+
 /** CLI name to human-readable label, e.g. "codex" → "Codex CLI (`codex`)" */
 function cliLabel(cliName: string): string {
   const capitalized = cliName.charAt(0).toUpperCase() + cliName.slice(1);

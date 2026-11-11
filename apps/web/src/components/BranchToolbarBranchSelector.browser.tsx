@@ -67,7 +67,10 @@ function mockPendingSearches() {
   );
 }
 
-async function renderOpenSelector(effectiveEnvMode: "local" | "worktree" = "local") {
+async function renderOpenSelector(
+  effectiveEnvMode: "local" | "worktree" = "local",
+  isWorktreeChangeBlocked?: (path: string | null) => boolean,
+) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   await render(
     <QueryClientProvider client={queryClient}>
@@ -79,6 +82,7 @@ async function renderOpenSelector(effectiveEnvMode: "local" | "worktree" = "loca
         effectiveEnvMode={effectiveEnvMode}
         envLocked={false}
         onSetThreadBranch={() => undefined}
+        {...(isWorktreeChangeBlocked ? { isWorktreeChangeBlocked } : {})}
       />
     </QueryClientProvider>,
   );
@@ -468,4 +472,18 @@ describe("trigger presses and list scrolling", () => {
     }
     await vi.waitFor(() => expect(scroller.scrollTop).toBeGreaterThan(scrollTopBeforeHover));
   });
+});
+
+it("disables switching to another worktree during a running turn", async () => {
+  listBranchesSpy.mockResolvedValue(
+    branchListResult([
+      ...BRANCHES,
+      { name: "other-worktree", current: false, isDefault: false, worktreePath: "/other" },
+    ]),
+  );
+  const client = await renderOpenSelector("local", (path) => path === "/other");
+  await expect.element(page.getByRole("option", { name: "other-worktree" })).toBeDisabled();
+  await expect.element(page.getByText("Stop the current turn to switch worktrees.")).toBeVisible();
+  expect(checkoutSpy).not.toHaveBeenCalled();
+  client.clear();
 });

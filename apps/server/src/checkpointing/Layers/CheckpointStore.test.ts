@@ -438,6 +438,29 @@ describe("CheckpointStoreLive durable writes", () => {
 });
 
 it.layer(TestLayer)("CheckpointStoreLive", (it) => {
+  it.effect.each(["a.txt\r\n\r\nb.txt\r\n", "   \n"])(
+    "captures new files beside an unborn repository with ignore content %j",
+    (ignoreContent) =>
+      Effect.gen(function* () {
+        const tmp = yield* makeTmpDir();
+        yield* initRepoWithCommit(tmp);
+        const fs = yield* FileSystem.FileSystem;
+        const cwd = path.join(tmp, "sub");
+        const nested = path.join(cwd, "nested");
+        yield* fs.makeDirectory(nested, { recursive: true });
+        yield* writeTextFile(path.join(tmp, ".gitignore"), ignoreContent);
+        yield* writeTextFile(path.join(cwd, "notes.md"), "new notes\n");
+        yield* git(nested, ["init"]);
+        const checkpointStore = yield* CheckpointStore;
+        const checkpointRef = checkpointRefForThreadTurn(ThreadId.makeUnsafe("ignore-lines"), 0);
+        yield* checkpointStore.captureCheckpoint({ cwd, checkpointRef });
+        expect(yield* git(tmp, ["show", `${checkpointRef}:sub/notes.md`])).toBe("new notes");
+        expect(yield* git(tmp, ["ls-tree", "--name-only", checkpointRef, "--", "sub/nested"])).toBe(
+          "",
+        );
+      }),
+  );
+
   describe("diffCheckpoints", () => {
     it.effect("returns full oversized checkpoint diffs without truncation", () =>
       Effect.gen(function* () {

@@ -705,17 +705,26 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
       const details = { branch, upstreamRef: upstreamRef.length > 0 ? upstreamRef : null };
       return Effect.gen(function* () {
         const headContext = yield* resolveBranchHeadContext(cwd, details);
-        // A feature branch tracking origin/main (e.g. `worktree add -b feature origin/main`) has its
-        // base as upstream, not a published head; PRs for `main` are unrelated reverse merges.
-        if (
-          headContext.headBranch !== details.branch &&
-          !headContext.isCrossRepository &&
-          isDefaultBranchName(
+        // A worktree's upstream can name its base rather than its published head.
+        if (headContext.headBranch !== details.branch && !headContext.isCrossRepository) {
+          const configuredBase = yield* readConfigValueNullable(
+            cwd,
+            `branch.${branch}.gh-merge-base`,
+          );
+          const baseRefs = [
             headContext.headBranch,
-            defaultBranch.length > 0 ? defaultBranch : null,
+            `refs/heads/${headContext.headBranch}`,
+            `${headContext.remoteName}/${headContext.headBranch}`,
+            `refs/remotes/${headContext.remoteName}/${headContext.headBranch}`,
+          ];
+          if (
+            baseRefs.includes(configuredBase ?? "") ||
+            isDefaultBranchName(
+              headContext.headBranch,
+              defaultBranch.length > 0 ? defaultBranch : null,
+            )
           )
-        ) {
-          return { latest: null, headContext };
+            return { latest: null, headContext };
         }
         if (
           (details.upstreamRef === null || headContext.remoteName === null) &&

@@ -14,6 +14,8 @@ import {
   type ProviderSessionRuntimeRepositoryShape,
 } from "../Services/ProviderSessionRuntime.ts";
 
+import { persistProviderBinding } from "../../orchestration-v2/ProviderBindingStore.ts";
+
 const ProviderSessionRuntimeDbRowSchema = ProviderSessionRuntime.mapFields(
   Struct.assign({
     resumeCursor: Schema.NullOr(Schema.fromJsonString(Schema.Unknown)),
@@ -136,14 +138,19 @@ const makeProviderSessionRuntimeRepository = Effect.gen(function* () {
   });
 
   const upsert: ProviderSessionRuntimeRepositoryShape["upsert"] = (runtime) =>
-    upsertRuntimeRow(runtime).pipe(
-      Effect.mapError(
-        toPersistenceSqlOrDecodeError(
-          "ProviderSessionRuntimeRepository.upsert:query",
-          "ProviderSessionRuntimeRepository.upsert:encodeRequest",
+    sql
+      .withTransaction(
+        upsertRuntimeRow(runtime).pipe(Effect.andThen(persistProviderBinding(runtime))),
+      )
+      .pipe(
+        Effect.provideService(SqlClient.SqlClient, sql),
+        Effect.mapError(
+          toPersistenceSqlOrDecodeError(
+            "ProviderSessionRuntimeRepository.upsert:query",
+            "ProviderSessionRuntimeRepository.upsert:encodeRequest",
+          ),
         ),
-      ),
-    );
+      );
 
   const getByThreadId: ProviderSessionRuntimeRepositoryShape["getByThreadId"] = (input) =>
     getRuntimeRowByThreadId(input).pipe(

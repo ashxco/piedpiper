@@ -86,6 +86,43 @@ const hasMetricSnapshot = (
   );
 
 describe("OrchestrationEngine", () => {
+  it("reopens V2 chats without reimporting their runs or duplicating messages", async () => {
+    const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "piedpiper-v2-reopen-"));
+    const databasePath = NodePath.join(directory, "state.sqlite");
+    const threadId = ThreadId.makeUnsafe("thread-reopen");
+    let system = await createOrchestrationSystem(databasePath);
+    try {
+      await createProjectWithThreads(system, "reopen", [threadId]);
+      await system.run(
+        system.engine.dispatch(turnStartCommand("reopen-start", threadId, "reopen-message")),
+      );
+      await system.dispose();
+      system = await createOrchestrationSystem(databasePath);
+      const thread = (await system.run(system.engine.getReadModel())).threads.get(threadId);
+      expect(thread?.messages.map((message) => message.id)).toEqual(["reopen-message"]);
+      const database = new NodeSqlite.DatabaseSync(databasePath, { readOnly: true });
+      try {
+        expect(
+          database
+            .prepare(
+              "SELECT COUNT(*) AS count FROM orchestration_v2_entities WHERE entity_type = 'run.updated' AND thread_id = ?",
+            )
+            .get(threadId)?.count,
+        ).toBe(1);
+        expect(
+          database
+            .prepare("SELECT source FROM orchestration_v2_legacy_imports WHERE thread_id = ?")
+            .get(threadId)?.source,
+        ).toBe("native");
+      } finally {
+        database.close();
+      }
+    } finally {
+      await system.dispose();
+      await NodeFSP.rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("bootstraps the in-memory read model from persisted projections", async () => {
     const failOnHistoricalReplayStore: OrchestrationEventStoreShape = {
       append: () =>

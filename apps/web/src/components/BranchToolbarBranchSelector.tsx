@@ -71,7 +71,8 @@ interface BranchToolbarBranchSelectorProps {
   branchCwd: string | null;
   effectiveEnvMode: EnvMode;
   envLocked: boolean;
-  onSetThreadBranch: (branch: string | null, worktreePath: string | null) => void;
+  onSetThreadBranch: (branch: string | null, worktreePath: string | null) => boolean | void;
+  isWorktreeChangeBlocked?: (worktreePath: string | null) => boolean;
   onCheckoutPullRequestRequest?: (reference: string) => void;
   onComposerFocusRequest?: () => void;
 }
@@ -105,6 +106,7 @@ export function BranchToolbarBranchSelector({
   effectiveEnvMode,
   envLocked,
   onSetThreadBranch,
+  isWorktreeChangeBlocked,
   onCheckoutPullRequestRequest,
   onComposerFocusRequest,
 }: BranchToolbarBranchSelectorProps) {
@@ -199,6 +201,18 @@ export function BranchToolbarBranchSelector({
         ? `Showing ${branches.length} of ${totalBranchCount} branches`
         : null;
 
+  const branchSwitchBlocked = (branch: GitBranch) =>
+    !isSelectingWorktreeBase &&
+    (isWorktreeChangeBlocked?.(
+      resolveBranchSelectionTarget({
+        activeProjectCwd,
+        activeProjectCheckoutRoot: projectStatusQuery.data?.workingTree.rootPath,
+        activeWorktreePath,
+        branch,
+      }).nextWorktreePath,
+    ) ??
+      false);
+
   const runBranchAction = (action: () => Promise<void>) => {
     startBranchActionTransition(async () => {
       await action().catch(() => undefined);
@@ -226,6 +240,8 @@ export function BranchToolbarBranchSelector({
       activeWorktreePath,
       branch,
     });
+
+    if (isWorktreeChangeBlocked?.(selectionTarget.nextWorktreePath)) return;
 
     // If the branch already lives in a worktree, point the thread there.
     if (selectionTarget.reuseExistingWorktree) {
@@ -266,8 +282,8 @@ export function BranchToolbarBranchSelector({
         }
       }
 
-      setOptimisticBranch(nextBranchName);
-      onSetThreadBranch(nextBranchName, selectionTarget.nextWorktreePath);
+      const applied = onSetThreadBranch(nextBranchName, selectionTarget.nextWorktreePath);
+      setOptimisticBranch(applied === false ? canonicalActiveBranch : nextBranchName);
     });
   };
 
@@ -303,8 +319,8 @@ export function BranchToolbarBranchSelector({
         return;
       }
 
-      setOptimisticBranch(name);
-      onSetThreadBranch(name, activeWorktreePath);
+      const applied = onSetThreadBranch(name, activeWorktreePath);
+      setOptimisticBranch(applied === false ? canonicalActiveBranch : name);
       setBranchQuery("");
     });
   };
@@ -489,6 +505,7 @@ export function BranchToolbarBranchSelector({
         index={index}
         value={itemValue}
         style={style}
+        disabled={branchSwitchBlocked(branch)}
         onClick={() => selectBranch(branch)}
         onContextMenu={(event) => openBranchNameContextMenu(event, itemValue)}
       >
@@ -616,6 +633,9 @@ export function BranchToolbarBranchSelector({
             filteredBranchPickerItems.map((itemValue, index) => renderPickerItem(itemValue, index))
           )}
         </ComboboxList>
+        {branches.some(branchSwitchBlocked) ? (
+          <ComboboxStatus>Stop the current turn to switch worktrees.</ComboboxStatus>
+        ) : null}
         {branchStatusText ? <ComboboxStatus>{branchStatusText}</ComboboxStatus> : null}
       </ComboboxPopup>
     </Combobox>

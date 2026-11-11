@@ -3,6 +3,7 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { runMigrations } from "../Migrations.ts";
 import { ServerConfig } from "../../config.ts";
+import { backupBeforeV2Migration } from "../../orchestration-v2/DatabaseBackup.ts";
 
 type RuntimeSqliteLayerConfig = {
   readonly filename: string;
@@ -71,13 +72,18 @@ export const makeSqlitePersistenceLive = Effect.fn("makeSqlitePersistenceLive")(
 
   return Layer.provideMerge(
     setup,
-    makeRuntimeSqliteLayer({
-      filename: dbPath,
-      spanAttributes: {
-        "db.name": path.basename(dbPath),
-        "service.name": "piedpiper-server",
-      },
-    }),
+    Layer.provideMerge(
+      Layer.effectDiscard(
+        backupBeforeV2Migration(dbPath).pipe(Effect.provideService(FileSystem.FileSystem, fs)),
+      ),
+      makeRuntimeSqliteLayer({
+        filename: dbPath,
+        spanAttributes: {
+          "db.name": path.basename(dbPath),
+          "service.name": "piedpiper-server",
+        },
+      }),
+    ),
   );
 }, Layer.unwrap);
 

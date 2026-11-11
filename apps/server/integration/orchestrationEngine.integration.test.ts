@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import * as NodeSqlite from "node:sqlite";
 
 import {
   ApprovalRequestId,
@@ -12,6 +13,7 @@ import {
   ProviderKind,
   ThreadId,
   ModelSelection,
+  OrchestrationV2Event,
 } from "@piedpiper/contracts";
 import { assert, it } from "@effect/vitest";
 import { Effect, Option, Schema } from "effect";
@@ -248,6 +250,35 @@ it.live("runs a single turn end-to-end and persists checkpoint state in sqlite +
       assert.equal(gitRefExists(harness.workspaceDir, ref1), true);
       assert.equal(gitShowFileAtRef(harness.workspaceDir, ref0, "README.md"), "v1\n");
       assert.equal(gitShowFileAtRef(harness.workspaceDir, ref1, "README.md"), "v1\n");
+      const database = new NodeSqlite.DatabaseSync(harness.dbPath, { readOnly: true });
+      try {
+        const native = database
+          .prepare("SELECT event_json FROM orchestration_v2_entities WHERE thread_id = ?")
+          .all(THREAD_ID)
+          .map((row) =>
+            Schema.decodeUnknownSync(Schema.fromJsonString(OrchestrationV2Event))(row.event_json),
+          );
+        const runs = native.filter((event) => event.type === "run.updated");
+        assert.equal(runs.length, 1);
+        assert.equal(runs[0]?.payload.status, "completed");
+        assert.equal(runs[0]?.payload.nativeTurnRef, thread.latestTurn?.turnId);
+        assert.equal(native.filter((event) => event.type === "message.updated").length, 2);
+        assert.equal(native.filter((event) => event.type === "checkpoint.updated").length, 1);
+        const effects = database
+          .prepare(
+            "SELECT effect_type, status FROM orchestration_v2_effect_outbox WHERE thread_id = ? ORDER BY effect_type",
+          )
+          .all(THREAD_ID);
+        assert.deepEqual(
+          effects.map((row) => [row.effect_type, row.status]),
+          [
+            ["checkpoint.capture", "succeeded"],
+            ["provider-turn.start", "succeeded"],
+          ],
+        );
+      } finally {
+        database.close();
+      }
     }),
   ),
 );

@@ -123,6 +123,7 @@ const GIT_FORCE_KILL_AFTER = "1 second";
 // leaves a half-populated folder and a stale registration. Add matches the 30-minute push bound.
 const WORKTREE_ADD_TIMEOUT_MS = 30 * 60_000;
 const WORKTREE_REMOVE_TIMEOUT_MS = 5 * 60_000;
+const WORKTREE_INDEX_REFRESH_TIMEOUT_MS = 5 * 60_000;
 const DEFAULT_MAX_OUTPUT_BYTES = 1_000_000;
 // Status-family output scales with the change set; a huge one must not fail a status read or commit.
 const STATUS_MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
@@ -2899,6 +2900,43 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
     );
   });
 
+  // Our read-only git commands avoid index writes. Refresh a newly checked-out index once so
+  // files stamped in its own second stop being rehashed by every later status and checkpoint.
+  const refreshNewWorktreeIndex = Effect.fn("refreshNewWorktreeIndex")(function* (cwd: string) {
+    const indexPath = path.resolve(
+      cwd,
+      (yield* runGitStdout("GitCore.createWorktree.indexPath", cwd, [
+        "rev-parse",
+        "--git-path",
+        "index",
+      ])).trim(),
+    );
+    const readIndexSecond = fileSystem.stat(indexPath).pipe(
+      Effect.map(({ mtime }) => Option.map(mtime, (date) => Math.floor(date.getTime() / 1000))),
+      Effect.orElseSucceed(() => Option.none<number>()),
+    );
+    const refresh = runGit(
+      "GitCore.createWorktree.refreshIndex",
+      cwd,
+      ["update-index", "-q", "--refresh", "--force-write-index"],
+      { timeoutMs: WORKTREE_INDEX_REFRESH_TIMEOUT_MS },
+    );
+    const checkoutSecond = yield* readIndexSecond;
+    yield* refresh;
+    const refreshedSecond = yield* readIndexSecond;
+    if (
+      Option.isNone(checkoutSecond) ||
+      Option.isNone(refreshedSecond) ||
+      refreshedSecond.value > checkoutSecond.value
+    )
+      return;
+    const delay = (checkoutSecond.value + 1) * 1000 + 50 - (yield* Clock.currentTimeMillis);
+    // A remote filesystem's clock may differ from ours, so it cannot bound the wait.
+    if (delay >= 2_000) return;
+    if (delay > 0) yield* Effect.sleep(Duration.millis(delay));
+    yield* refresh;
+  });
+
   const createWorktree: GitCoreShape["createWorktree"] = Effect.fn("createWorktree")(
     function* (input, options) {
       for (const refName of [input.branch, input.newBranch ?? ""]) {
@@ -3012,6 +3050,15 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
       const createdPath = worktreePath;
       const requestedBranch = newBranch;
       const finishWorktree = Effect.gen(function* () {
+        // Finish before handing the worktree to scripts that may also write index.lock.
+        yield* refreshNewWorktreeIndex(createdPath).pipe(
+          Effect.catch((cause) =>
+            Effect.logWarning("new worktree index refresh failed", {
+              worktreePath: createdPath,
+              cause,
+            }),
+          ),
+        );
         if (requestedBranch && originStart) {
           // Records the base so status and push compare against it rather than a guessed default.
           yield* runConfigWrite("GitCore.createWorktree.recordMergeBase", input.cwd, [

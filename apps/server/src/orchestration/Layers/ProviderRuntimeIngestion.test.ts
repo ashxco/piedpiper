@@ -1058,7 +1058,22 @@ describe("ProviderRuntimeIngestion", () => {
       createdAt: new Date().toISOString(),
       payload: { state: "ready" },
     });
-    // With the start consumed, ready means idle again.
+    // Provider readiness can arrive before the authoritative root completion.
+    await harness.drain();
+    expect(
+      (await Effect.runPromise(harness.engine.getReadModel())).threads.get(
+        ThreadId.makeUnsafe("thread-1"),
+      )?.session?.status,
+    ).toBe("running");
+    harness.emit({
+      type: "turn.completed",
+      eventId: asEventId("evt-pending-authoritative-completion"),
+      provider: "codex",
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-pending"),
+      createdAt: new Date().toISOString(),
+      status: "completed",
+    });
     await waitForThread(
       harness.engine,
       (entry) => entry.session?.status === "ready" && entry.session?.activeTurnId === null,
@@ -1105,7 +1120,7 @@ describe("ProviderRuntimeIngestion", () => {
     expect(thread.session?.lastError).toBeNull();
   });
 
-  it("clears the active turn when the provider session becomes ready", async () => {
+  it("keeps the active turn until root completion when the provider reports ready first", async () => {
     const harness = await createHarness();
     const now = new Date().toISOString();
 
@@ -1133,6 +1148,22 @@ describe("ProviderRuntimeIngestion", () => {
       payload: {
         state: "ready",
       },
+    });
+
+    await harness.drain();
+    expect(
+      (await Effect.runPromise(harness.engine.getReadModel())).threads.get(
+        ThreadId.makeUnsafe("thread-1"),
+      )?.session?.activeTurnId,
+    ).toBe("turn-session-ready");
+    harness.emit({
+      type: "turn.completed",
+      eventId: asEventId("evt-session-ready-root-completed"),
+      provider: "claudeAgent",
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-session-ready"),
+      createdAt: new Date().toISOString(),
+      status: "completed",
     });
 
     const thread = await waitForThread(

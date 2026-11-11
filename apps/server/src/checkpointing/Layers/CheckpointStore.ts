@@ -229,7 +229,16 @@ const makeCheckpointStore = Effect.gen(function* () {
     const result = yield* git.execute({
       operation: "CheckpointStore.isWorkspaceIgnored",
       cwd,
-      args: [...WORKSPACE_GIT_HARDENED_CONFIG_ARGS, "check-ignore", "-q", "--no-index", "--", "."],
+      // A trailing slash makes blank CRLF/whitespace patterns match the directory itself.
+      // Probe the workspace from its parent without that slash.
+      args: [
+        ...WORKSPACE_GIT_HARDENED_CONFIG_ARGS,
+        "check-ignore",
+        "-q",
+        "--no-index",
+        "--",
+        `../${prefix.stdout.replace(/\n$/, "").replace(/\/$/, "").split("/").at(-1)}`,
+      ],
       allowNonZeroExit: true,
     });
     return result.code === 0;

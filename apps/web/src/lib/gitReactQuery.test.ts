@@ -10,7 +10,11 @@ vi.mock("../wsRpcClient", () => ({
 }));
 
 import type { InfiniteData } from "@tanstack/react-query";
-import type { GitCreateWorktreeProgressEvent, GitListBranchesResult } from "@piedpiper/contracts";
+import type {
+  GitCreateWorktreeProgressEvent,
+  GitListBranchesResult,
+  GitStatusResult,
+} from "@piedpiper/contracts";
 
 import { ensureNativeApi } from "../nativeApi";
 
@@ -27,6 +31,7 @@ import {
   gitRunStackedActionMutationOptions,
   invalidateGitStatusQuery,
   gitStatusQueryOptions,
+  selectChatGitStatus,
   invalidateGitQueries,
 } from "./gitReactQuery";
 
@@ -42,6 +47,31 @@ const BRANCH_SEARCH_RESULT: InfiniteData<GitListBranchesResult, number> = {
   pages: [BRANCH_QUERY_RESULT],
   pageParams: [0],
 };
+
+it("keeps the chat selection stable when only git file counts change", () => {
+  const client = new QueryClient();
+  const queryKey = ["git", "chat-selection"];
+  const initial = {
+    isRepo: true,
+    branch: "feature",
+    pr: null,
+    changedFiles: 1,
+  } as unknown as GitStatusResult;
+  client.setQueryData(queryKey, initial);
+  const observer = new QueryObserver(client, {
+    queryKey,
+    enabled: false,
+    select: selectChatGitStatus,
+  });
+  const unsubscribe = observer.subscribe(() => {});
+  const selected = observer.getCurrentResult().data;
+  client.setQueryData(queryKey, { ...initial, changedFiles: 2 });
+  expect(observer.getCurrentResult().data).toBe(selected);
+  client.setQueryData(queryKey, { ...initial, branch: "another" });
+  expect(observer.getCurrentResult().data?.branch).toBe("another");
+  unsubscribe();
+  client.clear();
+});
 
 describe("gitMutationKeys", () => {
   it("scopes stacked action keys by cwd", () => {

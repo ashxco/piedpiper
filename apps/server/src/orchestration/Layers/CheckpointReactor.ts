@@ -9,7 +9,7 @@ import {
   type OrchestrationEvent,
   type ProviderRuntimeEvent,
 } from "@piedpiper/contracts";
-import { Cause, Effect, FileSystem, Layer, Option, Path, PubSub } from "effect";
+import { Cause, Effect, Exit, FileSystem, Layer, Option, Path, PubSub } from "effect";
 import { makeDrainableWorker } from "@piedpiper/shared/DrainableWorker";
 
 import { isGitImport, parseTurnDiffFilesFromNumstat } from "../../checkpointing/Diffs.ts";
@@ -27,6 +27,8 @@ import { CheckpointStoreError } from "../../checkpointing/Errors.ts";
 import { OrchestrationDispatchError } from "../Errors.ts";
 import { isGitRepository } from "../../git/Utils.ts";
 import { GitManager } from "../../git/Services/GitManager.ts";
+import { EffectOutboxV2, layer as EffectOutboxLive } from "../../orchestration-v2/EffectOutbox.ts";
+import { readV2Entity } from "../../orchestration-v2/ProjectionStore.ts";
 import { WorkspaceEntries } from "../../workspace/Services/WorkspaceEntries.ts";
 
 type ReactorInput =
@@ -71,6 +73,8 @@ const make = Effect.gen(function* () {
   const providerService = yield* ProviderService;
   const checkpointStore = yield* CheckpointStore;
   const receiptBus = yield* RuntimeReceiptBus;
+  const outbox = yield* EffectOutboxV2;
+  const workerId = `checkpoint-worker:${crypto.randomUUID()}`;
   const workspaceEntries = yield* WorkspaceEntries;
   // Optional so reactor-only harnesses need no git status stack; server.ts provides it.
   const gitManager = yield* Effect.serviceOption(GitManager);
@@ -386,7 +390,17 @@ const make = Effect.gen(function* () {
 
   // Captures the files left by a completed or aborted turn.
   const captureCheckpointFromTurnCompletion = Effect.fn("captureCheckpointFromTurnCompletion")(
-    function* (event: Extract<ProviderRuntimeEvent, { type: "turn.completed" | "turn.aborted" }>) {
+    function* (
+      event: {
+        readonly type: "turn.completed" | "turn.aborted";
+        readonly turnId?: string | undefined;
+        readonly threadId: ThreadId;
+        readonly createdAt: string;
+        readonly payload: { readonly state?: string; readonly reason?: string };
+      },
+      runOrdinal?: number,
+      checkpointStatus?: "ready" | "missing" | "error",
+    ) {
       const turnId = toTurnId(event.turnId);
       if (!turnId) {
         return;
@@ -441,9 +455,9 @@ const make = Effect.gen(function* () {
         (maxTurnCount, checkpoint) => Math.max(maxTurnCount, checkpoint.checkpointTurnCount),
         0,
       );
-      const nextTurnCount = existingPlaceholder
-        ? existingPlaceholder.checkpointTurnCount
-        : currentTurnCount + 1;
+      const nextTurnCount =
+        runOrdinal ??
+        (existingPlaceholder ? existingPlaceholder.checkpointTurnCount : currentTurnCount + 1);
 
       yield* captureAndDispatchCheckpoint({
         threadId: thread.id,
@@ -452,9 +466,10 @@ const make = Effect.gen(function* () {
         cwd: checkpointCwd,
         turnCount: nextTurnCount,
         status:
-          event.type === "turn.aborted"
+          checkpointStatus ??
+          (event.type === "turn.aborted"
             ? "ready"
-            : checkpointStatusFromRuntime(event.payload.state),
+            : checkpointStatusFromRuntime(event.payload.state)),
         assistantMessageId: existingPlaceholder?.assistantMessageId ?? undefined,
         createdAt: event.createdAt,
       });
@@ -918,7 +933,63 @@ const make = Effect.gen(function* () {
       }),
     );
 
-  const worker = yield* makeDrainableWorker(processInputSafely);
+  const drainEffects = Effect.fn("orchestrationV2.drainCheckpointEffects")(function* () {
+    while (true) {
+      const claimed = yield* outbox.claimNext({
+        workerId,
+        effectTypes: ["checkpoint.capture", "checkpoint.revert"],
+      });
+      if (Option.isNone(claimed)) return;
+      const effect = claimed.value;
+      const executed = yield* Effect.exit(
+        Effect.gen(function* () {
+          if (
+            effect.request.type === "checkpoint.revert" &&
+            effect.request.intent.type === "thread.checkpoint-revert-requested"
+          ) {
+            yield* processDomainEvent(effect.request.intent);
+          } else if (effect.request.type === "checkpoint.capture") {
+            const saved = yield* readV2Entity("run.updated", effect.request.runId);
+            if (
+              saved?.type !== "run.updated" ||
+              saved.payload.nativeTurnRef === null ||
+              saved.payload.status === "rolled_back"
+            )
+              return;
+            const run = saved.payload;
+            yield* captureCheckpointFromTurnCompletion(
+              {
+                type: run.status === "interrupted" ? "turn.aborted" : "turn.completed",
+                threadId: run.threadId,
+                turnId: run.nativeTurnRef ?? undefined,
+                createdAt: run.completedAt ?? effect.createdAt,
+                payload: { state: run.status },
+              },
+              effect.request.checkpointTurnCount ?? run.ordinal,
+              effect.request.checkpointStatus,
+            );
+          }
+        }),
+      );
+      if (Exit.isFailure(executed)) {
+        if (Cause.hasInterruptsOnly(executed.cause)) return yield* Effect.failCause(executed.cause);
+        if (effect.request.type === "checkpoint.capture") {
+          const saved = yield* readV2Entity("run.updated", effect.request.runId);
+          yield* appendCaptureFailureActivity({
+            threadId: effect.threadId,
+            turnId: saved?.type === "run.updated" ? saved.payload.nativeTurnRef : null,
+            detail: Cause.pretty(executed.cause),
+            createdAt: new Date().toISOString(),
+          }).pipe(Effect.catch(() => Effect.void));
+        }
+        yield* outbox.fail({ effectId: effect.id, workerId, error: Cause.pretty(executed.cause) });
+      } else yield* outbox.succeed({ effectId: effect.id, workerId });
+    }
+  });
+  const worker = yield* makeDrainableWorker(
+    (input: ReactorInput | { readonly source: "effects" }) =>
+      input.source === "effects" ? drainEffects() : processInputSafely(input),
+  );
 
   const start: CheckpointReactorShape["start"] = Effect.fn("start")(function* () {
     // Subscribe synchronously BEFORE forking the consumer loops. PubSub.subscribe
@@ -929,6 +1000,10 @@ const make = Effect.gen(function* () {
     // dropped events in that gap — see comment in processDomainEvent below.
     const domainEventQueue = yield* orchestrationEngine.subscribeDomainEvents();
     const runtimeEventQueue = yield* providerService.subscribeEvents();
+    yield* worker.enqueue({ source: "effects" });
+    yield* Effect.forever(
+      Effect.sleep("1 second").pipe(Effect.andThen(worker.enqueue({ source: "effects" }))),
+    ).pipe(Effect.forkScoped);
 
     yield* Effect.forkScoped(
       Effect.forever(
@@ -940,6 +1015,12 @@ const make = Effect.gen(function* () {
               event.type !== "thread.checkpoint-revert-requested"
             ) {
               return Effect.void;
+            }
+            if (
+              event.type === "thread.checkpoint-revert-requested" &&
+              orchestrationEngine.getRunForTurn
+            ) {
+              return worker.enqueue({ source: "effects" });
             }
             return worker.enqueue({ source: "domain", event });
           }),
@@ -958,6 +1039,9 @@ const make = Effect.gen(function* () {
             ) {
               return Effect.void;
             }
+            if (event.type !== "turn.started" && orchestrationEngine.getRunForTurn) {
+              return worker.enqueue({ source: "effects" });
+            }
             return worker.enqueue({ source: "runtime", event });
           }),
         ),
@@ -967,8 +1051,10 @@ const make = Effect.gen(function* () {
 
   return {
     start,
-    drain: worker.drain,
+    drain: worker.enqueue({ source: "effects" }).pipe(Effect.andThen(worker.drain)),
   } satisfies CheckpointReactorShape;
 });
 
-export const CheckpointReactorLive = Layer.effect(CheckpointReactor, make);
+export const CheckpointReactorLive = Layer.effect(CheckpointReactor, make).pipe(
+  Layer.provide(EffectOutboxLive),
+);

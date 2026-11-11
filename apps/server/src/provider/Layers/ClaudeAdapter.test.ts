@@ -56,6 +56,7 @@ class FakeClaudeQuery implements AsyncIterable<SDKMessage> {
   public readonly interruptCalls: Array<void> = [];
   public readonly stopTaskCalls: Array<string> = [];
   public readonly setModelCalls: Array<string | undefined> = [];
+  public modelChangeHold: Promise<void> | undefined;
   public readonly setPermissionModeCalls: Array<string> = [];
   /** Modes Claude refuses, as the CLI does for an unavailable Auto or a disabled bypass. */
   public readonly refusedPermissionModes = new Set<string>();
@@ -122,6 +123,7 @@ class FakeClaudeQuery implements AsyncIterable<SDKMessage> {
 
   readonly setModel = async (model?: string): Promise<void> => {
     this.setModelCalls.push(model);
+    await this.modelChangeHold;
   };
 
   readonly setPermissionMode = async (mode: PermissionMode): Promise<void> => {
@@ -321,6 +323,37 @@ async function readFirstPromptMessage(
 
 const THREAD_ID = ThreadId.makeUnsafe("thread-claude-1");
 const RESUME_THREAD_ID = ThreadId.makeUnsafe("thread-claude-resume");
+
+it.effect("rejects a turn when the query exits during its model change", () => {
+  const harness = makeHarness();
+  return Effect.gen(function* () {
+    const adapter = yield* ClaudeAdapter;
+    yield* adapter.startSession({
+      threadId: THREAD_ID,
+      provider: "claudeAgent",
+      runtimeMode: "full-access",
+    });
+    let releaseModelChange!: () => void;
+    harness.query.modelChangeHold = new Promise<void>((resolve) => {
+      releaseModelChange = resolve;
+    });
+    const sending = yield* adapter
+      .sendTurn({
+        threadId: THREAD_ID,
+        input: "hello",
+        attachments: [],
+        modelSelection: { provider: "claudeAgent", model: "claude-sonnet-4-6" },
+      })
+      .pipe(Effect.exit, Effect.forkChild);
+    while (harness.query.setModelCalls.length === 0) yield* Effect.yieldNow;
+    harness.query.finish();
+    while (yield* adapter.hasSession(THREAD_ID)) yield* Effect.yieldNow;
+    releaseModelChange();
+    const result = yield* Fiber.join(sending);
+    assert.equal(result._tag, "Failure");
+    assert.equal(yield* adapter.hasSession(THREAD_ID), false);
+  }).pipe(Effect.provide(harness.layer));
+});
 
 const retryRows = (events: ReadonlyArray<ProviderRuntimeEvent>) =>
   events.flatMap((event) =>

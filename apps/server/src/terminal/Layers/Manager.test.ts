@@ -2680,6 +2680,28 @@ it.layer(NodeServices.layer, { excludeTestServices: true })("TerminalManager", (
 });
 
 describe("createTerminalSpawnEnv", () => {
+  vitestIt("identifies integrated terminals and preserves explicit runtime overrides", () => {
+    for (const platform of ["linux", "darwin", "win32"] as const) {
+      const inherited =
+        platform === "win32"
+          ? { term_program: "parent", Term_Program_Version: "old" }
+          : { TERM_PROGRAM: "parent", TERM_PROGRAM_VERSION: "old" };
+      const env = createTerminalSpawnEnv(inherited, null, platform);
+      expect(env.TERM_PROGRAM).toBe("piedpiper");
+      expect(env.TERM_PROGRAM_VERSION).toMatch(/^\d+\.\d+\.\d+/);
+      expect(Object.keys(env).filter((key) => key.toUpperCase() === "TERM_PROGRAM")).toEqual([
+        "TERM_PROGRAM",
+      ]);
+      const overridden = createTerminalSpawnEnv(
+        inherited,
+        { TERM_PROGRAM: "custom", TERM_PROGRAM_VERSION: "1" },
+        platform,
+      );
+      expect(overridden.TERM_PROGRAM).toBe("custom");
+      expect(overridden.TERM_PROGRAM_VERSION).toBe("1");
+    }
+  });
+
   vitestIt("drops launching tmux/screen/Zellij pane variables but keeps explicit overrides", () => {
     const env = createTerminalSpawnEnv(
       {
