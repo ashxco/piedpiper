@@ -14,6 +14,7 @@ import {
   deriveLocalBranchNameFromRemoteRef,
   isSameOrAncestorPath,
   resolveBranchSelectionTarget,
+  resolveConfirmedSelectedBranch,
   resolveDraftEnvModeAfterBranchChange,
   resolveBranchToolbarValue,
   resolveWorktreeBaseBranchSeed,
@@ -250,6 +251,31 @@ describe("resolveWorktreeBaseBranchSeed", () => {
     expect(resolveWorktreeBaseBranchSeed({ ...input, isPending: true })).toBeNull();
     expect(resolveWorktreeBaseBranchSeed({ ...input, isPlaceholderData: true })).toBeNull();
     expect(resolveWorktreeBaseBranchSeed({ ...input, branchQuery: "fea" })).toBeNull();
+  });
+});
+
+describe("resolveConfirmedSelectedBranch", () => {
+  const listed = { name: "previous", isRemote: false, worktreePath: "/worktree-b" };
+
+  it.each([
+    [
+      "the claimed worktree still has it checked out",
+      [{ ...listed, current: true }],
+      "/worktree-b",
+    ],
+    ["the claimed worktree has moved to another branch", [], null],
+    ["the claimed worktree lists it but not as current", [{ ...listed, current: false }], null],
+    [
+      "a remote ref of the same name is current",
+      [{ ...listed, isRemote: true, current: true }],
+      null,
+    ],
+  ] as const)("%s", (_label, branches, expected) => {
+    expect(resolveConfirmedSelectedBranch(listed, { branches }).worktreePath).toBe(expected);
+  });
+
+  it("drops the claim when the read failed", () => {
+    expect(resolveConfirmedSelectedBranch(listed, null).worktreePath).toBeNull();
   });
 });
 

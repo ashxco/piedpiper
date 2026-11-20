@@ -37,7 +37,11 @@ import {
 } from "../../provider/Layers/CodexProvider.ts";
 import { CODEX_SPARK_MODEL } from "../../provider/codexAccount.ts";
 import { codexExecServiceTierArgsForOptions } from "../../provider/Layers/CodexAdapterHelpers.ts";
-import { codexExecLaunchArgs, resolveCodexLaunchArgs } from "../../provider/codexLaunchArgs.ts";
+import {
+  codexExecLaunchArgs,
+  codexMcpListLaunchArgs,
+  resolveCodexLaunchArgs,
+} from "../../provider/codexLaunchArgs.ts";
 import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { normalizeCodexModelOptionsWithCapabilities } from "@piedpiper/shared/model";
@@ -48,7 +52,10 @@ const CODEX_TIMEOUT_MS = 180_000;
 const CODEX_FORCE_KILL_AFTER = "1 second";
 const CODEX_MCP_LIST_TIMEOUT_MS = 10_000;
 // Plugins and apps bring MCP servers of their own; the user's servers are listed and turned off by name.
+// Codex also reads the legacy connectors key for apps.
 const CODEX_NO_PLUGIN_ARGS = [
+  "--config",
+  "features.connectors=false",
   "--config",
   "features.plugins=false",
   "--config",
@@ -65,6 +72,20 @@ const codexMcpServersOffConfig = (names: ReadonlyArray<string>): string | null =
   names.length === 0
     ? null
     : `mcp_servers={${names.map((name) => `${JSON.stringify(name)}={enabled=false}`).join(",")}}`;
+
+// Codex splits -c keys at the first "=" and on every dot, so only those names take a dotted flag.
+const codexMcpServerOffFlags = (names: ReadonlyArray<string>): ReadonlyArray<string> =>
+  names
+    .filter((name) => !name.includes(".") && !name.includes("="))
+    .flatMap((name) => ["--config", `mcp_servers.${name}.enabled=false`]);
+
+// Current Codex gives `hooks` precedence over the historical `codex_hooks` alias; turn both off.
+const CODEX_NO_HOOKS_ARGS = [
+  "--config",
+  "features.codex_hooks=false",
+  "--config",
+  "features.hooks=false",
+] as const;
 
 /** A Codex slug without a provider namespace prefix such as `openai.`. */
 const codexModelFamily = (slug: string): string =>
@@ -375,16 +396,17 @@ const makeCodexTextGeneration = Effect.gen(function* () {
         ...codexHomeEnv(codexSettings?.homePath),
       };
       const binary = codexSettings?.binaryPath || "codex";
-      const execLaunchArgs = codexExecLaunchArgs(resolveCodexLaunchArgs(codexSettings?.launchArgs));
-      const mcpServersOff = codexMcpServersOffConfig(
-        yield* listEnabledMcpServers({
-          binary,
-          cwd,
-          env,
-          // `codex mcp` rejects --strict-config; the config overrides still apply.
-          launchArgs: execLaunchArgs.filter((arg) => arg !== "--strict-config"),
-        }),
-      );
+      const launchArgs = resolveCodexLaunchArgs(codexSettings?.launchArgs);
+      const execLaunchArgs = codexExecLaunchArgs(launchArgs);
+      const enabledMcpServers = yield* listEnabledMcpServers({
+        binary,
+        cwd,
+        env,
+        launchArgs: codexMcpListLaunchArgs(launchArgs),
+      });
+      const mcpServersOff = codexMcpServersOffConfig(enabledMcpServers);
+      // A launch-arg mcp_servers={...} table replaces ours and can re-enable dotted names.
+      const launchArgsSetMcpTable = execLaunchArgs.some((arg) => /\bmcp_servers\s*=/.test(arg));
       // Windows: real executables spawn directly; .cmd shims get one escaped cmd.exe line.
       const spawnCommand = yield* Effect.try({
         try: () =>
@@ -392,10 +414,17 @@ const makeCodexTextGeneration = Effect.gen(function* () {
             binary,
             [
               "exec",
+              // Before launch args: a later table would replace servers their -c flags define,
+              // dropping the transport those flags set.
+              ...(mcpServersOff ? ["--config", mcpServersOff] : []),
               ...execLaunchArgs,
               // Text generation needs only the prompt; like Claude's --strict-mcp-config, keep user MCP servers off.
               ...CODEX_NO_PLUGIN_ARGS,
-              ...(mcpServersOff ? ["--config", mcpServersOff] : []),
+              ...(mcpServersOff && launchArgsSetMcpTable ? ["--config", mcpServersOff] : []),
+              // After launch args, so a launch arg's enabled=true cannot turn a server back on.
+              ...codexMcpServerOffFlags(enabledMcpServers),
+              // A user's Codex hooks must not run on title and commit-message prompts.
+              ...CODEX_NO_HOOKS_ARGS,
               "--ephemeral",
               "-s",
               "read-only",
@@ -646,6 +675,7 @@ const makeCodexTextGeneration = Effect.gen(function* () {
       previousTitle: input.previousTitle,
       additionalInstructions: input.additionalInstructions,
       linkedContext: input.linkedContext,
+      projectTitle: input.projectTitle,
     });
 
     if (input.modelSelection.provider !== "codex") {

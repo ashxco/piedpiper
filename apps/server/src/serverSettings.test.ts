@@ -652,6 +652,133 @@ it.layer(NodeServices.layer)("server settings", (it) => {
     }).pipe(Effect.scoped, TestClock.withLive),
   );
 
+  // Read-only and unreadable targets still save, since the mode lands after the temp file opens.
+  it.effect.each(process.platform === "win32" ? [] : ["644", "444", "000"])(
+    "keeps the %s permissions of the settings file it replaces",
+    (octal) =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "piedpiper-mode-" });
+        const destination = path.join(root, "settings.json");
+        const mode = Number.parseInt(octal, 8);
+        yield* fileSystem.writeFileString(destination, "before");
+        yield* fileSystem.chmod(destination, mode);
+
+        yield* writeFileStringAtomically(destination, "after");
+
+        assert.equal((yield* fileSystem.stat(destination)).mode & 0o777, mode);
+        yield* fileSystem.chmod(destination, 0o600);
+        assert.equal(yield* fileSystem.readFileString(destination), "after");
+        assert.deepEqual(yield* fileSystem.readDirectory(root), ["settings.json"]);
+      }).pipe(Effect.scoped),
+  );
+
+  it.effect.skipIf(process.platform === "win32")(
+    "creates a new settings file readable only by its owner",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "piedpiper-mode-" });
+        const destination = path.join(root, "settings.json");
+
+        yield* writeFileStringAtomically(destination, "fresh");
+
+        assert.equal(((yield* fileSystem.stat(destination)).mode & 0o777).toString(8), "600");
+      }).pipe(Effect.scoped),
+  );
+
+  it.effect.skipIf(process.platform === "win32")(
+    "syncs the contents before the rename and the directory after it",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "piedpiper-sync-" });
+        const destination = path.join(root, "settings.json");
+        const events: Array<string> = [];
+        const recording: FileSystem.FileSystem = {
+          ...fileSystem,
+          open: (openedPath, openOptions) =>
+            fileSystem.open(openedPath, openOptions).pipe(
+              // The real handle keeps its methods on its prototype, so it is extended, not spread.
+              Effect.map(
+                (file): FileSystem.File =>
+                  Object.create(file, {
+                    sync: {
+                      value: file.sync.pipe(
+                        Effect.tap(() =>
+                          Effect.sync(() => {
+                            events.push(openedPath === root ? "sync directory" : "sync temp file");
+                          }),
+                        ),
+                      ),
+                    },
+                  }),
+              ),
+            ),
+          rename: (from, to) =>
+            fileSystem
+              .rename(from, to)
+              .pipe(Effect.tap(() => Effect.sync(() => events.push("rename")))),
+        };
+
+        yield* writeFileStringAtomically(destination, "after").pipe(
+          Effect.provideService(FileSystem.FileSystem, recording),
+        );
+
+        assert.equal(yield* fileSystem.readFileString(destination), "after");
+        assert.deepEqual(events, ["sync temp file", "rename", "sync directory"]);
+      }).pipe(Effect.scoped),
+  );
+
+  // EIO means the rename may not survive a crash; ENOTSUP means directories cannot sync at all.
+  it.effect.each(
+    process.platform === "win32"
+      ? []
+      : [
+          { code: "EIO", fails: true },
+          { code: "ENOTSUP", fails: false },
+        ],
+  )("handles a settings directory sync failing with $code after the rename", ({ code, fails }) =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "piedpiper-sync-" });
+      const destination = path.join(root, "settings.json");
+      const syncFailure = PlatformError.systemError({
+        _tag: "Unknown",
+        module: "FileSystem",
+        method: "sync",
+        pathOrDescriptor: root,
+        cause: Object.assign(new Error(`${code}, fsync`), { code }),
+      });
+      const failingDirectorySync: FileSystem.FileSystem = {
+        ...fileSystem,
+        open: (openedPath, openOptions) =>
+          fileSystem
+            .open(openedPath, openOptions)
+            .pipe(
+              Effect.map(
+                (file): FileSystem.File =>
+                  openedPath === root
+                    ? Object.create(file, { sync: { value: Effect.fail(syncFailure) } })
+                    : file,
+              ),
+            ),
+      };
+
+      const exit = yield* writeFileStringAtomically(destination, "after").pipe(
+        Effect.provideService(FileSystem.FileSystem, failingDirectorySync),
+        Effect.exit,
+      );
+
+      assert.equal(Exit.isFailure(exit), fails);
+      assert.equal(yield* fileSystem.readFileString(destination), "after");
+    }).pipe(Effect.scoped),
+  );
+
   it.effect.each([39, 40, 41])("saves through a chain of %i symlinks only up to 40 links", (hops) =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;

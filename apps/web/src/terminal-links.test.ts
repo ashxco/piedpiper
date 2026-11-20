@@ -249,6 +249,11 @@ describe("extractTerminalLinks edge cases", () => {
     "src/𐐀.ts:12",
     "src/app/[id]/page.tsx:3:10",
     "src/routes/(app)/+page.svelte:12:4",
+    "src/routes/(app)/+page@.svelte:12:3",
+    "src/contact@support.vue:12:3",
+    String.raw`src\contact@support.ts:12:3`,
+    "src/équipe@home.ts:12:3",
+    "src/foo$contact@support.ts:12:3",
     "node_modules/.pnpm/react@18.3.1/node_modules/react/index.js:12:5",
     "app/routes/posts.$id.tsx:5",
   ])("keeps the complete relative path %s", (text) => {
@@ -310,6 +315,8 @@ describe("extractTerminalLinks edge cases", () => {
     "    at main (file:///Users/jane/app/src/index.mjs:3:7)",
     "+redis://localhost:6379/0",
     "-redis://localhost:6379/0",
+    "git clone git@github.com:acme/widgets.git",
+    "remote: git@gitlab.com:group/sub/project.git",
   ])("does not turn part of a non-web URL into an editor link: %s", (line) => {
     expect(extractTerminalLinks(line)).toEqual([]);
   });
@@ -525,6 +532,27 @@ describe("resolveWrappedTerminalLinkRange with cell widths", () => {
 });
 
 describe("resolvePathLinkTarget", () => {
+  it.each([
+    ["src/main.ts", "/repo/src/main.ts"],
+    ["/repo/src/main.ts", "/repo/src/main.ts"],
+    [String.raw`C:\repo\src\main.ts`, String.raw`C:\repo\src\main.ts`],
+    ["app/(auth)/page.tsx", "/repo/app/(auth)/page.tsx"],
+  ])("preserves a TypeScript compiler location on %s", (path, target) => {
+    const text = `${path}(42,7)`;
+    const links = extractTerminalLinks(`${text}: error TS2322: Type mismatch`);
+    expect(links).toEqual([{ kind: "path", text: `${path}:42:7`, start: 0, end: text.length }]);
+    expect(resolvePathLinkTarget(links[0]?.text ?? "", "/repo")).toBe(`${target}:42:7`);
+  });
+
+  it.each([
+    [String.raw`PS C:\dev\folder (42,7)> `, String.raw`C:\dev\folder (42,7)`],
+    ["/tmp/report(42,7)", "/tmp/report(42,7)"],
+    ["src/Program.cs(3,10): error CS1002: x", "/repo/src/Program.cs"],
+  ])("preserves existing path targets in %s", (line, target) => {
+    const [link] = extractTerminalLinks(line);
+    expect(resolvePathLinkTarget(link?.text ?? "", "/repo")).toBe(target);
+  });
+
   it("resolves a quoted terminal link against a Windows environment", () => {
     const [link] = extractTerminalLinks(String.raw`error at "src\my folder\index.ts":12:7`);
     expect(resolvePathLinkTarget(link?.text ?? "", String.raw`C:\Users\Jane Doe\project`)).toBe(

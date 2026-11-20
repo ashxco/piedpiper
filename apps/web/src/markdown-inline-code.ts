@@ -1,5 +1,5 @@
 import { resolveMarkdownFileChipMeta } from "./markdown-file-chip";
-import { inlineCodeFilePathCandidate } from "./markdown-links";
+import { EXTENSIONLESS_FILE_NAMES, inlineCodeFilePathCandidate } from "./markdown-links";
 import { resolvePathLinkTarget } from "./terminal-links";
 
 /** Set on inline code elements, so double-click can tell them from fenced code. */
@@ -9,36 +9,6 @@ export const INLINE_CODE_LINK_PROPERTY = "data-inline-code-link";
 
 const BARE_EXTENSIONLESS_POSITION_PATTERN = /^[A-Za-z0-9_-]+(?::\d+){1,2}$/;
 const POSITION_SUFFIX_PATTERN = /(?::\d+){1,2}$/;
-// `name:digits` also matches `error:1` and `port:3000`, so only conventional names link.
-const EXTENSIONLESS_FILE_NAMES = new Set([
-  "Makefile",
-  "makefile",
-  "GNUmakefile",
-  "Dockerfile",
-  "Containerfile",
-  "Justfile",
-  "justfile",
-  "Rakefile",
-  "Gemfile",
-  "Procfile",
-  "Brewfile",
-  "Caddyfile",
-  "Vagrantfile",
-  "Jenkinsfile",
-  "Podfile",
-  "Fastfile",
-  "BUILD",
-  "WORKSPACE",
-  "LICENSE",
-  "LICENCE",
-  "COPYING",
-  "NOTICE",
-  "AUTHORS",
-  "CONTRIBUTORS",
-  "CHANGELOG",
-  "README",
-  "CODEOWNERS",
-]);
 
 /** The href a file link made from an inline code span opens, or null when it names no file. */
 export function resolveInlineCodeFileHref(

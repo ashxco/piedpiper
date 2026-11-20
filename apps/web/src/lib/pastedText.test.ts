@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { nextPastedTextFileName, shouldAttachPastedText } from "./pastedText";
+import {
+  nextPastedTextFileName,
+  shouldAttachPastedText,
+  shouldPasteClipboardFilesAsText,
+} from "./pastedText";
 
 describe("large text paste", () => {
   it("uses UTF-8 bytes and lets paste-as-text bypass attachment conversion", () => {
@@ -7,6 +11,12 @@ describe("large text paste", () => {
     expect(shouldAttachPastedText("x".repeat(32 * 1024 + 1), false)).toBe(true);
     expect(shouldAttachPastedText("界".repeat(12_000), false)).toBe(true);
     expect(shouldAttachPastedText("x".repeat(100_000), true)).toBe(false);
+  });
+  it("leaves an image-and-text clipboard to the text path under Paste as Text", () => {
+    expect(shouldPasteClipboardFilesAsText("Hello from Word", true)).toBe(true);
+    expect(shouldPasteClipboardFilesAsText("Hello from Word", false)).toBe(false);
+    // Nothing to paste as text, so the image still attaches.
+    expect(shouldPasteClipboardFilesAsText("", true)).toBe(false);
   });
   it("chooses a name without colliding with previous pasted files", () => {
     expect(nextPastedTextFileName(["pasted-text.txt", "pasted-text-2.txt"])).toBe(

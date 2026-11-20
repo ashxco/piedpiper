@@ -39,6 +39,7 @@ vi.mock("~/wsRpcClient", async (importOriginal) => ({
   getWsRpcClient: () => ({ projects: { statPath: statPathMock } }),
 }));
 
+import { chatMarkdownClipboardPayload } from "../markdown-clipboard";
 import ChatMarkdown, { getHighlighterPromise } from "./ChatMarkdown";
 import { THREAD_FIND_REVEAL_EVENT } from "./chat/threadFindHighlights";
 import { getVscodeIconUrlForEntry } from "../vscode-icons";
@@ -200,7 +201,11 @@ describe("ChatMarkdown file links", () => {
       await expect.element(link).toHaveAttribute("href", `${filePath}#L3`);
       await link.click();
       await vi.waitFor(() => {
-        expect(openInPreferredEditorMock).toHaveBeenCalledWith(expect.anything(), `${filePath}:3`);
+        expect(openInPreferredEditorMock).toHaveBeenCalledWith(
+          expect.anything(),
+          `${filePath}:3`,
+          CWD,
+        );
       });
     } finally {
       await screen.unmount();
@@ -217,6 +222,7 @@ describe("ChatMarkdown file links", () => {
         expect(openInPreferredEditorMock).toHaveBeenCalledWith(
           expect.anything(),
           "C:\\repo\\src\\main.ts",
+          "C:\\repo",
         );
       });
     } finally {
@@ -266,6 +272,7 @@ describe("ChatMarkdown file links", () => {
         expect(openInPreferredEditorMock).toHaveBeenCalledWith(
           expect.anything(),
           `${CWD}/src/components/ChatView.tsx:42`,
+          CWD,
         );
       });
       expect(searchEntriesMock).toHaveBeenCalledWith(
@@ -311,6 +318,23 @@ describe("ChatMarkdown code block actions", () => {
         container.querySelector('button[aria-pressed="true"]') as HTMLElement,
       );
     } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("copies a fenced command without the fence's closing newline", async () => {
+    const writeText = vi.fn(async (_text: string) => undefined);
+    const clipboard = vi
+      .spyOn(navigator, "clipboard", "get")
+      .mockReturnValue({ writeText } as unknown as Clipboard);
+    const screen = await render(
+      <ChatMarkdown text={"```bash\nsudo pacman -S patchelf\n```"} cwd={CWD} />,
+    );
+    try {
+      await page.getByRole("button", { name: "Copy code" }).click();
+      await vi.waitFor(() => expect(writeText).toHaveBeenCalledWith("sudo pacman -S patchelf"));
+    } finally {
+      clipboard.mockRestore();
       await screen.unmount();
     }
   });
@@ -438,7 +462,7 @@ describe("ChatMarkdown tables and copying", () => {
     }
   });
 
-  it("copies a selection as Markdown with code fences and list numbers", async () => {
+  it("copies a selection as Markdown with list numbers and its code as shown", async () => {
     const screen = await render(
       <ChatMarkdown
         text={
@@ -460,8 +484,9 @@ describe("ChatMarkdown tables and copying", () => {
       const clipboardData = new DataTransfer();
       root.dispatchEvent(new ClipboardEvent("copy", { bubbles: true, clipboardData }));
 
+      // Code copies without fences, so a command copied along with prose still pastes as-is.
       expect(clipboardData.getData("text/plain")).toBe(
-        "1. First\n2. Second\n\n```ts\nconst copied = true;\n```\n\nSee [docs](https://example.com).",
+        "1. First\n2. Second\n\nconst copied = true;\n\nSee [docs](https://example.com).",
       );
       expect(clipboardData.getData("text/html")).toContain("<ol>");
       expect(clipboardData.getData("text/html")).not.toContain("<button");
@@ -470,8 +495,51 @@ describe("ChatMarkdown tables and copying", () => {
     }
   });
 
+  it.each([
+    {
+      source: "10. First\n11. Second\n12. Third\n\nAfter.",
+      from: "Second",
+      text: "11. Second\n12. Third\n\nAfter.",
+    },
+    {
+      source: "1. Outer\n2. Next\n   1. Inner\n   2. Deeper\n\nAfter.",
+      from: "Deeper",
+      text: "2. 2. Deeper\n\nAfter.",
+    },
+  ])(
+    "keeps the shown numbers when a copy starts at $from and ends past the list",
+    async ({ source, from, text }) => {
+      const screen = await render(<ChatMarkdown text={source} cwd={CWD} />);
+      try {
+        const container = screen.container as HTMLElement;
+        const start = [...container.querySelectorAll("li")]
+          .flatMap((item) => [...item.childNodes])
+          .find((node) => node.nodeType === Node.TEXT_NODE && node.textContent === from)!;
+        const after = [...container.querySelectorAll("p")].at(-1)!.firstChild!;
+        const range = document.createRange();
+        range.setStart(start, 0);
+        range.setEnd(after, after.textContent!.length);
+        const selection = window.getSelection()!;
+        selection.removeAllRanges();
+        selection.addRange(range);
+        const payload = chatMarkdownClipboardPayload(selection);
+        selection.removeAllRanges();
+        expect(payload?.text).toBe(text);
+        // Rich paste numbers its list from the same start.
+        expect(
+          new DOMParser()
+            .parseFromString(payload!.html, "text/html")
+            .querySelector("li")
+            ?.closest("ol")?.start,
+        ).toBe(Number(text.split(".")[0]));
+      } finally {
+        await screen.unmount();
+      }
+    },
+  );
+
   it.each(["nasm", "assembly", "s", "S", "ASM", "gitignore"])(
-    "copies a %s fence under the name it was written with",
+    "quotes a %s fence under the name it was written with",
     async (language) => {
       const source = `Intro\n\n\`\`\`${language}\nmov eax, 1 ; ${language} comment\n\`\`\``;
       const screen = await render(<ChatMarkdown text={source} cwd={CWD} />);
@@ -479,11 +547,12 @@ describe("ChatMarkdown tables and copying", () => {
         const container = screen.container as HTMLElement;
         await waitForHighlightedBlock(container);
         const root = container.querySelector(".chat-markdown") as HTMLElement;
-        window.getSelection()?.selectAllChildren(root);
-        const clipboardData = new DataTransfer();
-        root.dispatchEvent(new ClipboardEvent("copy", { bubbles: true, clipboardData }));
-        window.getSelection()?.removeAllRanges();
-        expect(clipboardData.getData("text/plain")).toBe(source);
+        const selection = window.getSelection()!;
+        selection.selectAllChildren(root);
+        // A quote into the composer keeps the fence, as the assistant selection toolbar asks.
+        const quoted = chatMarkdownClipboardPayload(selection, { fenceCode: true })?.text;
+        selection.removeAllRanges();
+        expect(quoted).toBe(source);
       } finally {
         await screen.unmount();
       }
@@ -642,6 +711,7 @@ describe("ChatMarkdown file chips", () => {
         expect(openInPreferredEditorMock).toHaveBeenCalledWith(
           expect.anything(),
           `${cwd}/src/a.ts:4`,
+          cwd,
         );
       });
 
@@ -653,6 +723,7 @@ describe("ChatMarkdown file chips", () => {
         expect(openInPreferredEditorMock).toHaveBeenCalledWith(
           expect.anything(),
           `${cwd}/apps/web/src/a.ts:4`,
+          cwd,
         );
       });
     } finally {
@@ -951,6 +1022,7 @@ describe("ChatMarkdown inline code", () => {
         expect(openInPreferredEditorMock).toHaveBeenCalledWith(
           expect.anything(),
           `${CWD}/src/app.ts:12`,
+          CWD,
         );
       });
     } finally {
@@ -977,6 +1049,7 @@ describe("ChatMarkdown web links", () => {
         expect(openInPreferredEditorMock).toHaveBeenCalledWith(
           expect.anything(),
           "C:\\repo\\.config\\a.json",
+          "C:\\repo",
         );
       });
     } finally {
@@ -1593,6 +1666,27 @@ describe('ChatMarkdown variant="user"', () => {
     const { screen, container } = await renderUser("a\nb");
     try {
       expect(container.querySelector("p")?.innerHTML).toBe("a<br>\nb");
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("keeps single tildes in paths literal and still strikes double tildes", async () => {
+    const source = "Install it as ~/folder-a/skills/x, then read (~/folder-a/guide.md).";
+    const { screen, container } = await renderUser(`${source}\n\nDrop ~~the old plan~~`);
+    try {
+      expect(container.textContent).toContain(source);
+      const struck = [...container.querySelectorAll("del")].map((node) => node.textContent);
+      expect(struck).toEqual(["the old plan"]);
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("still treats single tildes as strikethrough in assistant text", async () => {
+    const screen = await render(<ChatMarkdown text="a ~b~ c" cwd={CWD} />);
+    try {
+      expect((screen.container as HTMLElement).querySelector("del")?.textContent).toBe("b");
     } finally {
       await screen.unmount();
     }

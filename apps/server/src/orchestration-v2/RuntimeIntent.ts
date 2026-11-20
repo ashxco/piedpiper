@@ -4,6 +4,7 @@ export type ProviderIntentEvent = Extract<
   OrchestrationEvent,
   {
     type:
+      | "thread.meta-updated"
       | "thread.runtime-mode-set"
       | "thread.turn-start-requested"
       | "thread.turn-interrupt-requested"
@@ -22,6 +23,7 @@ export function isDurableProviderIntent(
   { type: "thread.turn-start-requested" | "thread.session-set" }
 > {
   return (
+    (event.type === "thread.meta-updated" && event.payload.modelSelection !== undefined) ||
     event.type === "thread.runtime-mode-set" ||
     event.type === "thread.turn-interrupt-requested" ||
     event.type === "thread.approval-response-requested" ||

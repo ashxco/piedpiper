@@ -108,6 +108,15 @@ describe("renderCodexInlineDirectivesAsMarkdown", () => {
     expect(link?.type).toBe("link");
     expect(decodeURIComponent(link?.url ?? "")).toBe("C:\\Users\\test\\[draft]\\report.md#L7");
   });
+
+  it("keeps an entity-like ampersand in the path literal", () => {
+    const markdown = renderCodexInlineDirectivesAsMarkdown(
+      ':codex-file-citation{path="/tmp/a&amp;copy;.txt" line_range_start="7"}',
+    );
+    const link = parseOrdinaryMarkdown(markdown).children?.[0]?.children?.[0];
+    expect(link?.type).toBe("link");
+    expect(decodeURIComponent(link?.url ?? "")).toBe("/tmp/a&copy;.txt#L7");
+  });
 });
 
 describe("resolveCodexFileCitationLink", () => {
@@ -131,7 +140,7 @@ describe("resolveCodexFileCitationLink", () => {
     ).toBe("reports/100%25 %231%3F draft.md#L7");
     const citation = resolveCodexFileCitationLink({ path: "reports/*draft*_[copy]`<&.txt" });
     expect(citation && codexFileCitationMarkdown(citation)).toBe(
-      "[\\*draft\\*\\_\\[copy\\]\\`\\<\\&.txt](<reports/*draft*_[copy]`%3C&.txt>)",
+      "[\\*draft\\*\\_\\[copy\\]\\`\\<\\&.txt](<reports/*draft*_[copy]`%3C%26.txt>)",
     );
   });
 });

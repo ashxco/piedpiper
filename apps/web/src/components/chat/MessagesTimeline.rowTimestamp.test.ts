@@ -29,3 +29,33 @@ describe("formatTimelineRowTimestampTooltip", () => {
     expect(formatTimelineRowTimestampTooltip("not a date", "locale")).toBe("");
   });
 });
+
+describe("formatTimelineRowTimestampTooltip after a system time zone change", () => {
+  it("follows the new zone", () => {
+    const iso = "2026-10-31T20:00:00.000Z";
+    const previous = process.env.TZ;
+    const expectedIn = (timeZone: string) =>
+      new Intl.DateTimeFormat(timestampLocale, {
+        weekday: "short",
+        year: "numeric",
+        month: "short",
+        day: "numeric",
+        hour: "numeric",
+        minute: "2-digit",
+        second: "2-digit",
+        hour12: false,
+        timeZone,
+      }).format(new Date(iso));
+    try {
+      process.env.TZ = "America/New_York";
+      expect(formatTimelineRowTimestampTooltip(iso, "24-hour")).toBe(
+        expectedIn("America/New_York"),
+      );
+      process.env.TZ = "Asia/Bangkok";
+      expect(formatTimelineRowTimestampTooltip(iso, "24-hour")).toBe(expectedIn("Asia/Bangkok"));
+    } finally {
+      if (previous === undefined) delete process.env.TZ;
+      else process.env.TZ = previous;
+    }
+  });
+});

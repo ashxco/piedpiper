@@ -188,14 +188,107 @@ describe("serializeRenderedMarkdownFragment", () => {
     );
   });
 
-  it("fences a code block with the language from its wrapper and skips its buttons", () => {
+  it.each([
+    ["backtick edges", "`value`", "`` `value` ``"],
+    ["space edges", "  value  ", "`   value   `"],
+    ["one space edge", " value", "` value`"],
+    ["only spaces", "   ", "`   `"],
+  ])("copies inline code that parses back unchanged: %s", (_, value, expected) => {
+    const container = new FakeElement("DIV").append(
+      new FakeElement("P").append(
+        new FakeText("Use "),
+        new FakeElement("CODE").append(new FakeText(value)),
+        new FakeText(" here."),
+      ),
+    );
+    expect(serializeRenderedMarkdownFragment(asNode(container))).toBe(`Use ${expected} here.`);
+  });
+
+  it("copies email links with their address and drops in-app destinations", () => {
+    const container = new FakeElement("DIV").append(
+      new FakeElement("P").append(
+        new FakeText("Write to "),
+        new FakeElement("A", [], { href: "mailto:support@example.com" }).append(
+          new FakeText("support@example.com"),
+        ),
+        new FakeText(", "),
+        new FakeElement("A", [], { href: "mailto:support@example.com?subject=Help" }).append(
+          new FakeText("Support"),
+        ),
+        new FakeText(", "),
+        new FakeElement("A", [], { href: "mailto:support@example.com?subject=Help)" }).append(
+          new FakeText("Support"),
+        ),
+        new FakeText(" or "),
+        new FakeElement("A", [], { href: "/environment-one/thread-one" }).append(
+          new FakeText("the thread"),
+        ),
+        new FakeText("."),
+      ),
+    );
+    expect(serializeRenderedMarkdownFragment(asNode(container))).toBe(
+      "Write to support@example.com, [Support](mailto:support@example.com?subject=Help), [Support](mailto:support@example.com?subject=Help\\)) or the thread.",
+    );
+  });
+
+  it.each([
+    "support@example.com?subject=Help",
+    "foo",
+    "support@example.internal1",
+    "support@example.com_",
+    "support@example.com-",
+  ])("keeps the destination when the email label is not a bare address: %s", (label) => {
+    const anchor = new FakeElement("A", [], { href: `mailto:${label}` }).append(
+      new FakeText(label),
+    );
+    expect(serializeRenderedMarkdownFragment(asNode(new FakeElement("DIV").append(anchor)))).toBe(
+      `[${label}](mailto:${label})`,
+    );
+  });
+
+  it("copies a code block with prose as shown, without fences, and skips its buttons", () => {
     const container = new FakeElement("DIV").append(
       new FakeElement("P").append(new FakeText("Run:")),
       renderedCodeBlock(["bun run test", "bun run lint"], "sh"),
     );
 
     expect(serializeRenderedMarkdownFragment(asNode(container))).toBe(
-      "Run:\n\n```sh\nbun run test\nbun run lint\n```",
+      "Run:\n\nbun run test\nbun run lint",
+    );
+  });
+
+  it("fences a code block with its language when asked, as a quote into the composer is", () => {
+    const container = new FakeElement("DIV").append(
+      new FakeElement("P").append(new FakeText("Run:")),
+      renderedCodeBlock(["bun run test", "", "", "bun run lint  "], "sh"),
+    );
+
+    expect(serializeRenderedMarkdownFragment(asNode(container), { fenceCode: true })).toBe(
+      "Run:\n\n```sh\nbun run test\n\n\nbun run lint  \n```",
+    );
+  });
+
+  it("copies a command and the prose after it as shown, without code fences", () => {
+    const container = new FakeElement("DIV").append(
+      renderedCodeBlock(["printf 'hello\\n'"]),
+      new FakeElement("P").append(new FakeText("T")),
+    );
+
+    expect(serializeRenderedMarkdownFragment(asNode(container))).toBe("printf 'hello\\n'\n\nT");
+  });
+
+  it("keeps a diagram's source exactly as written when copied with prose", () => {
+    const source = 'flowchart TD\n  A["first   \n\n\nlast"]';
+    const container = new FakeElement("DIV").append(
+      new FakeElement("DIV", [], {
+        "data-markdown-diagram-source": source,
+        "data-markdown-copy": serializeCodeBlockToMarkdown(source, "mermaid"),
+      }),
+      new FakeElement("P").append(new FakeText("After")),
+    );
+
+    expect(serializeRenderedMarkdownFragment(asNode(container))).toBe(
+      `\`\`\`mermaid\n${source}\n\`\`\`\n\nAfter`,
     );
   });
 
@@ -255,23 +348,23 @@ describe("serializeRenderedMarkdownFragment", () => {
     );
 
     expect(serializeRenderedMarkdownFragment(asNode(nestedFence))).toBe(
-      "Example:\n\n````\n```js\na()\n\n\nb()  \n```\n````",
+      "Example:\n\n```js\na()\n\n\nb()  \n```",
     );
     expect(serializeRenderedMarkdownFragment(asNode(new FakeElement("DIV").append(list)))).toBe(
-      "1. Create it:\n   ```\n   import os\n\n\n   def main():\n   ```",
+      "1. Create it:\n   import os\n\n\n   def main():",
     );
     expect(serializeRenderedMarkdownFragment(asNode(new FakeElement("DIV").append(quote)))).toBe(
-      "> Note:\n>\n> ```\n> import os\n>\n>\n> def main():\n> ```",
+      "> Note:\n>\n> import os\n>\n>\n> def main():",
     );
   });
 
-  it("keeps fences when a bare list item sits alongside the code block", () => {
+  it("keeps a bare list item that sits alongside the code block", () => {
     const container = new FakeElement("DIV").append(
       new FakeElement("UL").append(new FakeElement("LI")),
       renderedCodeBlock(["bun test"]),
     );
 
-    expect(serializeRenderedMarkdownFragment(asNode(container))).toBe("-\n\n```\nbun test\n```");
+    expect(serializeRenderedMarkdownFragment(asNode(container))).toBe("-\n\nbun test");
   });
 
   it("omits fences when a selection past the last line drags in the whole code block", () => {
@@ -296,6 +389,23 @@ describe("serializeCodeBlockToMarkdown", () => {
 });
 
 describe("copying rendered Markdown tables", () => {
+  it("copies code and diagrams in cells without markers or unescaped pipes", () => {
+    const code = new FakeElement("PRE").append(
+      new FakeElement("CODE").append(new FakeText("a  b")),
+    );
+    const diagram = new FakeElement("DIV", [], {
+      "data-markdown-diagram-source": "A -->|hi| B",
+      "data-markdown-copy": serializeCodeBlockToMarkdown("A -->|hi| B", "mermaid"),
+    });
+    expect(
+      serializeTableElementToMarkdown(
+        asNode(
+          renderedTable([new FakeText("Command"), new FakeText("Diagram")], [code, diagram]),
+        ) as Element,
+      ),
+    ).toBe("| Command | Diagram |\n| --- | --- |\n| a  b | ```mermaid A -->\\|hi\\| B ``` |");
+  });
+
   it("escapes pipes in cells and keeps links and inline code", () => {
     const table = renderedTable(
       [new FakeText("Name"), new FakeText("Note")],

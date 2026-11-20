@@ -50,6 +50,19 @@ describe("buildFileChipParentSuffixByPath", () => {
     const suffixes = buildFileChipParentSuffixByPath(["/a/x/src/lib/i.ts", "/b/x/src/lib/i.ts"]);
     expect(suffixes.get("/a/x/src/lib/i.ts")).toBe("a/x/src/lib");
   });
+
+  it("tells a shorter path apart from a longer one ending in the same folders", () => {
+    const suffixes = buildFileChipParentSuffixByPath(["src/index.ts", "/repo/src/index.ts"]);
+    expect(suffixes.get("src/index.ts")).toBe("src");
+    expect(suffixes.get("/repo/src/index.ts")).toBe("repo/src");
+  });
+
+  it("labels a large group of same-named files in linear time", () => {
+    const paths = Array.from({ length: 5_000 }, (_, index) => `/repo/pkg${index}/src/index.ts`);
+    const suffixes = buildFileChipParentSuffixByPath(paths);
+    expect(suffixes.get("/repo/pkg0/src/index.ts")).toBe("pkg0/src");
+    expect(suffixes.get("/repo/pkg4999/src/index.ts")).toBe("pkg4999/src");
+  });
 });
 
 describe("isPathLikeLinkLabel", () => {

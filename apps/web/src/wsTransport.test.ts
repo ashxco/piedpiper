@@ -1,4 +1,10 @@
-import { WS_METHODS } from "@piedpiper/contracts";
+import {
+  CommandId,
+  MessageId,
+  OrchestrationDispatchCommandError,
+  ThreadId,
+  WS_METHODS,
+} from "@piedpiper/contracts";
 import { Effect, Stream } from "effect";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -12,6 +18,7 @@ import {
   subscriptionRetryDelayMs,
   WsTransport,
 } from "./wsTransport";
+import { createWsRpcClient } from "./wsRpcClient";
 import { createWsFirstOpenGate } from "./rpc/wsFirstOpenGate";
 
 type WsEventType = "open" | "message" | "close" | "error";
@@ -177,6 +184,113 @@ describe("WsTransport", () => {
 
     expect(getSocket().url).toBe("wss://app.example.com/ws");
     await transport.dispose();
+  });
+
+  it("resends the same message command after losing its acknowledgement", async () => {
+    const transport = new WsTransport("ws://localhost:3020");
+    try {
+      const command = {
+        type: "thread.turn.start" as const,
+        commandId: CommandId.makeUnsafe("retry-command"),
+        threadId: ThreadId.makeUnsafe("thread"),
+        message: {
+          messageId: MessageId.makeUnsafe("message"),
+          role: "user" as const,
+          text: "hello",
+          attachments: [],
+        },
+        runtimeMode: "full-access" as const,
+        interactionMode: "default" as const,
+        createdAt: new Date().toISOString(),
+      };
+      const result = createWsRpcClient(transport).orchestration.dispatchCommand(command);
+      await waitFor(() => expect(sockets).toHaveLength(1));
+      const first = getSocket();
+      first.open();
+      await waitFor(() => expect(first.sent).toHaveLength(1));
+      const original = JSON.parse(first.sent[0]!);
+      first.close(1006);
+      await waitFor(() => expect(sockets.length).toBeGreaterThan(1), 5_000);
+      const replacement = getSocket();
+      replacement.open();
+      await waitFor(() => expect(replacement.sent).toHaveLength(1));
+      const resent = JSON.parse(replacement.sent[0]!);
+      expect(resent.payload).toEqual(original.payload);
+      replacement.serverMessage(
+        JSON.stringify({
+          _tag: "Exit",
+          requestId: resent.id,
+          exit: { _tag: "Success", value: { sequence: 7 } },
+        }),
+      );
+      await expect(result).resolves.toEqual({ sequence: 7 });
+    } finally {
+      await transport.dispose();
+    }
+  });
+
+  it("stops resending after two replacement sockets also lose the request", async () => {
+    const transport = new WsTransport("ws://localhost:3020");
+    try {
+      const result = transport.request((client) => client[WS_METHODS.serverGetSettings]({}), {
+        resendAfterSocketLoss: true,
+      });
+      const rejected = expect(result).rejects.toThrow("SocketCloseError");
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        await waitFor(() => expect(sockets).toHaveLength(attempt), 5_000);
+        const socket = getSocket();
+        socket.open();
+        await waitFor(() => expect(socket.sent).toHaveLength(1));
+        socket.close(1006);
+      }
+      await rejected;
+    } finally {
+      await transport.dispose();
+    }
+  });
+
+  it("does not retry a server-side command failure", async () => {
+    const transport = new WsTransport("ws://localhost:3020");
+    try {
+      const execute = vi.fn(() =>
+        Effect.fail(new OrchestrationDispatchCommandError({ message: "Invalid command" })),
+      );
+      const result = transport.request(execute, { resendAfterSocketLoss: true });
+      const rejected = expect(result).rejects.toThrow("Invalid command");
+      await waitFor(() => expect(sockets).toHaveLength(1));
+      getSocket().open();
+      await rejected;
+      expect(execute).toHaveBeenCalledTimes(1);
+    } finally {
+      await transport.dispose();
+    }
+  });
+
+  it("fails a request the server never answers once its timeout passes", async () => {
+    const transport = new WsTransport("ws://localhost:3020");
+    try {
+      const result = transport.request((client) => client[WS_METHODS.serverGetSettings]({}), {
+        timeout: 50,
+        timeoutMessage: "The server did not confirm the message within 60 seconds.",
+      });
+      const rejected = expect(result).rejects.toThrow("did not confirm the message");
+      await waitFor(() => expect(sockets).toHaveLength(1));
+      const socket = getSocket();
+      socket.open();
+      await waitFor(() => expect(socket.sent).toHaveLength(1));
+      await rejected;
+    } finally {
+      await transport.dispose();
+    }
+  });
+
+  it("rejects reconnect waiters when disposed", async () => {
+    const gate = createWsFirstOpenGate();
+    gate.markOpen();
+    const result = gate.waitForNextOpen(gate.generation());
+    const rejected = expect(result).rejects.toThrow("Transport disposed");
+    gate.dispose();
+    await rejected;
   });
 
   it("sends unary RPC requests and resolves successful exits", async () => {

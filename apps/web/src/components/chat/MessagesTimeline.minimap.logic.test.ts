@@ -299,7 +299,7 @@ describe("minimap geometry", () => {
 describe("resolveTimelineMinimapHighlightedIndices", () => {
   const viewport = { viewportTop: 100, viewportBottom: 500 };
 
-  it("highlights only user messages that intersect the viewport", () => {
+  it("highlights only turns that intersect the viewport", () => {
     expect(
       resolveTimelineMinimapHighlightedIndices({
         ...viewport,
@@ -314,13 +314,35 @@ describe("resolveTimelineMinimapHighlightedIndices", () => {
     ).toEqual([1, 2]);
   });
 
-  it("highlights nothing when no user message is on screen", () => {
+  it("keeps a turn lit while only its reply is on screen", () => {
     expect(
       resolveTimelineMinimapHighlightedIndices({
         ...viewport,
         itemBounds: [
           { top: -400, height: 40 },
           { top: 20, height: 40 },
+          { top: 900, height: 40 },
+        ],
+      }),
+    ).toEqual([1]);
+    // The last turn's reply runs to the end of the conversation.
+    expect(
+      resolveTimelineMinimapHighlightedIndices({
+        ...viewport,
+        itemBounds: [
+          { top: -900, height: 40 },
+          { top: -400, height: 40 },
+        ],
+      }),
+    ).toEqual([1]);
+  });
+
+  it("highlights nothing when every turn starts below the viewport", () => {
+    expect(
+      resolveTimelineMinimapHighlightedIndices({
+        ...viewport,
+        itemBounds: [
+          { top: 600, height: 40 },
           { top: 900, height: 40 },
         ],
       }),

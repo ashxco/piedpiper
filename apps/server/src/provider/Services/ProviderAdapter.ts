@@ -12,6 +12,7 @@ import type {
   ProviderApprovalDecision,
   ProviderGoal,
   ProviderKind,
+  ModelSelection,
   ProviderUserInputAnswers,
   ProviderRuntimeEvent,
   ProviderSendTurnInput,
@@ -79,6 +80,12 @@ export interface ProviderAdapterShape<TError> {
   readonly sendTurn: (
     input: ProviderSendTurnInput,
   ) => Effect.Effect<ProviderTurnStartResult, TError>;
+
+  /** Applies compatible selection options to an already running query. */
+  readonly applyModelSelection?: (input: {
+    readonly threadId: ThreadId;
+    readonly modelSelection: ModelSelection;
+  }) => Effect.Effect<boolean, TError>;
 
   /**
    * Interrupt an active turn.

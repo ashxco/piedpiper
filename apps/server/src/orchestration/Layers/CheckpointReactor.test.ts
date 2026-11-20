@@ -873,6 +873,38 @@ describe("CheckpointReactor", () => {
     ).toBe(false);
   });
 
+  it("records a failed Git probe as an error checkpoint", async () => {
+    const harness = await createHarness({ seedFilesystemCheckpoints: false });
+    await setReadySession(harness, "probe-failure");
+    const base = {
+      provider: "codex" as const,
+      threadId: ThreadId.makeUnsafe("thread-1"),
+      turnId: asTurnId("probe-turn"),
+      createdAt: new Date().toISOString(),
+    };
+    await harness.provider.emit({
+      ...base,
+      type: "turn.started",
+      eventId: EventId.makeUnsafe("probe-start"),
+    });
+    await harness.drain();
+    fs.writeFileSync(path.join(harness.cwd, ".git", "config"), "[invalid config");
+    await harness.provider.emit({
+      ...base,
+      type: "turn.completed",
+      eventId: EventId.makeUnsafe("probe-complete"),
+      payload: { state: "completed" },
+    });
+    await harness.drain();
+    const thread = (await Effect.runPromise(harness.engine.getReadModel())).threads.get(
+      base.threadId,
+    );
+    expect(thread?.checkpoints[0]).toMatchObject({ status: "error", files: [] });
+    expect(
+      thread?.activities.some((activity) => activity.kind === "checkpoint.capture.failed"),
+    ).toBe(true);
+  });
+
   it("records an unsupported workspace as a missing checkpoint without a failure activity", async () => {
     const harness = await createHarness({
       seedFilesystemCheckpoints: false,

@@ -18,13 +18,34 @@ const SUBSCRIBED_FRAME: TerminalSubscribedFrame = { type: "subscribed" };
 type Listener = (event: TerminalEvent) => Effect.Effect<void>;
 type Subscribe<E> = (listener: Listener) => Effect.Effect<() => void, E>;
 
-const queuedSize = (event: TerminalEvent) =>
+const byteLengthOf = (value: unknown) => (typeof value === "string" ? Buffer.byteLength(value) : 0);
+
+/**
+ * Charges every variable-size field a terminal stream item can carry, plus a fixed envelope, so
+ * byte budgets cannot be bypassed by a large payload in an uncharged field. A terminal event
+ * encodes as itself, so this stands in for its serialized size without serializing it.
+ */
+export const terminalEventSize = (event: TerminalEventStreamItem): number =>
   EVENT_OVERHEAD_BYTES +
+  ("threadId" in event
+    ? byteLengthOf(event.threadId) + byteLengthOf(event.terminalId) + byteLengthOf(event.createdAt)
+    : 0) +
   (event.type === "output"
-    ? Buffer.byteLength(event.data)
-    : "snapshot" in event
-      ? Buffer.byteLength(event.snapshot.history)
-      : 0);
+    ? byteLengthOf(event.data)
+    : event.type === "error"
+      ? byteLengthOf(event.message)
+      : event.type === "activity"
+        ? byteLengthOf(event.label)
+        : "snapshot" in event
+          ? byteLengthOf(event.snapshot.threadId) +
+            byteLengthOf(event.snapshot.terminalId) +
+            byteLengthOf(event.snapshot.history) +
+            byteLengthOf(event.snapshot.cwd) +
+            byteLengthOf(event.snapshot.label) +
+            byteLengthOf(event.snapshot.updatedAt)
+          : 0);
+
+const queuedSize = (event: TerminalEvent) => terminalEventSize(event);
 
 /**
  * Bridges a terminal event listener into a stream with a byte-charged pending

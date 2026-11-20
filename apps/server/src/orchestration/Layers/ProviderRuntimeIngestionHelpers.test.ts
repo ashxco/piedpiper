@@ -2,7 +2,11 @@ import { ThreadId } from "@piedpiper/contracts";
 import { describe, expect, it } from "vitest";
 
 import {
+  advanceAssistantTextScan,
+  assistantTextReadyBoundary,
+  EMPTY_ASSISTANT_TEXT_SCAN,
   openTaskIdsInActivities,
+  splitBufferedAssistantText,
   settleOpenTasksCommands,
 } from "./ProviderRuntimeIngestionHelpers.ts";
 
@@ -56,5 +60,45 @@ describe("settleOpenTasksCommands", () => {
         turnId: null,
       },
     });
+  });
+});
+
+describe("advanceAssistantTextScan", () => {
+  const text = [
+    "Intro paragraph.",
+    "",
+    "## Section",
+    "Body line.",
+    "- first item",
+    "- second item",
+    "```ts",
+    "const a = 1;",
+    "",
+    "```",
+    "1. ordered",
+    "2. next",
+    "**Bold title**",
+    "",
+    "trailing partial",
+  ].join("\n");
+
+  it("resumes a growing buffer with the same boundary as a full scan", () => {
+    for (const step of [1, 3, 7, 16]) {
+      let scan = EMPTY_ASSISTANT_TEXT_SCAN;
+      for (let end = 0; end <= text.length; end += step) {
+        const prefix = text.slice(0, end);
+        scan = advanceAssistantTextScan(scan, prefix);
+        const boundary = assistantTextReadyBoundary(scan);
+        expect(boundary === -1 ? "" : prefix.slice(0, boundary)).toBe(
+          splitBufferedAssistantText(prefix).ready,
+        );
+      }
+    }
+  });
+
+  it("starts over when the text no longer extends the scanned text", () => {
+    const scan = advanceAssistantTextScan(EMPTY_ASSISTANT_TEXT_SCAN, "```\ncode\n");
+    const fresh = advanceAssistantTextScan(scan, "Para.\n\nNext");
+    expect(assistantTextReadyBoundary(fresh)).toBe("Para.\n\n".length);
   });
 });

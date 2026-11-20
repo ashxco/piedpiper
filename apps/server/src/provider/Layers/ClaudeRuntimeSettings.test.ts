@@ -65,6 +65,61 @@ describe("Claude runtime settings", () => {
     ).toBe("");
     expect(resolve([{ autoCompactWindow: 12 }, model]).autoCompactWindow).toBe("150000");
   });
+  it("ranks CLAUDE_CODE_AUTO_COMPACT_WINDOW above the autoCompactWindow keys", () => {
+    const model = { modelSettings: { "claude-opus-4-6": { autoCompactWindow: 150_000 } } };
+    const withEnv = (
+      environment: NodeJS.ProcessEnv,
+      settings: ReadonlyArray<Record<string, unknown>> = [model],
+    ) =>
+      resolveClaudeRuntimeSettings({
+        settings,
+        model: "claude-opus-4-6",
+        autoCompactWindow: "",
+        environment,
+      }).autoCompactWindow;
+    expect(withEnv({ CLAUDE_CODE_AUTO_COMPACT_WINDOW: "300000" })).toBe("300000");
+    expect(
+      withEnv({ CLAUDE_CODE_AUTO_COMPACT_WINDOW: "300000" }, [
+        { env: { CLAUDE_CODE_AUTO_COMPACT_WINDOW: "400000" } },
+        model,
+      ]),
+    ).toBe("400000");
+    // An out-of-range value falls back to the settings keys, as Claude Code does.
+    expect(withEnv({ CLAUDE_CODE_AUTO_COMPACT_WINDOW: "12" })).toBe("150000");
+    // Pied Piper's own setting still wins.
+    expect(
+      resolveClaudeRuntimeSettings({
+        settings: [model],
+        model: "claude-opus-4-6",
+        autoCompactWindow: "500000",
+        environment: { CLAUDE_CODE_AUTO_COMPACT_WINDOW: "300000" },
+      }).autoCompactWindow,
+    ).toBe("500000");
+  });
+  it("reports no auto-compact window when auto-compaction is off", () => {
+    const window = { autoCompactWindow: 400_000 };
+    expect(resolve([{ ...window, autoCompactEnabled: false }], "300000").autoCompactWindow).toBe(
+      "",
+    );
+    // The highest-priority file that sets the key decides.
+    expect(
+      resolve([{ autoCompactEnabled: true }, { ...window, autoCompactEnabled: false }])
+        .autoCompactWindow,
+    ).toBe("400000");
+    expect(resolve([{ env: { DISABLE_AUTO_COMPACT: "1" } }, window]).autoCompactWindow).toBe("");
+    expect(
+      resolveClaudeRuntimeSettings({
+        settings: [window],
+        model: "claude-opus-4-6",
+        autoCompactWindow: "",
+        environment: { DISABLE_COMPACT: " TRUE ", ENABLE_TOOL_SEARCH: "auto" },
+      }),
+    ).toEqual({ autoCompactWindow: "", toolSearchOverride: "true" });
+    expect(resolve([{ env: { DISABLE_AUTO_COMPACT: "0" } }, window]).autoCompactWindow).toBe(
+      "400000",
+    );
+  });
+
   it("reports the reserve-adjusted threshold only below the model cap", () => {
     expect(claudeAutoCompactThreshold("150000", 200_000)).toEqual({
       autoCompactThreshold: 117_000,

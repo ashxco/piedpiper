@@ -159,9 +159,24 @@ export const resolveSymlinkTarget = (filePath: string) =>
     });
   });
 
+// Saves keep the replaced file's mode and create new files owner-only. A chmod rather than an
+// open mode, since the umask narrows an open mode.
+const replacedFileMode = (fs: FileSystem.FileSystem, targetPath: string) =>
+  fs.stat(targetPath).pipe(
+    Effect.map((info) => info.mode & 0o777),
+    Effect.catchIf(isNotFoundError, () => Effect.succeed(0o600)),
+  );
+
+const isUnsupportedSync = (error: PlatformError.PlatformError) => {
+  const code = (error.reason.cause as NodeJS.ErrnoException | undefined)?.code;
+  return code === "EINVAL" || code === "ENOTSUP" || code === "ENOSYS";
+};
+
 /**
  * Write `contents` to a sibling temp file and rename it over `filePath` (or the
  * file its symlinks finally name), so a crash mid-write never leaves a torn file.
+ * The temp file is synced before the rename and its directory after it, so a crash
+ * soon after a save cannot leave the target empty.
  */
 export const writeFileStringAtomically = (
   filePath: string,
@@ -171,21 +186,41 @@ export const writeFileStringAtomically = (
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
+    const platform = options?.platform ?? process.platform;
     const targetPath = yield* resolveSymlinkTarget(filePath);
+    const targetDirectory = path.dirname(targetPath);
     const tempPath = `${targetPath}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 10)}.tmp`;
-    yield* fs.makeDirectory(path.dirname(targetPath), { recursive: true });
-    yield* fs
-      .writeFileString(tempPath, contents)
-      .pipe(
-        Effect.andThen(
-          renameReplacingWithRetry(
-            tempPath,
-            targetPath,
-            options?.platform ? { platform: options.platform } : undefined,
-          ),
-        ),
-        Effect.ensuring(fs.remove(tempPath, { force: true }).pipe(Effect.ignore({ log: true }))),
-      );
+    yield* fs.makeDirectory(targetDirectory, { recursive: true });
+    // One write-only handle: a reopen fails when the umask or the chmod drops read access.
+    // Closed before the rename, which Windows refuses for open files.
+    const writeTempFile = Effect.scoped(
+      Effect.gen(function* () {
+        const file = yield* fs.open(tempPath, { flag: "w" });
+        yield* file.writeAll(new TextEncoder().encode(contents));
+        if (platform !== "win32") {
+          yield* fs.chmod(tempPath, yield* replacedFileMode(fs, targetPath));
+        }
+        yield* file.sync;
+      }),
+    );
+    // Persists the rename. A directory without read access cannot be opened to sync, and
+    // replacing in one needs only write and search access, so that save stands.
+    const syncDirectory =
+      platform === "win32"
+        ? Effect.void
+        : fs.open(targetDirectory, { flag: "r" }).pipe(
+            Effect.flatMap((directory) => directory.sync),
+            Effect.scoped,
+            Effect.catchIf(
+              (error) => error.reason._tag === "PermissionDenied" || isUnsupportedSync(error),
+              (error) => Effect.logWarning("settings directory sync skipped", error),
+            ),
+          );
+    yield* writeTempFile.pipe(
+      Effect.andThen(renameReplacingWithRetry(tempPath, targetPath, { platform })),
+      Effect.ensuring(fs.remove(tempPath, { force: true }).pipe(Effect.ignore({ log: true }))),
+    );
+    yield* syncDirectory;
   });
 
 const PROVIDER_ORDER: readonly ProviderKind[] = ["codex", "claudeAgent"];

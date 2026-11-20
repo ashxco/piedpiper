@@ -1,13 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
-  clearChunkReloadGuard,
   hasChunkLoadFailed,
   installChunkLoadErrorReload,
+  isChunkLoadError,
   isChunkReloadScheduled,
   reloadOnceForChunkLoadError,
   resetChunkLoadStateForTests,
-  scheduleChunkReloadGuardRearm,
+  shouldRetryByReloading,
 } from "./chunkReloadGuard";
 
 function createStorageStub(): Storage {
@@ -37,21 +37,30 @@ describe("reloadOnceForChunkLoadError", () => {
     const storage = createStorageStub();
     const reload = vi.fn();
 
-    expect(reloadOnceForChunkLoadError(() => storage, reload)).toBe(true);
+    expect(reloadOnceForChunkLoadError(() => storage, reload, "build-1")).toBe(true);
     expect(reload).toHaveBeenCalledTimes(1);
 
-    expect(reloadOnceForChunkLoadError(() => storage, reload)).toBe(false);
+    expect(reloadOnceForChunkLoadError(() => storage, reload, "build-1")).toBe(false);
     expect(reload).toHaveBeenCalledTimes(1);
   });
 
-  it("reloads again after a clean boot cleared the guard", () => {
+  it("keeps the guard across boots so a chunk failing after boot cannot reload in a loop", () => {
     const storage = createStorageStub();
     const reload = vi.fn();
 
-    reloadOnceForChunkLoadError(() => storage, reload);
-    clearChunkReloadGuard(() => storage);
+    reloadOnceForChunkLoadError(() => storage, reload, "build-1");
+    // The reloaded page boots cleanly, then the same lazy chunk fails again when reopened.
+    expect(reloadOnceForChunkLoadError(() => storage, reload, "build-1")).toBe(false);
+    expect(reload).toHaveBeenCalledTimes(1);
+  });
 
-    expect(reloadOnceForChunkLoadError(() => storage, reload)).toBe(true);
+  it("reloads once more for a new build", () => {
+    const storage = createStorageStub();
+    const reload = vi.fn();
+
+    reloadOnceForChunkLoadError(() => storage, reload, "build-1");
+
+    expect(reloadOnceForChunkLoadError(() => storage, reload, "build-2")).toBe(true);
     expect(reload).toHaveBeenCalledTimes(2);
   });
 
@@ -60,7 +69,6 @@ describe("reloadOnceForChunkLoadError", () => {
 
     expect(reloadOnceForChunkLoadError(blockedStorage, reload)).toBe(false);
     expect(reload).not.toHaveBeenCalled();
-    expect(() => clearChunkReloadGuard(blockedStorage)).not.toThrow();
   });
 });
 
@@ -94,36 +102,34 @@ describe("installChunkLoadErrorReload", () => {
   });
 });
 
-describe("scheduleChunkReloadGuardRearm", () => {
-  it("keeps the guard when a chunk fails during the first render after boot", () => {
-    vi.useFakeTimers();
-    try {
-      let failed = false;
-      const clear = vi.fn();
-      scheduleChunkReloadGuardRearm({ hasFailed: () => failed, clear });
-
-      // A React.lazy chunk requested while the first route renders fails after onResolved.
-      failed = true;
-      vi.runAllTimers();
-
-      expect(clear).not.toHaveBeenCalled();
-    } finally {
-      vi.useRealTimers();
-    }
+describe("isChunkLoadError", () => {
+  it.each([
+    ["Failed to fetch dynamically imported module: http://localhost/assets/a.js", true],
+    ["error loading dynamically imported module: https://example.com/assets/a.js", true],
+    ["Importing a module script failed.", true],
+    ["Cannot read properties of undefined", false],
+  ])("%s", (message, expected) => {
+    expect(isChunkLoadError(new TypeError(message))).toBe(expected);
   });
 
-  it("clears the guard once the boot window passes without failures", () => {
-    vi.useFakeTimers();
-    try {
-      const clear = vi.fn();
-      scheduleChunkReloadGuardRearm({ hasFailed: () => false, clear, delayMs: 5_000 });
+  it("ignores values that are not errors", () => {
+    expect(isChunkLoadError("Failed to fetch dynamically imported module")).toBe(false);
+  });
+});
 
-      vi.advanceTimersByTime(4_999);
-      expect(clear).not.toHaveBeenCalled();
-      vi.advanceTimersByTime(1);
-      expect(clear).toHaveBeenCalledTimes(1);
-    } finally {
-      vi.useRealTimers();
-    }
+describe("shouldRetryByReloading", () => {
+  afterEach(() => resetChunkLoadStateForTests());
+
+  it("reloads for a chunk load error or after any chunk failed in this page", () => {
+    expect(shouldRetryByReloading(new Error("boom"))).toBe(false);
+    expect(
+      shouldRetryByReloading(new TypeError("Failed to fetch dynamically imported module: x")),
+    ).toBe(true);
+
+    const target = new EventTarget() as unknown as Window;
+    const dispose = installChunkLoadErrorReload(target, () => false);
+    target.dispatchEvent(new Event("vite:preloadError", { cancelable: true }));
+    expect(shouldRetryByReloading(new Error("boom"))).toBe(true);
+    dispose();
   });
 });

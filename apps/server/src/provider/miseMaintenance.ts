@@ -12,6 +12,7 @@ interface MiseInstall {
 }
 export interface MiseMaintenance {
   readonly misePath: string;
+  /** The name `mise upgrade` takes: the configured one, which may be a backend name. */
   readonly tool: string;
   readonly canUpgrade: boolean;
   readonly latestVersion: string | null;
@@ -45,6 +46,27 @@ function installsForTool(text: string | null, tool: string): readonly MiseInstal
       : [];
   } catch {
     return [];
+  }
+}
+
+/** The configured name (such as `npm:<pkg>`) whose installs include this install path. */
+function configuredToolForInstall(text: string | null, installPath: string): string | undefined {
+  if (!text) return undefined;
+  try {
+    const decoded: unknown = JSON.parse(text);
+    if (!decoded || typeof decoded !== "object" || Array.isArray(decoded)) return undefined;
+    return Object.entries(decoded as Record<string, unknown>).find(
+      ([, installs]) =>
+        Array.isArray(installs) &&
+        installs.some(
+          (entry) =>
+            entry &&
+            typeof entry === "object" &&
+            (entry as { install_path?: unknown }).install_path === installPath,
+        ),
+    )?.[0];
+  } catch {
+    return undefined;
   }
 }
 
@@ -153,7 +175,13 @@ export function makeMiseMaintenanceResolver(
         latest.clear();
         latest.set(key, cached);
       }
-      return { misePath, tool, canUpgrade: true, latestVersion: cached.version };
+      // `mise upgrade <short name>` skips a tool configured by its backend name, like `npm:<pkg>`.
+      const upgradeTool =
+        configuredToolForInstall(
+          await probe(misePath, ["ls", "--json", "--installed"], env),
+          install.install_path,
+        ) ?? tool;
+      return { misePath, tool: upgradeTool, canUpgrade: true, latestVersion: cached.version };
     });
   return Object.assign(resolve, { invalidate: () => latest.clear() });
 }

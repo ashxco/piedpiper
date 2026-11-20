@@ -1,3 +1,8 @@
+import * as NodeChildProcess from "node:child_process";
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
+
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -76,7 +81,7 @@ describe("readPathFromLoginShell", () => {
     expect(shell).toBe("/opt/homebrew/bin/fish");
     expect(args).toHaveLength(2);
     expect(args?.[0]).toBe("-ilc");
-    expect(args?.[1]).toContain("printenv PATH || true");
+    expect(args?.[1]).toContain('printenv PATH; or "$__PIEDPIPER_PRINTENV" PATH; or true');
     expect(args?.[1]).toContain("__PIEDPIPER_ENV_PATH_START__");
     expect(args?.[1]).toContain("__PIEDPIPER_ENV_PATH_END__");
     expect(options).toEqual(LOGIN_SHELL_PROBE_OPTIONS);
@@ -197,12 +202,69 @@ describe("buildLoginShellEnvironmentCaptureCommand", () => {
   });
 
   it("emits POSIX syntax for sh-family shells", () => {
-    const command = buildLoginShellEnvironmentCaptureCommand("/bin/zsh", ["SSH_AUTH_SOCK"]);
+    const command = buildLoginShellEnvironmentCaptureCommand(
+      "/bin/zsh",
+      ["SSH_AUTH_SOCK"],
+      "/usr/bin:relative",
+    );
     expect(command).toBe(
-      "printf '%s\\n' '__PIEDPIPER_ENV_SSH_AUTH_SOCK_START__'; printenv SSH_AUTH_SOCK || true; " +
+      '__PIEDPIPER_PRINTENV=$(/bin/sh -c \'command -v printenv || { [ -n "$1" ] && ' +
+        'PATH="$1" command -v printenv; } || printf %s /usr/bin/printenv\' piedpiper ' +
+        `'/usr/bin:${NodePath.posix.resolve("relative")}'); ` +
+        "printf '%s\\n' '__PIEDPIPER_ENV_SSH_AUTH_SOCK_START__'; " +
+        'printenv SSH_AUTH_SOCK || "$__PIEDPIPER_PRINTENV" SSH_AUTH_SOCK || true; ' +
         "printf '%s\\n' '__PIEDPIPER_ENV_SSH_AUTH_SOCK_END__'",
     );
   });
+
+  it("keeps the plain printenv probe for shells without a known fallback syntax", () => {
+    const command = buildLoginShellEnvironmentCaptureCommand("/bin/tcsh", ["PATH"], "/usr/bin");
+    expect(command).not.toContain("__PIEDPIPER_PRINTENV");
+    expect(command).toContain("printenv PATH || true");
+  });
+
+  it.runIf(NodeFS.existsSync("/bin/bash") && NodeFS.existsSync("/bin/sh"))(
+    "captures values when the profile replaces PATH with one that hides printenv",
+    () => {
+      const home = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "piedpiper-bash-env-"));
+      try {
+        const tools = NodePath.join(home, "tools 'quoted $dir");
+        NodeFS.mkdirSync(tools);
+        const printenv = NodeChildProcess.execFileSync("/bin/bash", ["-c", "type -P printenv"], {
+          encoding: "utf8",
+          env: { PATH: process.env.PATH },
+        }).trim();
+        // A wrapper rather than a copy: macOS kills copies of signed platform binaries.
+        NodeFS.writeFileSync(
+          NodePath.join(tools, "printenv"),
+          `#!/bin/sh\nexec '${printenv.replaceAll("'", "'\\''")}' "$@"\n`,
+          { mode: 0o755 },
+        );
+        const shellPath = NodePath.join(home, "bin");
+        const bashEnv = NodePath.join(home, "env.bash");
+        NodeFS.writeFileSync(
+          bashEnv,
+          [
+            `export PATH='${shellPath.replaceAll("'", "'\\''")}'`,
+            // Simulate a non-FHS host while keeping the real executable in its private prefix.
+            "function /usr/bin/printenv { return 127; }",
+          ].join("\n"),
+        );
+        const command = buildLoginShellEnvironmentCaptureCommand("/bin/bash", ["PATH"], tools);
+
+        expect(
+          NodeChildProcess.execFileSync("/bin/bash", ["-c", command], {
+            encoding: "utf8",
+            // macOS bash 3.2 skips BASH_ENV when stdin is a socket (it assumes rshd).
+            stdio: ["ignore", "pipe", "pipe"],
+            env: { HOME: home, PATH: tools, TERM: "dumb", BASH_ENV: bashEnv },
+          }),
+        ).toBe(`__PIEDPIPER_ENV_PATH_START__\n${shellPath}\n__PIEDPIPER_ENV_PATH_END__\n`);
+      } finally {
+        NodeFS.rmSync(home, { recursive: true, force: true });
+      }
+    },
+  );
 
   it("emits Nushell syntax that honours ENV_CONVERSIONS and list PATHs", () => {
     const command = buildLoginShellEnvironmentCaptureCommand("/opt/homebrew/bin/nu", [

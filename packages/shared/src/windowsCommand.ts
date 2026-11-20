@@ -86,8 +86,13 @@ function resolvePathEnvironmentVariable(env: NodeJS.ProcessEnv): string {
   return env.PATH ?? env.Path ?? env.path ?? "";
 }
 
+/** Windows environment keys are case-insensitive, so PATHEXT may arrive as `PathExt` or `pathext`. */
 export function resolveWindowsPathExtensions(env: NodeJS.ProcessEnv): ReadonlyArray<string> {
-  const rawValue = env.PATHEXT;
+  const rawValue =
+    env.PATHEXT ??
+    Object.entries(env).find(
+      ([key, value]) => key.toUpperCase() === "PATHEXT" && value !== undefined,
+    )?.[1];
   if (!rawValue) return DEFAULT_WINDOWS_PATH_EXTENSIONS;
   const parsed = rawValue
     .split(";")

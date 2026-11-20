@@ -120,7 +120,8 @@ export const makeProjectFaviconResolver = Effect.gen(function* () {
   const projectConfigFileLoader = yield* makeProjectConfigFileLoader;
 
   const resolveIconHref = (projectCwd: string, href: string): string[] => {
-    const clean = href.replace(/^\//, "");
+    // Browsers strip surrounding whitespace from URL attributes; file paths keep theirs.
+    const clean = href.trim().replace(/^\//, "");
     return [path.join(projectCwd, "public", clean), path.join(projectCwd, clean)];
   };
 

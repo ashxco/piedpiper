@@ -28,6 +28,7 @@ import {
   type GitActionMenuItem,
   type GitQuickAction,
   resolveLiveThreadBranchUpdate,
+  resolveCommitMessageAfterAction,
   resolveQuickAction,
   resolveThreadBranchUpdate,
 } from "./GitActionsControl.logic";
@@ -220,7 +221,16 @@ function GitQuickActionIcon({ quickAction }: { quickAction: GitQuickAction }) {
   return <InfoIcon className={iconClassName} />;
 }
 
-export default function GitActionsControl({ gitCwd, activeThreadId }: GitActionsControlProps) {
+/**
+ * One control per checkout: dialog state such as a commit message restored after a failed commit
+ * belongs to the repository it was written for, so moving to another thread's checkout starts
+ * fresh instead of carrying it along.
+ */
+export default function GitActionsControl(props: GitActionsControlProps) {
+  return <CheckoutGitActionsControl key={props.gitCwd ?? ""} {...props} />;
+}
+
+function CheckoutGitActionsControl({ gitCwd, activeThreadId }: GitActionsControlProps) {
   const threadToastData = useMemo(
     () => (activeThreadId ? { threadId: activeThreadId } : undefined),
     [activeThreadId],
@@ -475,7 +485,7 @@ export default function GitActionsControl({ gitCwd, activeThreadId }: GitActions
     featureBranch = false,
     progressToastId,
     filePaths,
-  }: RunGitActionWithToastInput) => {
+  }: RunGitActionWithToastInput): Promise<boolean> => {
     const actionStatus = statusOverride ?? gitStatusForActions;
     onConfirmed?.();
 
@@ -636,6 +646,7 @@ export default function GitActionsControl({ gitCwd, activeThreadId }: GitActions
       } else {
         toastManager.update(resolvedProgressToastId, successToastBase);
       }
+      return true;
     } catch (err) {
       activeGitActionProgressRef.current = null;
       const errorMessage = err instanceof Error ? err.message : "An error occurred.";
@@ -653,7 +664,15 @@ export default function GitActionsControl({ gitCwd, activeThreadId }: GitActions
           data: scopedToastData,
         });
       }
+      return false;
     }
+  };
+
+  // Keep a typed message for the retry unless the user already started a new one.
+  const restoreDialogCommitMessageOnFailure = (commitMessage: string) => (committed: boolean) => {
+    setDialogCommitMessage((current) =>
+      resolveCommitMessageAfterAction(current, commitMessage, committed),
+    );
   };
 
   // Effect Events may only be called from effects, so the follow-up gets its own wrapper.
@@ -680,7 +699,7 @@ export default function GitActionsControl({ gitCwd, activeThreadId }: GitActions
       ...(commitMessage ? { commitMessage } : {}),
       ...(!allSelected ? { filePaths: selectedFiles.map((f) => f.path) } : {}),
       featureBranch: true,
-    });
+    }).then(restoreDialogCommitMessageOnFailure(commitMessage));
   };
 
   const runQuickAction = () => {
@@ -750,7 +769,7 @@ export default function GitActionsControl({ gitCwd, activeThreadId }: GitActions
       action: "commit",
       ...(commitMessage ? { commitMessage } : {}),
       ...(!allSelected ? { filePaths: selectedFiles.map((f) => f.path) } : {}),
-    });
+    }).then(restoreDialogCommitMessageOnFailure(commitMessage));
   };
 
   const openChangedFileInEditor = useCallback(
@@ -938,6 +957,7 @@ export default function GitActionsControl({ gitCwd, activeThreadId }: GitActions
                   <div className="flex items-center gap-2">
                     {isEditingFiles && allFiles.length > 0 && (
                       <Checkbox
+                        aria-label="Include all files"
                         checked={allSelected}
                         indeterminate={!allSelected && !noneSelected}
                         onCheckedChange={() => {
@@ -979,6 +999,7 @@ export default function GitActionsControl({ gitCwd, activeThreadId }: GitActions
                             >
                               {isEditingFiles && (
                                 <Checkbox
+                                  aria-label={`Include ${file.path}`}
                                   checked={!excludedFiles.has(file.path)}
                                   onCheckedChange={() => {
                                     setExcludedFiles((prev) => {

@@ -222,6 +222,10 @@ describe("TerminalProcessTable", () => {
     expect(command).toContain('-Filter "ParentProcessId = 9000 OR ParentProcessId = 9001"');
     expect(command).toContain("-Property ProcessId,ParentProcessId,Name");
     expect(command).toContain("-ErrorAction Stop");
+    // Non-ASCII process names survive only when PowerShell writes UTF-8.
+    expect(
+      command.startsWith("[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); "),
+    ).toBe(true);
   });
 
   it("doubles the poll delay per failed snapshot up to 60 seconds", () => {

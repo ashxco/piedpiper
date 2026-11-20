@@ -49,6 +49,20 @@ it.layer(NodeServices.layer)("browseDirectories", (it) => {
     }),
   );
 
+  it.effect("matches folder names stored decomposed, as macOS Finder names them", () =>
+    Effect.gen(function* () {
+      const path = yield* Path.Path;
+      const root = yield* makeTree(["De\u0301veloppement", "beta"]);
+
+      expect(names(yield* browseDirectories(path.join(root, "d\u00e9v")))).toEqual([
+        "De\u0301veloppement",
+      ]);
+      expect(names(yield* browseDirectories(path.join(root, "De")))).toEqual([
+        "De\u0301veloppement",
+      ]);
+    }),
+  );
+
   it.effect("shows dot directories only for a whole directory or a dot prefix", () =>
     Effect.gen(function* () {
       const root = yield* makeTree([".config", "config", "child/.nested"]);

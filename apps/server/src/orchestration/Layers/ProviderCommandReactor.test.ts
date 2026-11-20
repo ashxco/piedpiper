@@ -19,7 +19,17 @@ import {
   TurnId,
 } from "@piedpiper/contracts";
 import { IMAGE_ONLY_BOOTSTRAP_PROMPT } from "@piedpiper/shared/imageOnlyBootstrapPrompt";
-import { Deferred, Effect, Exit, Layer, ManagedRuntime, PubSub, Scope, Stream } from "effect";
+import {
+  Deferred,
+  type Duration,
+  Effect,
+  Exit,
+  Layer,
+  ManagedRuntime,
+  PubSub,
+  Scope,
+  Stream,
+} from "effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { afterEach, describe, expect, it, type Mock, vi } from "vitest";
 
@@ -46,7 +56,7 @@ import { OrchestrationEngineLive } from "./OrchestrationEngine.ts";
 import { OrchestrationProjectionPipelineLive } from "./ProjectionPipeline.ts";
 import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQuery.ts";
 import {
-  ProviderCommandReactorLive,
+  makeProviderCommandReactorLive,
   resolveTitleRegenerationCwd,
 } from "./ProviderCommandReactor.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
@@ -127,6 +137,7 @@ describe("ProviderCommandReactor", () => {
     readonly threadModelSelection?: ModelSelection;
     readonly sessionModelSwitch?: "unsupported" | "in-session";
     readonly threadTitleInstructions?: string;
+    readonly effectSlotWait?: Duration.Input;
     readonly branchNaming?: {
       readonly branchNamingMode: "static" | "semantic" | "custom";
       readonly branchNamePrefix?: string;
@@ -263,10 +274,12 @@ describe("ProviderCommandReactor", () => {
       }),
     );
 
+    const applyModelSelection = vi.fn(() => Effect.succeed(true));
     const unsupported = () => Effect.die(new Error("Unsupported provider call in test")) as never;
     const service: ProviderServiceShape = {
       startSession: startSession as ProviderServiceShape["startSession"],
       sendTurn: sendTurn as ProviderServiceShape["sendTurn"],
+      applyModelSelection,
       interruptTurn: interruptTurn as ProviderServiceShape["interruptTurn"],
       respondToRequest: respondToRequest as ProviderServiceShape["respondToRequest"],
       respondToUserInput: respondToUserInput as ProviderServiceShape["respondToUserInput"],
@@ -292,7 +305,9 @@ describe("ProviderCommandReactor", () => {
       Layer.provide(OrchestrationCommandReceiptRepositoryLive),
       Layer.provide(SqlitePersistenceMemory),
     );
-    const layer = ProviderCommandReactorLive.pipe(
+    const layer = makeProviderCommandReactorLive(
+      input?.effectSlotWait === undefined ? undefined : { effectSlotWait: input.effectSlotWait },
+    ).pipe(
       Layer.provideMerge(orchestrationLayer),
       Layer.provideMerge(Layer.succeed(ProviderService, service)),
       Layer.provideMerge(Layer.succeed(GitCore, { renameBranch } as unknown as GitCoreShape)),
@@ -358,6 +373,7 @@ describe("ProviderCommandReactor", () => {
       runtime,
       projectWorkspaceRoot,
       projectWorktreePath,
+      applyModelSelection,
       startSession,
       sendTurn,
       interruptTurn,
@@ -374,6 +390,62 @@ describe("ProviderCommandReactor", () => {
       drain,
     };
   }
+
+  it("applies a selection through the durable worker during a running turn", async () => {
+    const selection = { provider: "claudeAgent" as const, model: "claude-opus-5-5" };
+    const harness = await createHarness({ threadModelSelection: selection });
+    const threadId = ThreadId.makeUnsafe("thread-1");
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.makeUnsafe("live-start"),
+        threadId,
+        message: {
+          messageId: asMessageId("live-message"),
+          role: "user",
+          text: "Keep working",
+          attachments: [],
+        },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        createdAt: new Date().toISOString(),
+      }),
+    );
+    await harness.drain();
+    const running = (await Effect.runPromise(harness.engine.getReadModel())).threads.get(threadId)!;
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.makeUnsafe("live-running"),
+        threadId,
+        session: { ...running.session!, status: "running", activeTurnId: asTurnId("turn-1") },
+        createdAt: new Date().toISOString(),
+      }),
+    );
+    const changed = { ...selection, options: { effort: "xhigh" as const } };
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.meta.update",
+        commandId: CommandId.makeUnsafe("live-effort"),
+        threadId,
+        modelSelection: changed,
+      }),
+    );
+    await harness.drain();
+    expect(harness.applyModelSelection).toHaveBeenCalledWith({ threadId, modelSelection: changed });
+    expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+    expect(harness.stopSession).not.toHaveBeenCalled();
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.meta.update",
+        commandId: CommandId.makeUnsafe("live-title"),
+        threadId,
+        title: "Renamed",
+      }),
+    );
+    await harness.drain();
+    expect(harness.applyModelSelection).toHaveBeenCalledTimes(1);
+  });
 
   it("starts a fresh provider session while retaining the chat history", async () => {
     const harness = await createHarness();
@@ -580,6 +652,52 @@ describe("ProviderCommandReactor", () => {
     expect(thread?.session?.activeTurnId).toBeNull();
   });
 
+  it("keeps starting other threads' turns while one provider call never returns", async () => {
+    const harness = await createHarness({ effectSlotWait: "50 millis" });
+    const now = new Date().toISOString();
+    harness.sendTurn.mockImplementationOnce((_: unknown) => Effect.never as never);
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.create",
+        commandId: CommandId.makeUnsafe("cmd-thread-create-2"),
+        threadId: ThreadId.makeUnsafe("thread-2"),
+        projectId: asProjectId("project-1"),
+        title: "Second thread",
+        modelSelection: { provider: "codex", model: "gpt-5-codex" },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        branch: null,
+        worktreePath: null,
+        createdAt: now,
+      }),
+    );
+    for (const threadId of ["thread-1", "thread-2"]) {
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.makeUnsafe(`cmd-turn-start-stalled-${threadId}`),
+          threadId: ThreadId.makeUnsafe(threadId),
+          message: {
+            messageId: asMessageId(`user-message-stalled-${threadId}`),
+            role: "user",
+            text: "hello",
+            attachments: [],
+          },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt: now,
+        }),
+      );
+    }
+
+    await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+    expect(
+      harness.sendTurn.mock.calls.map(
+        (call) => (call[0] as { readonly threadId: string }).threadId,
+      ),
+    ).toEqual(["thread-1", "thread-2"]);
+  });
+
   it("marks the session as errored when the provider turn start fails", async () => {
     const harness = await createHarness();
     const now = new Date().toISOString();
@@ -737,6 +855,8 @@ describe("ProviderCommandReactor", () => {
     await waitFor(() => harness.generateThreadTitle.mock.calls.length === 1);
     expect(harness.generateThreadTitle.mock.calls[0]?.[0]).toMatchObject({
       additionalInstructions: "Name the subsystem first",
+      // The project name, so the model can leave it out of the title.
+      projectTitle: "Provider Project",
     });
   });
 

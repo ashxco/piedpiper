@@ -81,15 +81,15 @@ export const makeWorkspacePaths = Effect.gen(function* () {
 
   const resolveRelativePathWithinRoot: WorkspacePathsShape["resolveRelativePathWithinRoot"] =
     Effect.fn("WorkspacePaths.resolveRelativePathWithinRoot")(function* (input) {
-      const normalizedInputPath = input.relativePath.trim();
-      if (path.isAbsolute(normalizedInputPath)) {
+      // Not trimmed: file names may begin or end with whitespace.
+      if (path.isAbsolute(input.relativePath)) {
         return yield* new WorkspacePathOutsideRootError({
           workspaceRoot: input.workspaceRoot,
           relativePath: input.relativePath,
         });
       }
 
-      const absolutePath = path.resolve(input.workspaceRoot, normalizedInputPath);
+      const absolutePath = path.resolve(input.workspaceRoot, input.relativePath);
       const relativeToRoot = toPosixRelativePath(
         path.relative(input.workspaceRoot, absolutePath),
         path.sep,

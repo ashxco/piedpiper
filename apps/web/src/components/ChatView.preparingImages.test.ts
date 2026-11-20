@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   addPreparingComposerImages,
+  cancelPreparingComposerImages,
   canThumbnailPreparingImage,
   countPreparingComposerImages,
   createPreparingComposerImage,
@@ -56,6 +57,20 @@ describe("preparing composer images", () => {
     expect(removePreparingComposerImages(THREAD, new Set(["a", "b"]))).toEqual(new Set(["b"]));
     expect(removePreparingComposerImages(THREAD, new Set(["a", "b"]))).toEqual(new Set());
     expect(countPreparingComposerImages(THREAD)).toBe(0);
+  });
+
+  it("cancels a thread's preparing images, so their fitted results are dropped", () => {
+    addPreparingComposerImages(THREAD, [
+      createPreparingComposerImage("a", new File(["x"], "a.png", { type: "image/png" })),
+    ]);
+    addPreparingComposerImages(OTHER_THREAD, [{ id: "c", name: "c.png", previewUrl: null }]);
+    cancelPreparingComposerImages(THREAD);
+    expect(countPreparingComposerImages(THREAD)).toBe(0);
+    expect(countPreparingComposerImages(OTHER_THREAD)).toBe(1);
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:a.png");
+    // The fitting batch then finds nothing still preparing, and adds nothing to the draft.
+    expect(removePreparingComposerImages(THREAD, new Set(["a"]))).toEqual(new Set());
+    cancelPreparingComposerImages("missing");
   });
 
   it("revokes a preview once, when its tile goes", () => {

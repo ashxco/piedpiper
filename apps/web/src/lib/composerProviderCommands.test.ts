@@ -12,6 +12,8 @@ describe("isComposerPathWord", () => {
     expect(isComposerPathWord("/usr/bin", 0, 8)).toBe(true);
     expect(isComposerPathWord("/usr/bin", 0, 2)).toBe(true);
     expect(isComposerPathWord("/tmp/build.sh now", 0, 4)).toBe(true);
+    expect(isComposerPathWord(String.raw`/foo\bar`, 0, 4)).toBe(true);
+    expect(isComposerPathWord(String.raw`/foo\bar`, 0, 2)).toBe(true);
   });
 
   it("leaves a plain command alone", () => {

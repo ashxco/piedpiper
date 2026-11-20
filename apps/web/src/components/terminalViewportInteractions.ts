@@ -24,6 +24,7 @@ import {
   type TerminalSelectionCopyTarget,
   type TerminalBufferTarget,
 } from "./terminalViewportHelpers";
+import { createTerminalInputWriter } from "./terminalViewportInputWriter";
 import {
   collectWrappedTerminalLinkLine,
   createTerminalLinkModifierState,
@@ -261,14 +262,47 @@ export function bindTerminalInteractions(
     }
   };
 
-  const sendTerminalInput = async (data: string, fallbackError: string) => {
-    const currentTerminal = activeTerminal;
-    if (!currentTerminal) return;
-    try {
-      await api.terminal.write({ threadId, terminalId, data });
-    } catch (error) {
-      reportTerminalError(error, fallbackError);
-    }
+  // Orders input so a large paste is split into writes the server accepts and later keystrokes
+  // wait behind it instead of overtaking it.
+  const writeInput = createTerminalInputWriter();
+  const sendTerminalInput = (data: string, fallbackError: string, binary?: true) => {
+    if (!activeTerminal) return Promise.resolve();
+    let reported = false;
+    const report = (error: unknown, fallback: string) => {
+      if (reported) return;
+      reported = true;
+      reportTerminalError(error, fallback);
+    };
+    const writeChunk = (chunk: string) =>
+      api.terminal.write(
+        binary
+          ? { threadId, terminalId, data: chunk, binary }
+          : { threadId, terminalId, data: chunk },
+      );
+    return writeInput(
+      data,
+      async (chunk) => {
+        if (disposed) return "not-dispatched";
+        try {
+          await writeChunk(chunk);
+          return true;
+        } catch (error) {
+          report(error, fallbackError);
+          return false;
+        }
+      },
+      // Closing an interrupted bracketed paste still matters after this view is disposed.
+      async () => {
+        try {
+          await api.terminal.write({ threadId, terminalId, data: "\x1b[201~" });
+          return true;
+        } catch (error) {
+          report(error, "Failed to close interrupted paste");
+          return false;
+        }
+      },
+      () => report(null, "Terminal paste interrupted. Paste again when the terminal is ready."),
+    );
   };
 
   const selectionCopyTarget: TerminalSelectionCopyTarget = {
@@ -387,9 +421,11 @@ export function bindTerminalInteractions(
   });
 
   const inputDisposable = terminal.onData((data) => {
-    void api.terminal
-      .write({ threadId, terminalId, data })
-      .catch((err) => reportTerminalError(err, "Terminal write failed"));
+    void sendTerminalInput(data, "Terminal write failed");
+  });
+  // Legacy (X10) mouse reports carry raw bytes that must not be re-encoded as UTF-8.
+  const binaryInputDisposable = terminal.onBinary((data) => {
+    void sendTerminalInput(data, "Terminal write failed", true);
   });
 
   const selectionDisposable = terminal.onSelectionChange(() => {
@@ -456,6 +492,7 @@ export function bindTerminalInteractions(
       activeTerminal = null;
       clearSelectionAction();
       inputDisposable.dispose();
+      binaryInputDisposable.dispose();
       selectionDisposable.dispose();
       terminalLinksDisposable.dispose();
       mount.removeAttribute("title");

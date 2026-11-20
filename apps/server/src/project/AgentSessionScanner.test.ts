@@ -197,6 +197,36 @@ it.layer(NodeServices.layer)("scanAgentSessions", (it) => {
       }).pipe(Effect.scoped),
     );
 
+    it.effect("reads the newest Claude project folders first when the budget runs out", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const { claudeHome, gitRepo, claudeRecord, write, scan } = yield* setup;
+        const projectsDir = path.join(claudeHome, "projects");
+        // Listed first by name, but older than the folder holding the recent session.
+        for (const [index, name] of ["a-old", "b-old", "c-old", "d-old"].entries()) {
+          const repo = yield* gitRepo(name);
+          yield* write(path.join(projectsDir, name, "session.jsonl"), `${claudeRecord(repo)}\n`);
+          const old = new Date(Date.UTC(2020, 0, index + 1));
+          yield* fileSystem.utimes(path.join(projectsDir, name, "session.jsonl"), old, old);
+          yield* fileSystem.utimes(path.join(projectsDir, name), old, old);
+        }
+        const recent = yield* gitRepo("recent");
+        yield* write(
+          path.join(projectsDir, "z-recent", "session.jsonl"),
+          `${claudeRecord(recent)}\n`,
+        );
+
+        // Room to read two of the five folders.
+        const result = yield* scan({ maxTranscriptsPerSource: 2 });
+
+        expect(result.truncated).toBe(true);
+        expect(result.candidates.map((candidate) => candidate.path).toSorted()).toEqual(
+          [recent, path.join(path.dirname(recent), "d-old")].toSorted(),
+        );
+      }).pipe(Effect.scoped),
+    );
+
     it.effect("stops at the byte cap instead of reading a huge first record", () =>
       Effect.gen(function* () {
         const { gitRepo, write, claudeHome, claudeRecord, scan } = yield* setup;

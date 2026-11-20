@@ -3,6 +3,7 @@ import {
   getTimestampFormatOptions,
   parseTimestampDate,
   timestampLocale,
+  wallClockAsUtc,
 } from "../../timestampFormat";
 
 const tooltipFormatterCache = new Map<TimestampFormat, Intl.DateTimeFormat>();
@@ -22,8 +23,10 @@ export function formatTimelineRowTimestampTooltip(
       month: "short",
       day: "numeric",
       ...getTimestampFormatOptions(timestampFormat, true),
+      // Cached, so it formats wall-clock time in UTC to follow a system time zone change.
+      timeZone: "UTC",
     });
     tooltipFormatterCache.set(timestampFormat, formatter);
   }
-  return formatter.format(date);
+  return formatter.format(wallClockAsUtc(date));
 }

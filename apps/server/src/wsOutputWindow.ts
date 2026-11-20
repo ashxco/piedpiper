@@ -1,6 +1,8 @@
-import { WS_METHODS } from "@piedpiper/contracts";
+import { type TerminalEventStreamItem, WS_METHODS } from "@piedpiper/contracts";
 import * as Effect from "effect/Effect";
 import type { RpcServer } from "effect/unstable/rpc";
+
+import { terminalEventSize } from "./wsTerminalOutputStream";
 
 const MAX_PENDING_OUTPUT_CHUNKS = 8;
 const MAX_PENDING_OUTPUT_BYTES = 64 * 1024;
@@ -16,6 +18,14 @@ const COUNT_WINDOWED_STREAMS: ReadonlySet<string> = new Set([
   WS_METHODS.subscribeServerConfig,
   WS_METHODS.subscribeOrchestrationDomainEvents,
 ]);
+
+// Byte-windowed streams carry terminal stream items, whose encoded form is the item itself, so
+// charge their field sizes instead of serializing every chunk a second time just to measure it.
+const chunkSize = (values: ReadonlyArray<unknown>) =>
+  values.reduce<number>(
+    (total, value) => total + terminalEventSize(value as TerminalEventStreamItem),
+    0,
+  );
 
 export interface OutputWindow {
   readonly bytes: boolean;
@@ -85,7 +95,7 @@ export function withOutputWindow(
           const window = windowFor(clientId, String(response.requestId));
           if (window && receive) {
             const write = receive;
-            window.sizes.push(window.bytes ? Buffer.byteLength(JSON.stringify(response)) : 0);
+            window.sizes.push(window.bytes ? chunkSize(response.values) : 0);
             if (!isFull(window.sizes)) {
               return send.pipe(
                 Effect.andThen(() =>

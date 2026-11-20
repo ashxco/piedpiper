@@ -51,21 +51,73 @@ export const spawnAndCollect = (binaryPath: string, command: ChildProcess.Comman
           Effect.fail(defect instanceof Error ? defect : new Error(String(defect))),
         ),
       );
-    const [stdout, stderr, exitCode] = yield* Effect.all(
-      [
-        collectStreamAsString(child.stdout),
-        collectStreamAsString(child.stderr),
-        child.exitCode.pipe(Effect.map(Number)),
-      ],
-      { concurrency: "unbounded" },
-    );
-
-    const result: CommandResult = { stdout, stderr, code: exitCode };
-    if (isWindowsCommandNotFound(exitCode, stderr)) {
-      return yield* Effect.fail(new Error(`spawn ${binaryPath} ENOENT`));
-    }
-    return result;
+    return yield* collectProbeResult(binaryPath, child);
   }).pipe(Effect.scoped);
+
+/** Bounds each probe stream so a misbehaving CLI or wrapper cannot grow the server's memory. */
+export const MAX_PROBE_OUTPUT_BYTES = 8 * 1024 * 1024;
+
+/**
+ * Reads a stream to its end, keeping at most `maxBytes`; the rest is drained so the child
+ * never blocks on a full pipe.
+ */
+export const collectBoundedStreamText = <E>(
+  stream: Stream.Stream<Uint8Array, E>,
+  maxBytes: number,
+): Effect.Effect<{ readonly text: string; readonly truncated: boolean }, E> =>
+  Effect.suspend(() => {
+    const decoder = new TextDecoder();
+    let text = "";
+    let bytes = 0;
+    let truncated = false;
+    return stream.pipe(
+      Stream.runForEach((chunk) =>
+        Effect.sync(() => {
+          if (truncated) return;
+          bytes += chunk.byteLength;
+          if (bytes > maxBytes) {
+            truncated = true;
+            text = "";
+            return;
+          }
+          text += decoder.decode(chunk, { stream: true });
+        }),
+      ),
+      Effect.map(() => ({ text: truncated ? "" : text + decoder.decode(), truncated })),
+    );
+  });
+
+/** Collects a probe child's output and exit code, failing when either stream is oversized. */
+export const collectProbeResult = Effect.fn("collectProbeResult")(function* <E>(
+  binaryPath: string,
+  child: {
+    readonly stdout: Stream.Stream<Uint8Array, E>;
+    readonly stderr: Stream.Stream<Uint8Array, E>;
+    readonly exitCode: Effect.Effect<unknown, E>;
+  },
+) {
+  const [stdout, stderr, exitCode] = yield* Effect.all(
+    [
+      collectBoundedStreamText(child.stdout, MAX_PROBE_OUTPUT_BYTES),
+      collectBoundedStreamText(child.stderr, MAX_PROBE_OUTPUT_BYTES),
+      child.exitCode.pipe(Effect.map(Number)),
+    ],
+    { concurrency: "unbounded" },
+  );
+  const oversized = stdout.truncated ? "stdout" : stderr.truncated ? "stderr" : undefined;
+  if (oversized !== undefined) {
+    return yield* Effect.fail(
+      new Error(
+        `Provider status check produced too much ${oversized} (limit ${MAX_PROBE_OUTPUT_BYTES} bytes). Check the configured executable or wrapper in this environment's terminal.`,
+      ),
+    );
+  }
+  const result: CommandResult = { stdout: stdout.text, stderr: stderr.text, code: exitCode };
+  if (isWindowsCommandNotFound(exitCode, stderr.text)) {
+    return yield* Effect.fail(new Error(`spawn ${binaryPath} ENOENT`));
+  }
+  return result;
+});
 
 export function detailFromResult(
   result: CommandResult & { readonly timedOut?: boolean },
@@ -166,14 +218,3 @@ export function buildServerProvider(input: {
     models: input.models,
   };
 }
-
-export const collectStreamAsString = <E>(
-  stream: Stream.Stream<Uint8Array, E>,
-): Effect.Effect<string, E> =>
-  stream.pipe(
-    Stream.decodeText(),
-    Stream.runFold(
-      () => "",
-      (acc, chunk) => acc + chunk,
-    ),
-  );

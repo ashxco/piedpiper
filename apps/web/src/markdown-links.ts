@@ -98,6 +98,10 @@ function parseFileUrlHref(
   href: string,
   options?: { readonly decodePath?: boolean },
 ): { path: string; hash: string } | null {
+  // Chromium on Windows parses any one-letter scheme as a drive letter
+  // (`new URL("d:x")` is `file:///D:/x`), so the protocol check alone would turn
+  // such links into file links only on Windows.
+  if (!href.trim().toLowerCase().startsWith("file:")) return null;
   try {
     const parsed = new URL(href);
     if (parsed.protocol.toLowerCase() !== "file:") return null;
@@ -355,6 +359,38 @@ export function resolveMarkdownRelativeFilePath(
   return { path: pathWithPosition.slice(0, pathWithPosition.length - position.length), position };
 }
 
+// Conventional extensionless file names. `name:digits` also matches `error:1` and `port:3000`,
+// and `dir/name` also matches `origin/main`, so only these link without an extension.
+export const EXTENSIONLESS_FILE_NAMES: ReadonlySet<string> = new Set([
+  "Makefile",
+  "makefile",
+  "GNUmakefile",
+  "Dockerfile",
+  "Containerfile",
+  "Justfile",
+  "justfile",
+  "Rakefile",
+  "Gemfile",
+  "Procfile",
+  "Brewfile",
+  "Caddyfile",
+  "Vagrantfile",
+  "Jenkinsfile",
+  "Podfile",
+  "Fastfile",
+  "BUILD",
+  "WORKSPACE",
+  "LICENSE",
+  "LICENCE",
+  "COPYING",
+  "NOTICE",
+  "AUTHORS",
+  "CONTRIBUTORS",
+  "CHANGELOG",
+  "README",
+  "CODEOWNERS",
+]);
+
 const INLINE_CODE_DISQUALIFIER_PATTERN = /[\s`]/;
 const PATH_SEPARATOR_PATTERN = /[\\/]/;
 // Agents shorten long paths with a `...` or `…` segment, which no file link can open.
@@ -476,7 +512,9 @@ export function inlineCodeFilePathCandidate(codeText: string): string | null {
     if (looksLikeHostname(firstSegment, hasPosition)) return null;
     const basename = withoutPosition.split("/").at(-1) ?? "";
     if (VERSION_SUFFIX_PATTERN.test(basename)) return null;
-    if (!hasPosition && !FILE_EXTENSION_PATTERN.test(basename)) return null;
+    if (!hasPosition && !FILE_EXTENSION_PATTERN.test(basename)) {
+      return EXTENSIONLESS_FILE_NAMES.has(basename) ? candidate : null;
+    }
   }
   return candidate;
 }

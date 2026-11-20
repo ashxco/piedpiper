@@ -551,12 +551,22 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       });
       const indexPath = path.join(staticDir, "index.html");
       yield* fileSystem.writeFileString(indexPath, "<html>router-static-ok</html>");
+      yield* fileSystem.writeFileString(path.join(staticDir, "app.js"), "console.log(1)");
 
       yield* buildAppUnderTest({ config: { staticDir } });
 
       const response = yield* HttpClient.get("/");
       assert.equal(response.status, 200);
       assert.include(yield* response.text, "router-static-ok");
+      // No other site may frame the app, whether index.html is served directly or as a fallback.
+      for (const route of ["/", "/index.html", "/some/client/route"]) {
+        const htmlResponse = yield* HttpClient.get(route);
+        assert.equal(htmlResponse.headers["content-security-policy"], "frame-ancestors 'none'");
+        assert.equal(htmlResponse.headers["x-frame-options"], "DENY");
+      }
+      const scriptResponse = yield* HttpClient.get("/app.js");
+      assert.equal(scriptResponse.status, 200);
+      assert.isUndefined(scriptResponse.headers["x-frame-options"]);
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 

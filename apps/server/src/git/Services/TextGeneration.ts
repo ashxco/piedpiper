@@ -76,6 +76,8 @@ export interface ThreadTitleGenerationInput {
   additionalInstructions?: string | undefined;
   /** Linked PR and issue subjects (see resolveThreadTitleLinkedContext); reference data only. */
   linkedContext?: string | undefined;
+  /** The thread's project title, which the prompt tells the model to leave out. */
+  projectTitle?: string | undefined;
   /** What model and provider to use for generation. */
   modelSelection: ModelSelection;
 }

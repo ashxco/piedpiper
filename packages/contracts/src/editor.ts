@@ -63,6 +63,8 @@ export type EditorId = typeof EditorId.Type;
 export const OpenInEditorInput = Schema.Struct({
   cwd: TrimmedNonEmptyString,
   editor: EditorId,
+  /** Workspace the target belongs to; JetBrains IDEs open positioned files in this project. */
+  projectRoot: Schema.optional(TrimmedNonEmptyString),
   /** File manager only: show the file selected in its folder instead of opening it. */
   reveal: Schema.optional(Schema.Boolean),
 });

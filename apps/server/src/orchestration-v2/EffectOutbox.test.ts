@@ -1,6 +1,7 @@
 import { assert, it } from "@effect/vitest";
 import { CommandId, RunId, ThreadId } from "@piedpiper/contracts";
-import { Effect, Layer, Option } from "effect";
+import { DateTime, Effect, Layer, Option } from "effect";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import { EffectOutboxV2, layer, type PendingOrchestrationEffectV2 } from "./EffectOutbox.ts";
@@ -55,6 +56,56 @@ it.layer(testLayer)("V2 durable effects", (it) => {
       const cancelled = yield* outbox.get("lost-start");
       assert.ok(Option.isSome(cancelled));
       assert.equal(cancelled.value.status, "cancelled");
+    }),
+  );
+
+  it.effect("fails an effect this build cannot decode and claims the thread's next effect", () =>
+    Effect.gen(function* () {
+      const outbox = yield* EffectOutboxV2;
+      const sql = yield* SqlClient.SqlClient;
+      const nowIso = DateTime.formatIso(yield* DateTime.now);
+      const threadId = "undecodable-thread";
+      yield* sql`
+        INSERT INTO orchestration_v2_effect_outbox (
+          effect_id, command_id, thread_id, effect_type, payload_json, status,
+          available_at, created_at, updated_at
+        )
+        VALUES (
+          'undecodable-a', 'command-undecodable-a', ${threadId}, 'future-effect.kind',
+          '{"type":"future-effect.kind"}', 'pending', ${nowIso}, ${nowIso}, ${nowIso}
+        )
+      `;
+      yield* outbox.enqueue([start("undecodable-b", threadId)]);
+
+      const claimed = yield* outbox.claimNext({ workerId: "undecodable-worker" });
+
+      assert.ok(Option.isSome(claimed));
+      assert.equal(claimed.value.id, "undecodable-b");
+      const rows = yield* sql<{
+        readonly effect_id: string;
+        readonly status: string;
+        readonly lease_owner: string | null;
+        readonly last_error: string | null;
+      }>`
+        SELECT effect_id, status, lease_owner, last_error
+        FROM orchestration_v2_effect_outbox
+        WHERE thread_id = ${threadId}
+        ORDER BY effect_id
+      `;
+      assert.deepEqual(rows, [
+        {
+          effect_id: "undecodable-a",
+          status: "failed",
+          lease_owner: null,
+          last_error: "This server build cannot decode the future-effect.kind effect.",
+        },
+        {
+          effect_id: "undecodable-b",
+          status: "running",
+          lease_owner: "undecodable-worker",
+          last_error: null,
+        },
+      ]);
     }),
   );
 });

@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import {
   isGitRepository,
+  probeGitRepository,
   limitSection,
   sanitizeCommitSubject,
   sanitizeThreadTitle,
@@ -31,6 +32,22 @@ describe("isGitRepository", () => {
   };
   afterEach(() => {
     for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("reports failed git probes while preserving the best-effort predicate", async () => {
+    const root = makeRepo();
+    writeFileSync(path.join(root, ".git", "config"), "[invalid config");
+    await expect(Effect.runPromise(probeGitRepository(root))).rejects.toThrow("bad config");
+    expect(await Effect.runPromise(isGitRepository(root))).toBe(false);
+    expect(await Effect.runPromise(probeGitRepository(makeDir()))).toBe(false);
+    expect(await Effect.runPromise(probeGitRepository(path.join(root, "absent")))).toBe(false);
+  });
+
+  it("treats a worktree whose gitfile points nowhere as a non-repository", async () => {
+    const dir = makeDir();
+    // Git 2.56+ words this "gitfile does not point to a valid repository".
+    writeFileSync(path.join(dir, ".git"), `gitdir: ${path.join(dir, "missing-gitdir")}\n`);
+    expect(await Effect.runPromise(probeGitRepository(dir))).toBe(false);
   });
 
   it("does not treat a folder laid out as a bare repository as a repository", async () => {
@@ -135,5 +152,20 @@ describe("surrogate-safe truncation", () => {
     const title = sanitizeThreadTitle(`${"a".repeat(46)}\u{1F600}${"b".repeat(10)}`);
     expect(title).toBe(`${"a".repeat(46)}...`);
     expect(endsInLoneHighSurrogate(title.slice(0, -3))).toBe(false);
+  });
+});
+
+describe("sanitizeThreadTitle quotes", () => {
+  it.each([
+    { raw: '"Fix login redirect"', expected: "Fix login redirect" },
+    { raw: `"Fix user's login"`, expected: "Fix user's login" },
+    { raw: "Explain `vp check`", expected: "Explain `vp check`" },
+    { raw: '"Open in" menu ignores Finder', expected: '"Open in" menu ignores Finder' },
+    { raw: 'Rename "foo" to "bar"', expected: 'Rename "foo" to "bar"' },
+    { raw: '"Open in" ignores "Finder"', expected: '"Open in" ignores "Finder"' },
+    { raw: `  "' hello world '"  `, expected: "hello world" },
+    { raw: '  """   """  ', expected: "New thread" },
+  ])("unwraps only a quote pair around the whole title: $raw", ({ raw, expected }) => {
+    expect(sanitizeThreadTitle(raw)).toBe(expected);
   });
 });

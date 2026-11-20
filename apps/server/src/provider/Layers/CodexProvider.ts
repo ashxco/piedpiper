@@ -26,7 +26,7 @@ import { applyCustomModelDetails, customModelDetailsBySlug } from "../customMode
 import {
   AUTH_PROBE_TIMEOUT_MS,
   buildServerProvider,
-  collectStreamAsString,
+  collectProbeResult,
   DEFAULT_TIMEOUT_MS,
   detailFromResult,
   extractAuthBoolean,
@@ -59,7 +59,6 @@ import { resolveSpawnCommand, WindowsCommandLineError } from "@piedpiper/shared/
 import { CodexProvider } from "../Services/CodexProvider";
 import { ServerSettingsService } from "../../serverSettings";
 import { ServerSettingsError } from "@piedpiper/contracts";
-import { isWindowsCommandNotFound } from "../../processRunner";
 import { formatMissingCodexCliMessage } from "../providerMissingCliMessage";
 import { PIEDPIPER_CODEX_LAUNCH_ARGS_ENV, resolveCodexLaunchArgs } from "../codexLaunchArgs";
 import { withProviderUsageLimits } from "../providerUsageLimits";
@@ -441,19 +440,7 @@ export const spawnAndCollectWithForceKill = (binaryPath: string, command: ChildP
         Effect.ignore,
       ),
     );
-    const [stdout, stderr, exitCode] = yield* Effect.all(
-      [
-        collectStreamAsString(child.stdout),
-        collectStreamAsString(child.stderr),
-        child.exitCode.pipe(Effect.map(Number)),
-      ],
-      { concurrency: "unbounded" },
-    );
-    const result: CommandResult = { stdout, stderr, code: exitCode };
-    if (isWindowsCommandNotFound(exitCode, stderr)) {
-      return yield* Effect.fail(new Error(`spawn ${binaryPath} ENOENT`));
-    }
-    return result;
+    return yield* collectProbeResult(binaryPath, child);
   }).pipe(Effect.scoped);
 
 const runCodexCommand = Effect.fn("runCodexCommand")(function* (args: ReadonlyArray<string>) {

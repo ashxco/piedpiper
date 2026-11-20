@@ -14,6 +14,7 @@ import {
 } from "react";
 
 import {
+  GIT_BRANCHES_PAGE_SIZE,
   gitBranchSearchInfiniteQueryOptions,
   gitQueryKeys,
   gitStatusQueryOptions,
@@ -33,6 +34,7 @@ import {
   EnvMode,
   isContextMenuPress,
   resolveBranchSelectionTarget,
+  resolveConfirmedSelectedBranch,
   resolveBranchToolbarValue,
   resolveWorktreeBaseBranchSeed,
   sanitizeNewRefName,
@@ -222,17 +224,40 @@ export function BranchToolbarBranchSelector({
     });
   };
 
-  const selectBranch = (branch: GitBranch) => {
+  // A later pick made while an earlier one confirms its worktree wins.
+  const latestSelectionIdRef = useRef(0);
+  const selectBranch = async (listedBranch: GitBranch) => {
     const api = readNativeApi();
     if (!api || !branchCwd || isBranchActionPending) return;
+    const selectionId = ++latestSelectionIdRef.current;
 
     // In new-worktree mode, selecting a branch sets the base branch.
     if (isSelectingWorktreeBase) {
-      onSetThreadBranch(branch.name, null);
+      onSetThreadBranch(listedBranch.name, null);
       setIsBranchMenuOpen(false);
       onComposerFocusRequest?.();
       return;
     }
+
+    setIsBranchMenuOpen(false);
+    onComposerFocusRequest?.();
+
+    // The list can predate a checkout an agent ran itself. Only the claimed worktree's live HEAD
+    // confirms the claim; an unconfirmed one falls back to a real checkout, which Git refuses if
+    // the branch is checked out elsewhere.
+    const branch = listedBranch.worktreePath
+      ? resolveConfirmedSelectedBranch(
+          listedBranch,
+          await api.git
+            .listBranches({
+              cwd: listedBranch.worktreePath,
+              query: listedBranch.name,
+              limit: GIT_BRANCHES_PAGE_SIZE,
+            })
+            .catch(() => null),
+        )
+      : listedBranch;
+    if (selectionId !== latestSelectionIdRef.current) return;
 
     const selectionTarget = resolveBranchSelectionTarget({
       activeProjectCwd,
@@ -246,17 +271,12 @@ export function BranchToolbarBranchSelector({
     // If the branch already lives in a worktree, point the thread there.
     if (selectionTarget.reuseExistingWorktree) {
       onSetThreadBranch(branch.name, selectionTarget.nextWorktreePath);
-      setIsBranchMenuOpen(false);
-      onComposerFocusRequest?.();
       return;
     }
 
     const selectedBranchName = branch.isRemote
       ? deriveLocalBranchNameFromRemoteRef(branch.name)
       : branch.name;
-
-    setIsBranchMenuOpen(false);
-    onComposerFocusRequest?.();
 
     runBranchAction(async () => {
       setOptimisticBranch(selectedBranchName);
@@ -291,6 +311,7 @@ export function BranchToolbarBranchSelector({
     const name = sanitizeNewRefName(rawName);
     const api = readNativeApi();
     if (!api || !branchCwd || !name || isBranchActionPending) return;
+    latestSelectionIdRef.current++;
 
     setIsBranchMenuOpen(false);
     onComposerFocusRequest?.();
@@ -457,6 +478,7 @@ export function BranchToolbarBranchSelector({
             if (!prReference || !onCheckoutPullRequestRequest) {
               return;
             }
+            latestSelectionIdRef.current++;
             setIsBranchMenuOpen(false);
             setBranchQuery("");
             onComposerFocusRequest?.();
@@ -506,7 +528,7 @@ export function BranchToolbarBranchSelector({
         value={itemValue}
         style={style}
         disabled={branchSwitchBlocked(branch)}
-        onClick={() => selectBranch(branch)}
+        onClick={() => void selectBranch(branch)}
         onContextMenu={(event) => openBranchNameContextMenu(event, itemValue)}
       >
         <div className="flex w-full min-w-0 items-center justify-between gap-2">
@@ -589,8 +611,15 @@ export function BranchToolbarBranchSelector({
             title={
               shortcutLabel ? `${triggerLabel} - Change branch (${shortcutLabel})` : triggerLabel
             }
+            // NVDA browse mode re-reads a combobox when its attributes change, not when its text does.
+            aria-label={`Branch: ${triggerLabel}`}
           >
-            <MiddleTruncate value={triggerLabel} showTitle={false} className="max-w-[240px]" />
+            <MiddleTruncate
+              value={triggerLabel}
+              showTitle={false}
+              className="max-w-[240px]"
+              aria-hidden
+            />
             <ChevronDownIcon />
           </ComboboxTrigger>
         </span>

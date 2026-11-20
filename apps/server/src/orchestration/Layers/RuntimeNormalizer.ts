@@ -81,7 +81,9 @@ export function proposedPlanIdFromEvent(event: ProviderRuntimeEvent, threadId: T
 function buildContextWindowActivityPayload(
   event: ProviderRuntimeEvent,
 ): ThreadTokenUsageSnapshot | undefined {
-  if (event.type !== "thread.token-usage.updated" || event.payload.usage.usedTokens <= 0) {
+  // Zero is a real reading: /clear resets the conversation, and the meter has to follow it.
+  // Providers drop their own empty readings before emitting.
+  if (event.type !== "thread.token-usage.updated" || event.payload.usage.usedTokens < 0) {
     return undefined;
   }
   return event.payload.usage;

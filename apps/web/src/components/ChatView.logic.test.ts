@@ -38,6 +38,7 @@ import {
   isPathSuggestionCurrent,
   resolveCompactDisabledReason,
   shouldRestoreComposerAfterFailedSend,
+  failedSendTextToOffer,
   visiblePathSearchEntries,
   buildComposerOutgoingMessageText,
   buildOptimisticUserMessage,
@@ -660,6 +661,13 @@ describe("shouldRefocusComposerOnWindowFocus", () => {
 
   it("takes focus back from a plain button", () => {
     expect(shouldRefocusComposerOnWindowFocus(stubElement({ tagName: "BUTTON" }))).toBe(true);
+  });
+
+  it("leaves a text selection alone, since focusing the composer would clear it", () => {
+    const button = stubElement({ tagName: "BUTTON" });
+    expect(shouldRefocusComposerOnWindowFocus(button, { isCollapsed: false })).toBe(false);
+    expect(shouldRefocusComposerOnWindowFocus(null, { isCollapsed: false })).toBe(false);
+    expect(shouldRefocusComposerOnWindowFocus(button, { isCollapsed: true })).toBe(true);
   });
 
   it("leaves text entry fields alone", () => {
@@ -2096,4 +2104,14 @@ it("normalizes source files to text attachments for upload and optimistic displa
     async () => "data:text/plain;base64,YQ==",
   );
   expect(upload[0]).toMatchObject({ type: "file", mimeType: "text/plain", name: "source.ts" });
+});
+
+describe("failedSendTextToOffer", () => {
+  it("offers the failed text only when a new draft kept the composer", () => {
+    const base = { restoredComposer: false, cancelled: false, failedText: "hello" };
+    expect(failedSendTextToOffer(base)).toBe("hello");
+    expect(failedSendTextToOffer({ ...base, restoredComposer: true })).toBeNull();
+    expect(failedSendTextToOffer({ ...base, cancelled: true })).toBeNull();
+    expect(failedSendTextToOffer({ ...base, failedText: "  " })).toBeNull();
+  });
 });

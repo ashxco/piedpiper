@@ -9,7 +9,7 @@ import * as TestClock from "effect/testing/TestClock";
 import {
   armShutdownDeadline,
   awaitLauncherLoss,
-  ignoreClosedLauncherPipe,
+  ignoreOutputStreamError,
   untilLauncherLoss,
 } from "./launcherWatch.ts";
 
@@ -99,7 +99,6 @@ it.effect("untilLauncherLoss ends interrupt-only so runMain force-exits, after f
         launcherPid,
         getParentPid: () => parentPid,
         platform: "linux",
-        guardLauncherPipes: false,
         forceExit,
       }),
     );
@@ -123,7 +122,6 @@ it.effect("untilLauncherLoss returns the program result while the launcher is al
       launcherPid,
       getParentPid: () => launcherPid,
       platform: "linux",
-      guardLauncherPipes: false,
     });
     assert.strictEqual(result, 42);
   }),
@@ -161,11 +159,12 @@ describe("armShutdownDeadline", () => {
   });
 });
 
-describe("ignoreClosedLauncherPipe", () => {
-  it("swallows closed-pipe errors and rethrows anything else", () => {
-    const pipeError = (code: string) => Object.assign(new Error(code), { code });
-    expect(() => ignoreClosedLauncherPipe(pipeError("EPIPE"))).not.toThrow();
-    expect(() => ignoreClosedLauncherPipe(pipeError("ERR_STREAM_DESTROYED"))).not.toThrow();
-    expect(() => ignoreClosedLauncherPipe(pipeError("EACCES"))).toThrow("EACCES");
+const streamError = (code: string) => Object.assign(new Error(code), { code });
+
+describe("ignoreOutputStreamError", () => {
+  it("swallows every output stream error, including a full disk", () => {
+    for (const code of ["EPIPE", "ERR_STREAM_DESTROYED", "ENOSPC", "EIO"]) {
+      expect(() => ignoreOutputStreamError(streamError(code))).not.toThrow();
+    }
   });
 });

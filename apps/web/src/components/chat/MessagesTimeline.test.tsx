@@ -659,7 +659,7 @@ describe("MessagesTimeline accessibility and row chrome", () => {
     it("shows one image at its own shape, outside the grid", () => {
       const markup = renderAttachments([attachment("one", "blob:one")]);
       expect(markup).not.toContain("grid-cols-2");
-      expect(markup).toMatch(/<img[^>]*class="[^"]*h-48 w-auto min-w-24 max-w-full/);
+      expect(markup).toMatch(/<img[^>]*class="[^"]*h-48 w-auto min-w-24 max-w-full object-contain/);
     });
 
     it("keeps two images in the cropped grid", () => {

@@ -24,6 +24,8 @@ import { useUiStateStore } from "../uiStateStore";
 import { shouldSuppressSnoozedThreadNotification } from "./Sidebar.snooze";
 import { toastManager } from "./ui/toast";
 
+type ToastId = ReturnType<typeof toastManager.add>;
+
 /** Alerts when background threads finish, fail or wait on you; mounted once in the root route. */
 export function ThreadNotificationCoordinator() {
   const mode = useSettings((settings) => settings.notificationMode);
@@ -40,6 +42,8 @@ function ThreadNotificationWatcher() {
       typeof params.threadId === "string" ? ThreadId.makeUnsafe(params.threadId) : null,
   });
   const pendingNotifications = useRef(new Map<ThreadId, Notification | null>());
+  // Toast ids by thread, so opening a thread can close the toasts it raised.
+  const openToasts = useRef(new Map<ThreadId, ToastId[]>());
 
   const openThread = (threadId: ThreadId) => {
     void navigate({ to: "/$threadId", params: { threadId } });
@@ -85,6 +89,8 @@ function ThreadNotificationWatcher() {
           },
         },
       });
+      const threadToasts = openToasts.current.get(event.threadId) ?? [];
+      openToasts.current.set(event.threadId, [...threadToasts, toastId]);
     }
     // Before the new one: they share a tag, so closing the old object after could close it too.
     if (delivery.badge) pendingNotifications.current.get(event.threadId)?.close();
@@ -129,6 +135,26 @@ function ThreadNotificationWatcher() {
         check(state.sidebarThreadsById);
       }
     });
+  }, []);
+
+  // Opening a thread answers its toasts, however it was opened.
+  useEffect(() => {
+    if (activeThreadId === null) return;
+    const toastIds = openToasts.current.get(activeThreadId);
+    if (!toastIds) return;
+    openToasts.current.delete(activeThreadId);
+    for (const toastId of toastIds) toastManager.close(toastId);
+  }, [activeThreadId]);
+
+  // Turning notifications off unmounts the watcher; its toasts go with it.
+  useEffect(() => {
+    const toasts = openToasts.current;
+    return () => {
+      for (const toastIds of toasts.values()) {
+        for (const toastId of toastIds) toastManager.close(toastId);
+      }
+      toasts.clear();
+    };
   }, []);
 
   useEffect(() => {

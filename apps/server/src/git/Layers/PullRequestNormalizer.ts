@@ -102,6 +102,7 @@ export function resolveHeadRepositoryNameWithOwner(
 
 export function resolvePullRequestWorktreeLocalBranchName(
   pullRequest: ResolvedPullRequest & PullRequestHeadRemoteInfo,
+  localBranches: ReadonlySet<string> = new Set(),
 ): string {
   if (!pullRequest.isCrossRepository) {
     return pullRequest.headBranch;
@@ -109,7 +110,25 @@ export function resolvePullRequestWorktreeLocalBranchName(
 
   const sanitizedHeadBranch = sanitizeBranchFragment(pullRequest.headBranch).trim();
   const suffix = sanitizedHeadBranch.length > 0 ? sanitizedHeadBranch : "head";
-  return `piedpiper/pr-${pullRequest.number}/${suffix}`;
+  // Git cannot create a ref whose path is a parent or child of an existing one (a `piedpiper`
+  // branch blocks `piedpiper/...`).
+  const isCreatable = (name: string) =>
+    !name
+      .split("/")
+      .slice(0, -1)
+      .some((_, index, segments) => localBranches.has(segments.slice(0, index + 1).join("/"))) &&
+    ![...localBranches].some((branch) => branch.startsWith(`${name}/`));
+  const preferred = `piedpiper/pr-${pullRequest.number}/${suffix}`;
+  if (isCreatable(preferred)) {
+    return preferred;
+  }
+  const flat = `piedpiper-pr-${pullRequest.number}-${suffix.replaceAll("/", "-")}`;
+  for (let attempt = 1; ; attempt++) {
+    const candidate = attempt === 1 ? flat : `${flat}-${attempt}`;
+    if (isCreatable(candidate)) {
+      return candidate;
+    }
+  }
 }
 
 /** `*.ghe.com` is GitHub Enterprise Cloud with data residency, one subdomain per enterprise. */
@@ -421,16 +440,29 @@ export function summarizeGitActionResult(
   return { title: "Done" };
 }
 
-export function sanitizeCommitMessage(generated: {
-  subject: string;
-  body: string;
-  branch?: string | undefined;
-}): {
+// A backstop for models that ignore the lowercase instruction; acronyms and names like GitHub are left alone.
+const CONVENTIONAL_CAPITALIZED_DESCRIPTION =
+  /^([a-z]+(?:\([^)\n]*\))?!?: )([A-Z][a-z]*)(?![A-Za-z0-9])/;
+
+export function sanitizeCommitMessage(
+  generated: {
+    subject: string;
+    body: string;
+    branch?: string | undefined;
+  },
+  conventionalCommits = false,
+): {
   subject: string;
   body: string;
   branch?: string | undefined;
 } {
-  const safeSubject = sanitizeCommitSubject(generated.subject);
+  const sanitizedSubject = sanitizeCommitSubject(generated.subject);
+  const safeSubject = conventionalCommits
+    ? sanitizedSubject.replace(
+        CONVENTIONAL_CAPITALIZED_DESCRIPTION,
+        (_, prefix: string, word: string) => prefix + word.toLowerCase(),
+      )
+    : sanitizedSubject;
   return {
     subject: safeSubject,
     body: generated.body.trim(),

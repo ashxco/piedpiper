@@ -12,6 +12,10 @@ describe("compareCliVersions", () => {
     ["1.0.0-beta", "1.0.0", -1],
     ["1.0.0-beta.2", "1.0.0-beta.10", -1],
     ["1.0.0-alpha", "1.0.0-1", 1],
+    // Past Number.MAX_SAFE_INTEGER, parseInt would call these equal.
+    ["1.0.0-9007199254740993", "1.0.0-9007199254740992", 1],
+    // Semver orders by ASCII code unit: uppercase sorts before lowercase.
+    ["1.0.0-Beta", "1.0.0-alpha", -1],
   ])("orders %s and %s", (left, right, expected) => {
     expect(Math.sign(compareCliVersions(left, right))).toBe(expected);
   });

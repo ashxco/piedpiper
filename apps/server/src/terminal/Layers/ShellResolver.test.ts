@@ -5,8 +5,16 @@ import {
   defaultShellResolver,
   shellCandidateFromCommand,
   isRetryableShellSpawnError,
+  normalizeShellCommand,
   resolveShellCandidates,
 } from "./ShellResolver";
+
+const POWERSHELL_ARGS = [
+  "-NoLogo",
+  "-NoExit",
+  "-Command",
+  "[Console]::OutputEncoding = $OutputEncoding = [System.Text.UTF8Encoding]::new()",
+];
 
 describe("defaultShellResolver", () => {
   it("defaults to PowerShell 7 on Windows and ignores ComSpec", () => {
@@ -29,12 +37,15 @@ describe("resolveShellCandidates", () => {
         SystemRoot: "E:\\Win",
       }),
     ).toEqual([
-      { shell: "pwsh.exe", args: ["-NoLogo"] },
+      { shell: "pwsh.exe", args: POWERSHELL_ARGS },
       { shell: "D:\\Tools\\cmd.exe" },
       { shell: "E:\\Win\\System32\\cmd.exe" },
       { shell: "cmd.exe" },
-      { shell: "E:\\Win\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", args: ["-NoLogo"] },
-      { shell: "powershell.exe", args: ["-NoLogo"] },
+      {
+        shell: "E:\\Win\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+        args: POWERSHELL_ARGS,
+      },
+      { shell: "powershell.exe", args: POWERSHELL_ARGS },
     ]);
   });
 
@@ -70,6 +81,34 @@ describe("resolveShellCandidates", () => {
       { shell: "bash" },
       { shell: "sh" },
     ]);
+  });
+});
+
+describe("normalizeShellCommand", () => {
+  const noFiles = () => false;
+
+  it("keeps missing or quoted shell paths that contain spaces", () => {
+    expect(normalizeShellCommand("/Users/Jane Doe/.local/bin/fish", "darwin", noFiles)).toBe(
+      "/Users/Jane Doe/.local/bin/fish",
+    );
+    expect(normalizeShellCommand('"/opt/my -shell/fish" -l', "darwin", noFiles)).toBe(
+      "/opt/my -shell/fish",
+    );
+    expect(normalizeShellCommand("'/opt/my shell/fish'", "darwin", noFiles)).toBe(
+      "/opt/my shell/fish",
+    );
+  });
+
+  it("prefers the longest existing file when spaces precede a dash", () => {
+    const existing = "/Users/Jane -Doe Smith/.local/bin/fish";
+    expect(
+      normalizeShellCommand(`${existing} -l`, "darwin", (candidate) => candidate === existing),
+    ).toBe(existing);
+  });
+
+  it("drops flags after a plain shell path", () => {
+    expect(normalizeShellCommand("/bin/bash -l", "linux", noFiles)).toBe("/bin/bash");
+    expect(normalizeShellCommand("zsh", "linux", noFiles)).toBe("zsh");
   });
 });
 

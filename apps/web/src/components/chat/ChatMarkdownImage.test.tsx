@@ -34,6 +34,12 @@ describe("ChatMarkdownImage before it loads", () => {
     expect(output).toContain("height:min(30rem, 100000px)");
   });
 
+  it("reads width and height written with a px unit", () => {
+    const output = image({ width: "14px", height: " 7PX " });
+    expect(output).toContain("width:14px");
+    expect(output).toContain("aspect-ratio:14 / 7");
+  });
+
   it("belongs to the gallery but cannot open it yet", () => {
     const output = image({});
     expect(output).toContain("data-markdown-image-expandable");

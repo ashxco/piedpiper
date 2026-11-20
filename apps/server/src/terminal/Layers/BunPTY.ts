@@ -31,7 +31,7 @@ class BunPtyProcess implements PtyProcess {
     return this.process.pid;
   }
 
-  write(data: string): void {
+  write(data: string | Buffer): void {
     if (!this.process.terminal) {
       throw new Error("Bun PTY terminal handle is unavailable");
     }

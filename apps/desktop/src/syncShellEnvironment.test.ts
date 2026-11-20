@@ -11,7 +11,9 @@ import {
   readEnvironmentFromLoginShellAsync,
   readEnvironmentFromLoginShellCandidatesAsync,
   readShellEnvironmentCache,
+  retryShellEnvironmentRefresh,
   shellEnvironmentCacheKey,
+  stripAppImagePathEntries,
   syncShellEnvironment,
   writeShellEnvironmentCache,
 } from "./syncShellEnvironment";
@@ -190,6 +192,23 @@ describe("syncShellEnvironment", () => {
     };
     syncShellEnvironment(terminalEnv, { platform: "linux", readEnvironment });
     expect(terminalEnv.JAVA_HOME).toBe("/usr/lib/jvm/java-21");
+  });
+
+  it("imports PNPM_HOME from the login shell only when the process has none", () => {
+    const readEnvironment = vi.fn(() => ({ PATH: "/usr/bin", PNPM_HOME: "/Users/test/pnpm" }));
+    expect(LOGIN_SHELL_ENV_NAMES).toContain("PNPM_HOME");
+
+    const guiEnv: NodeJS.ProcessEnv = { SHELL: "/bin/zsh", PATH: "/usr/bin" };
+    syncShellEnvironment(guiEnv, { platform: "darwin", readEnvironment, readLaunchctlPath: noop });
+    expect(guiEnv.PNPM_HOME).toBe("/Users/test/pnpm");
+
+    const terminalEnv: NodeJS.ProcessEnv = {
+      SHELL: "/bin/zsh",
+      PATH: "/usr/bin",
+      PNPM_HOME: "/launcher/pnpm",
+    };
+    syncShellEnvironment(terminalEnv, { platform: "linux", readEnvironment });
+    expect(terminalEnv.PNPM_HOME).toBe("/launcher/pnpm");
   });
 
   it("imports the telemetry opt-out from the login shell unless the process already set it", () => {
@@ -392,7 +411,7 @@ describe("cached shell environment", () => {
     });
     expect(first.applyCached()).toBe(false);
     expect(firstEnv.PATH).toBe("/usr/bin");
-    await expect(first.refresh()).resolves.toEqual({ changed: true, hydrated: true });
+    await expect(first.refresh()).resolves.toEqual({ changed: true, hydrated: true, probed: true });
     expect(firstEnv.PATH).toBe("/opt/homebrew/bin:/usr/bin");
 
     const secondEnv: NodeJS.ProcessEnv = { SHELL: "/bin/zsh", PATH: "/usr/bin", LANG: "C" };
@@ -406,7 +425,11 @@ describe("cached shell environment", () => {
     expect(second.applyCached()).toBe(true);
     expect(secondEnv.PATH).toBe("/opt/homebrew/bin:/usr/bin");
     expect(secondEnv.JAVA_HOME).toBe("/jdk");
-    await expect(second.refresh()).resolves.toEqual({ changed: false, hydrated: true });
+    await expect(second.refresh()).resolves.toEqual({
+      changed: false,
+      hydrated: true,
+      probed: true,
+    });
   });
 
   it("replaces stale cached entries with the refreshed ones instead of accumulating them", async () => {
@@ -424,7 +447,7 @@ describe("cached shell environment", () => {
 
     expect(sync.applyCached()).toBe(true);
     expect(env.PATH).toBe("/old/bin:/usr/bin");
-    await expect(sync.refresh()).resolves.toEqual({ changed: true, hydrated: true });
+    await expect(sync.refresh()).resolves.toEqual({ changed: true, hydrated: true, probed: true });
     expect(env.PATH).toBe("/new/bin:/usr/bin");
     expect(env.JAVA_HOME).toBeUndefined();
     expect(readShellEnvironmentCache(cachePath, key)).toEqual({ PATH: "/new/bin" });
@@ -450,7 +473,11 @@ describe("cached shell environment", () => {
     });
 
     expect(sync.applyCached()).toBe(true);
-    await expect(sync.refresh()).resolves.toEqual({ changed: false, hydrated: true });
+    await expect(sync.refresh()).resolves.toEqual({
+      changed: false,
+      hydrated: true,
+      probed: false,
+    });
     expect(env.PATH).toBe("/opt/homebrew/bin:/usr/bin");
     expect(readLaunchctlPath).not.toHaveBeenCalled();
     expect(readShellEnvironmentCache(cachePath, key)).toEqual({ PATH: "/opt/homebrew/bin" });
@@ -472,7 +499,11 @@ describe("cached shell environment", () => {
 
     expect(sync.applyCached()).toBe(false);
     // Only a launchctl PATH, so the backend must still run its own login-shell probe.
-    await expect(sync.refresh()).resolves.toEqual({ changed: true, hydrated: false });
+    await expect(sync.refresh()).resolves.toEqual({
+      changed: true,
+      hydrated: false,
+      probed: false,
+    });
     expect(env.PATH).toBe("/launchctl/bin:/usr/bin");
     expect(FS.existsSync(cachePath)).toBe(false);
   });
@@ -487,7 +518,7 @@ describe("cached shell environment", () => {
       readEnvironment,
     });
     expect(sync.applyCached()).toBe(true);
-    await expect(sync.refresh()).resolves.toEqual({ changed: false, hydrated: true });
+    await expect(sync.refresh()).resolves.toEqual({ changed: false, hydrated: true, probed: true });
     expect(readEnvironment).not.toHaveBeenCalled();
     expect(env.PATH).toBe("/usr/bin");
   });
@@ -505,7 +536,11 @@ describe("cached shell environment", () => {
       logWarning: noop,
     });
     expect(sync.applyCached()).toBe(false);
-    await expect(sync.refresh()).resolves.toEqual({ changed: false, hydrated: false });
+    await expect(sync.refresh()).resolves.toEqual({
+      changed: false,
+      hydrated: false,
+      probed: false,
+    });
   });
 
   it("probes from the inherited env rather than the cached one", async () => {
@@ -558,7 +593,11 @@ describe("cached shell environment", () => {
         readEnvironment: async () => ({ PATH: freshPath }),
       });
       expect(sync.applyCached()).toBe(true);
-      await expect(sync.refresh()).resolves.toEqual({ changed: false, hydrated: true });
+      await expect(sync.refresh()).resolves.toEqual({
+        changed: false,
+        hydrated: true,
+        probed: true,
+      });
       expect(env.PATH).toBe(freshPath);
       expect(readShellEnvironmentCache(cachePath, key)?.PATH).toBe(cachedPath);
     },
@@ -585,7 +624,7 @@ describe("cached shell environment", () => {
       readEnvironment,
     });
     expect(sync.applyCached()).toBe(true);
-    await expect(sync.refresh()).resolves.toEqual({ changed: false, hydrated: true });
+    await expect(sync.refresh()).resolves.toEqual({ changed: false, hydrated: true, probed: true });
     expect(readEnvironment).not.toHaveBeenCalled();
     expect(env).toEqual({ Path: "C:\\Windows" });
   });
@@ -668,8 +707,125 @@ describe.skipIf(process.platform === "win32")("readEnvironmentFromLoginShellAsyn
     });
     expect(sync.applyCached()).toBe(true);
     expect(env.PATH).toBe("/removed/bin:/usr/bin:/bin");
-    await expect(sync.refresh()).resolves.toEqual({ changed: true, hydrated: true });
+    await expect(sync.refresh()).resolves.toEqual({ changed: true, hydrated: true, probed: true });
     expect(env.PATH).toBe("/usr/bin:/bin");
     expect(readShellEnvironmentCache(cachePath, key)?.PATH).toBe("/usr/bin:/bin");
+  });
+});
+
+describe("AppImage PATH entries", () => {
+  it("drops this launch's mount and earlier Pied Piper mounts but keeps lookalikes", () => {
+    expect(
+      stripAppImagePathEntries(
+        "/tmp/.mount_PiedPiold123/usr/bin:/launcher/bin:/opt/pp.AppDir/usr/bin:/opt/pp.AppDir:" +
+          "/tmp/tools:/tmp/.mount_Other123/usr/bin:/opt/pp.AppDir-backup/bin",
+        "/opt/pp.AppDir/",
+      ),
+    ).toBe("/launcher/bin:/tmp/tools:/tmp/.mount_Other123/usr/bin:/opt/pp.AppDir-backup/bin");
+    expect(stripAppImagePathEntries("/tmp/.mount_PiedPinew123/bin", undefined)).toBeUndefined();
+    expect(stripAppImagePathEntries(undefined, "/opt/pp.AppDir")).toBeUndefined();
+  });
+
+  it.each([
+    { platform: "linux" as const, runtime: { APPDIR: "/opt/pp.AppDir/" }, scrub: true },
+    { platform: "linux" as const, runtime: { APPIMAGE: "/opt/PiedPiper.AppImage" }, scrub: true },
+    { platform: "linux" as const, runtime: {}, scrub: false },
+    { platform: "darwin" as const, runtime: { APPDIR: "/opt/pp.AppDir/" }, scrub: false },
+  ])(
+    "keeps AppImage mounts out of cached and probed PATH: %j",
+    async ({ platform, runtime, scrub }) => {
+      const dir = FS.mkdtempSync(Path.join(OS.tmpdir(), "pp-shell-env-appimage-"));
+      try {
+        const cachePath = Path.join(dir, "shell-environment.json");
+        const inheritedPath =
+          "/tmp/.mount_PiedPiold123/usr/bin:/launcher/bin:/opt/pp.AppDir/usr/bin";
+        const cachedPath = "/cached/bin:/tmp/.mount_PiedPicache1/usr/bin";
+        const probedPath = "/fresh/bin:/tmp/.mount_PiedPiprobe1/usr/bin";
+        const env: NodeJS.ProcessEnv = { ...runtime, SHELL: "/bin/bash", PATH: inheritedPath };
+        const key = shellEnvironmentCacheKey(env, platform, "/home/test");
+        writeShellEnvironmentCache(cachePath, key, { PATH: cachedPath });
+        const probeEnvs: Array<NodeJS.ProcessEnv | undefined> = [];
+        const sync = createShellEnvironmentSync({
+          cachePath,
+          env,
+          platform,
+          home: "/home/test",
+          userShell: "/bin/bash",
+          readEnvironment: async (_shell, _names, _timeout, probeEnv) => {
+            probeEnvs.push(probeEnv);
+            return { PATH: probedPath };
+          },
+          readLaunchctlPath: noop,
+        });
+        const cleanInherited = scrub
+          ? `/launcher/bin${runtime.APPDIR ? "" : ":/opt/pp.AppDir/usr/bin"}`
+          : inheritedPath;
+
+        expect(sync.applyCached()).toBe(true);
+        expect(env.PATH).toBe(`${scrub ? "/cached/bin" : cachedPath}:${cleanInherited}`);
+        await sync.refresh();
+        expect(probeEnvs[0]?.PATH).toBe(cleanInherited);
+        expect(env.PATH).toBe(`${scrub ? "/fresh/bin" : probedPath}:${cleanInherited}`);
+        expect(readShellEnvironmentCache(cachePath, key)?.PATH).toBe(
+          scrub ? "/fresh/bin" : probedPath,
+        );
+      } finally {
+        FS.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+});
+
+const retryResult = (probed: boolean) => ({ changed: probed, hydrated: probed, probed });
+const skipSleep = async () => undefined;
+
+describe("retryShellEnvironmentRefresh", () => {
+  const result = retryResult;
+
+  it("probes again after each delay with the long timeout until a probe gets a PATH", async () => {
+    const outcomes = [result(false), result(false), result(true)];
+    const refresh = vi.fn(async () => outcomes.shift()!);
+    const sleeps: number[] = [];
+    const seen: boolean[] = [];
+
+    const final = await retryShellEnvironmentRefresh({
+      refresh,
+      onResult: (next) => {
+        seen.push(next.probed);
+      },
+      sleep: async (ms) => {
+        sleeps.push(ms);
+      },
+    });
+
+    expect(final).toEqual(result(true));
+    expect(seen).toEqual([false, false, true]);
+    expect(sleeps).toEqual([30_000, 30_000, 30_000]);
+    expect(refresh).toHaveBeenCalledWith({ probeTimeoutMs: 120_000, budgetMs: 120_000 });
+  });
+
+  it("gives up after the retry limit and stops once cancelled", async () => {
+    const refresh = vi.fn(async () => result(false));
+    const sleep = skipSleep;
+    await expect(
+      retryShellEnvironmentRefresh({ refresh, onResult: noop, sleep, retries: 3 }),
+    ).resolves.toBeNull();
+    expect(refresh).toHaveBeenCalledTimes(3);
+
+    let cancelled = false;
+    const cancelling = vi.fn(async () => {
+      cancelled = true;
+      return result(true);
+    });
+    const onResult = vi.fn();
+    await expect(
+      retryShellEnvironmentRefresh({
+        refresh: cancelling,
+        onResult,
+        sleep,
+        isCancelled: () => cancelled,
+      }),
+    ).resolves.toBeNull();
+    expect(onResult).not.toHaveBeenCalled();
   });
 });

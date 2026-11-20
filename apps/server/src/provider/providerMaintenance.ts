@@ -1,5 +1,6 @@
 /**
- * Tells the user when a provider CLI is behind its latest npm release. The npm request runs
+ * Tells the user when a provider CLI is behind its latest release (npm, or the native release
+ * channel for a standalone Codex install). The request runs
  * beside the status check, so it never delays a published snapshot, and only while
  * `enableProviderUpdateChecks` is on.
  *
@@ -142,6 +143,11 @@ export interface ProviderCliMaintenance {
   readonly miseTool: string;
   readonly readBinaryPath: (settings: ServerSettings) => string;
   readonly readHomePath?: (settings: ServerSettings) => string;
+  /**
+   * What `lookupLatestVersion` is asked for this installation, when not `packageName`: an
+   * installer that updates from its own release channel is compared with that channel.
+   */
+  readonly latestVersionKey?: (install: ProviderInstallKind) => string;
   readonly resolveUpdateCommand: (
     install: ProviderInstallKind,
     commandPath: string,
@@ -161,12 +167,16 @@ export const CLAUDE_CLI_MAINTENANCE: ProviderCliMaintenance = {
 };
 
 const CODEX_PACKAGE_NAME = "@openai/codex";
+/** `codex update` installs this channel's release, which can lag npm's latest tag. */
+export const CODEX_NATIVE_CHANNEL_URL = "https://releases.openai.com/codex/channels/latest";
 
 export const CODEX_CLI_MAINTENANCE: ProviderCliMaintenance = {
   packageName: CODEX_PACKAGE_NAME,
   miseTool: "codex",
   readBinaryPath: (settings) => settings.providers.codex.binaryPath,
   readHomePath: (settings) => settings.providers.codex.homePath,
+  latestVersionKey: (install) =>
+    install === "standalone" ? CODEX_NATIVE_CHANNEL_URL : CODEX_PACKAGE_NAME,
   resolveUpdateCommand: (install, commandPath, platform = process.platform, context) => {
     if (install === "standalone") {
       const update = `${quoteCommandExecutable(commandPath, platform)} update`;
@@ -239,7 +249,39 @@ export const fetchNpmLatestVersion = (
     catch: () => null,
   }).pipe(Effect.orElseSucceed(() => null));
 
-export type LatestVersionLookup = (packageName: string) => Effect.Effect<string | null>;
+/** The release a Codex native channel points at, from its `rust-vX.Y.Z` tag, or null. */
+export function parseCodexNativeLatestVersion(payload: unknown): string | null {
+  if (typeof payload !== "object" || payload === null) return null;
+  const tag = (payload as { readonly tag_name?: unknown }).tag_name;
+  if (typeof tag !== "string") return null;
+  return /^rust-v(\d+\.\d+\.\d+)$/.exec(tag.trim())?.[1] ?? null;
+}
+
+/** Latest release on Codex's native channel, or null for any failure. */
+export const fetchCodexNativeLatestVersion = (
+  options: { readonly fetch?: typeof fetch; readonly timeoutMs?: number } = {},
+): Effect.Effect<string | null> =>
+  Effect.tryPromise({
+    try: async (signal) => {
+      const response = await (options.fetch ?? fetch)(CODEX_NATIVE_CHANNEL_URL, {
+        headers: { accept: "application/json" },
+        signal: AbortSignal.any([
+          signal,
+          AbortSignal.timeout(options.timeoutMs ?? LATEST_VERSION_TIMEOUT_MS),
+        ]),
+      });
+      if (!response.ok) return null;
+      return parseCodexNativeLatestVersion(await response.json());
+    },
+    catch: () => null,
+  }).pipe(Effect.orElseSucceed(() => null));
+
+/** Looks a key up on Codex's native channel when it names that channel, else on npm. */
+export const fetchLatestVersion = (key: string): Effect.Effect<string | null> =>
+  key === CODEX_NATIVE_CHANNEL_URL ? fetchCodexNativeLatestVersion() : fetchNpmLatestVersion(key);
+
+/** Resolves a package name, or a release channel URL, to its latest version. */
+export type LatestVersionLookup = (key: string) => Effect.Effect<string | null>;
 
 /** Lets an explicit refresh re-check, as the cache also keeps a failed lookup for its full TTL. */
 interface InvalidatableLatestVersionLookup {
@@ -318,8 +360,10 @@ export const makeProviderWithVersionAdvisory = Effect.fn("makeProviderWithVersio
   ): Effect.fn.Return<Shape, never, Scope.Scope | ServerSettingsService> {
     const serverSettings = yield* ServerSettingsService;
     const lookupLatestVersion: LatestVersionLookup & Partial<InvalidatableLatestVersionLookup> =
-      options.lookupLatestVersion ?? makeCachedLatestVersionLookup(fetchNpmLatestVersion);
+      options.lookupLatestVersion ?? makeCachedLatestVersionLookup(fetchLatestVersion);
     const readPaths = options.readCommandPaths ?? readCommandPaths;
+    // Every key looked up so far, so a refresh re-checks whichever source the install uses.
+    const lookupKeys = new Set<string>();
     const resolveMiseMaintenance = options.resolveMiseMaintenance ?? makeMiseMaintenanceResolver();
     const advisoryRef = yield* Ref.make<ServerProviderVersionAdvisory | undefined>(undefined);
     const publishLock = yield* Semaphore.make(1);
@@ -400,7 +444,9 @@ export const makeProviderWithVersionAdvisory = Effect.fn("makeProviderWithVersio
           updateCommand: null,
         });
       }
-      const latestVersion = yield* lookupLatestVersion(maintenance.packageName);
+      const lookupKey = maintenance.latestVersionKey?.(install) ?? maintenance.packageName;
+      lookupKeys.add(lookupKey);
+      const latestVersion = yield* lookupLatestVersion(lookupKey);
       const homePath = maintenance.readHomePath?.(settings);
       return deriveProviderVersionAdvisory({
         currentVersion: snapshot.version,
@@ -442,6 +488,7 @@ export const makeProviderWithVersionAdvisory = Effect.fn("makeProviderWithVersio
         Effect.tap(() =>
           Effect.sync(() => {
             lookupLatestVersion.invalidate?.(maintenance.packageName);
+            for (const key of lookupKeys) lookupLatestVersion.invalidate?.(key);
             resolveMiseMaintenance.invalidate?.();
           }).pipe(Effect.andThen(Queue.offer(recheck, undefined))),
         ),

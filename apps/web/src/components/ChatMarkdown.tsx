@@ -45,7 +45,7 @@ import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import { resolveDiffThemeName, type DiffThemeName } from "../lib/diffRendering";
-import { fnv1a32 } from "../lib/diffRendering";
+import { createHighlightCacheKey, estimateHighlightedSize } from "../lib/codeHighlightCache";
 import {
   createIncrementalHighlighter,
   highlightCodeToHast,
@@ -182,6 +182,10 @@ const REMARK_MATH_PLUGIN = [remarkMath, { singleDollarTextMath: false }] satisfi
   ReactMarkdownOptions["remarkPlugins"]
 >[number];
 
+const USER_REMARK_GFM_PLUGIN = [remarkGfm, { singleTilde: false }] satisfies NonNullable<
+  ReactMarkdownOptions["remarkPlugins"]
+>[number];
+
 function selectMathRenderingEnabled(settings: UnifiedSettings): boolean {
   return settings.mathRenderingEnabled;
 }
@@ -235,14 +239,6 @@ function extractCodeBlock(
     className: onlyChild.props.className,
     code: nodeToPlainText(onlyChild.props.children),
   };
-}
-
-function createHighlightCacheKey(code: string, language: string, themeName: DiffThemeName): string {
-  return `${fnv1a32(code).toString(36)}:${code.length}:${language}:${themeName}`;
-}
-
-function estimateHighlightedSize(html: string, code: string): number {
-  return Math.max(html.length * 2, code.length * 3);
 }
 
 /** Keeps the fallback cached: `use` needs one promise per language, or the block suspends forever. */
@@ -357,7 +353,8 @@ function MarkdownCodeBlock({
   const wrapLabel = wrapped ? "Disable line wrap" : "Wrap lines";
   const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const handleCopy = useCallback(() => {
-    void writeTextToClipboard(code)
+    // The fence's closing newline would run a pasted command in a terminal at once.
+    void writeTextToClipboard(code.endsWith("\n") ? code.slice(0, -1) : code)
       .then(() => {
         if (copiedTimerRef.current != null) {
           clearTimeout(copiedTimerRef.current);
@@ -568,10 +565,10 @@ function UncachedShikiCodeBlock({
       highlightedCodeCache.set(
         cacheKey,
         highlightedHtml,
-        estimateHighlightedSize(highlightedHtml, code),
+        estimateHighlightedSize(highlightedHtml, cacheKey),
       );
     }
-  }, [cacheKey, code, highlighted, isStreaming]);
+  }, [cacheKey, highlighted, isStreaming]);
 
   if (typeof highlighted === "string") return <SanitizedShikiHtml html={highlighted} />;
   return (
@@ -974,6 +971,9 @@ function ChatMarkdown({
     const plugins: NonNullable<ReactMarkdownOptions["remarkPlugins"]> = [
       ...CHAT_MARKDOWN_REMARK_PLUGINS,
     ];
+    // Users type paths like ~/a and (~/b, which GFM's single-tilde strikethrough hides as <del>.
+    // This reconfigures the remark-gfm entry above; ~~double~~ still strikes.
+    if (isUserMessage) plugins.push(USER_REMARK_GFM_PLUGIN);
     if (preserveLineBreaks) plugins.push(remarkBreaks);
     if (mathEnabled) plugins.push(REMARK_MATH_PLUGIN);
     // Before the file chips, so a citation's link becomes a chip too.
@@ -992,6 +992,7 @@ function ChatMarkdown({
     codexDirectives,
     cwd,
     incrementalParsing,
+    isUserMessage,
     mathEnabled,
     messageFilePathsKey,
     preserveLineBreaks,

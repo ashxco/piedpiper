@@ -252,10 +252,40 @@ const listDirectory = Effect.fn("AgentSessionScanner.listDirectory")(function* (
 const discoverClaudeTranscripts = Effect.fn("AgentSessionScanner.discoverClaudeTranscripts")(
   function* (home: string, maxTranscripts: number) {
     const path = yield* Path.Path;
-    const budget = makeOperationBudget(maxTranscripts * DISCOVERY_OPERATIONS_PER_TRANSCRIPT);
+    const fileSystem = yield* FileSystem.FileSystem;
+    const operations = maxTranscripts * DISCOVERY_OPERATIONS_PER_TRANSCRIPT;
+    const budget = makeOperationBudget(operations);
     const transcripts: Array<Transcript> = [];
     const projectsDir = path.join(home, "projects");
-    for (const entry of yield* listDirectory(projectsDir)) {
+    // Folder names carry no date, so read the newest folders first: a budget that runs out then
+    // drops the oldest sessions. Dating has its own allowance, apart from the reads.
+    const dating = makeOperationBudget(operations);
+    const dated: Array<{ readonly name: string; readonly mtimeMs: number }> = [];
+    const undated: Array<string> = [];
+    for (const name of yield* listDirectory(projectsDir)) {
+      if (!dating.take()) {
+        undated.push(name);
+        continue;
+      }
+      const stats = yield* fileSystem.stat(path.join(projectsDir, name)).pipe(Effect.option);
+      if (Option.isNone(stats) || stats.value.type !== "Directory") continue;
+      dated.push({
+        name,
+        mtimeMs: Option.match(stats.value.mtime, {
+          onNone: () => 0,
+          onSome: (mtime) => mtime.getTime(),
+        }),
+      });
+    }
+    const projectDirectories = [
+      ...dated
+        .toSorted(
+          (left, right) => right.mtimeMs - left.mtimeMs || left.name.localeCompare(right.name),
+        )
+        .map((entry) => entry.name),
+      ...undated,
+    ];
+    for (const entry of projectDirectories) {
       if (!budget.take()) break;
       const directory = path.join(projectsDir, entry);
       for (const name of yield* listDirectory(directory)) {

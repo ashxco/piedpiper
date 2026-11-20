@@ -46,6 +46,7 @@ import { CommandPaletteResults } from "./CommandPaletteResults";
 import { ProjectFavicon } from "./ProjectFavicon";
 import { getFirstThreadForSidebar } from "./Sidebar.logic";
 import { isSettingsPathname } from "./sidebar/settingsRoute";
+import { isThreadSnoozedNow } from "./sidebar/threadSnoozeActions";
 import { ALERT_DIALOG_OPEN_ATTRIBUTE } from "./ui/alert-dialog-open-flag";
 import {
   Command,
@@ -158,8 +159,15 @@ function CommandPaletteContents() {
     valuePrefix: "project",
     icon: projectIcon,
     runProject: async (projectId) => {
+      // A snoozed thread is parked in its shelf, so opening the project skips it, like the sidebar.
+      const nowMs = Date.now();
       const latestThread = getFirstThreadForSidebar(
-        threads.filter((thread) => thread.projectId === projectId && thread.archivedAt === null),
+        threads.filter(
+          (thread) =>
+            thread.projectId === projectId &&
+            thread.archivedAt === null &&
+            !isThreadSnoozedNow(thread.id, nowMs),
+        ),
         sortOrder,
       );
       if (latestThread) {

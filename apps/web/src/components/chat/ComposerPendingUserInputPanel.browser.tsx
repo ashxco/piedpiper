@@ -227,6 +227,23 @@ describe("ComposerPendingUserInputPanel content", () => {
     expect(document.body.textContent).not.toContain("`pnpm`");
   });
 
+  it("keeps single line breaks in the question text", async () => {
+    await render(
+      <ComposerPendingUserInputPanel
+        pendingUserInputs={[makePromptWithQuestion({ question: "First line\nSecond line" })]}
+        cwd="/repo"
+        respondingRequestIds={[]}
+        answers={{}}
+        questionIndex={0}
+        onSelectOption={vi.fn()}
+        onCustomAnswer={vi.fn()}
+        onAdvance={vi.fn()}
+      />,
+    );
+
+    await expect.poll(() => document.querySelector(".chat-markdown p br")).not.toBeNull();
+  });
+
   it("shows option descriptions under the label, skipping ones equal to the label", async () => {
     const screen = await render(
       <ComposerPendingUserInputPanel

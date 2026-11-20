@@ -67,8 +67,13 @@ export function createWsNativeApi(): NativeApi {
       scanAgentSessions: rpcClient.projects.scanAgentSessions,
     },
     shell: {
-      openInEditor: (cwd, editor, options?: { readonly reveal?: boolean }) =>
-        rpcClient.shell.openInEditor({ cwd, editor, ...(options?.reveal ? { reveal: true } : {}) }),
+      openInEditor: (cwd, editor, options) =>
+        rpcClient.shell.openInEditor({
+          cwd,
+          editor,
+          ...(options?.reveal ? { reveal: true } : {}),
+          ...(options?.projectRoot ? { projectRoot: options.projectRoot } : {}),
+        }),
       openExternal: async (url) => {
         if (window.desktopBridge) {
           const opened = await window.desktopBridge.openExternal(url);

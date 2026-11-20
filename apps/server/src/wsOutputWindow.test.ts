@@ -1,6 +1,6 @@
-import { WS_METHODS } from "@piedpiper/contracts";
+import { TerminalEvent, WS_METHODS } from "@piedpiper/contracts";
 import { assert, describe, it } from "@effect/vitest";
-import { Deferred, Effect, Queue, Ref, Schema, Stream } from "effect";
+import { Deferred, Effect, Queue, Ref, Stream } from "effect";
 import { TestClock } from "effect/testing";
 import { Rpc, RpcGroup, RpcSerialization, RpcServer } from "effect/unstable/rpc";
 import type { RpcMessage } from "effect/unstable/rpc";
@@ -14,8 +14,8 @@ const makeHarness = Effect.fnUntraced(function* (
   clientIds: Ref.Ref<Set<number>>,
   windows: Map<number, Map<string, OutputWindow>> = new Map(),
 ) {
-  const group = RpcGroup.make(Rpc.make(tag, { success: Schema.String, stream: true }));
-  const output = yield* Queue.unbounded<string>();
+  const group = RpcGroup.make(Rpc.make(tag, { success: TerminalEvent, stream: true }));
+  const output = yield* Queue.unbounded<TerminalEvent>();
   const responses = yield* Queue.unbounded<RpcMessage.FromServerEncoded>();
   const receive = yield* Deferred.make<Receive>();
   const protocol = yield* RpcServer.Protocol.make((write) =>
@@ -43,41 +43,62 @@ const makeHarness = Effect.fnUntraced(function* (
   return { output, responses, write };
 });
 
+const eventWith = (field: "data" | "message" | "threadId", text: string): TerminalEvent =>
+  field === "message"
+    ? { threadId: "thread-1", terminalId: "default", createdAt: "", type: "error", message: text }
+    : {
+        threadId: field === "threadId" ? text : "thread-1",
+        terminalId: "default",
+        createdAt: "",
+        type: "output",
+        data: field === "data" ? text : "x",
+      };
+
 describe("withOutputWindow", () => {
   it.effect.each([
-    { tag: WS_METHODS.subscribeTerminalEvents, size: 1, limit: 8 },
-    { tag: WS_METHODS.subscribeTerminalEvents, size: 64 * 1024, limit: 1 },
-    { tag: WS_METHODS.subscribeServerConfig, size: 1, limit: 8 },
-    { tag: WS_METHODS.subscribeOrchestrationDomainEvents, size: 64 * 1024, limit: 8 },
-    { tag: WS_METHODS.terminalWrite, size: 1, limit: 1 },
-  ])("limits $tag with $size-byte values to $limit pending chunks", ({ tag, size, limit }) =>
-    Effect.gen(function* () {
-      const { output, responses, write } = yield* makeHarness(tag, yield* Ref.make(new Set([0])));
-      yield* write(0, { _tag: "Request", id: "1", tag, payload: null, headers: [] });
+    { tag: WS_METHODS.subscribeTerminalEvents, field: "data", size: 1, limit: 8 },
+    { tag: WS_METHODS.subscribeTerminalEvents, field: "data", size: 64 * 1024, limit: 1 },
+    { tag: WS_METHODS.subscribeTerminalEvents, field: "message", size: 64 * 1024, limit: 1 },
+    { tag: WS_METHODS.subscribeTerminalEvents, field: "threadId", size: 64 * 1024, limit: 1 },
+    { tag: WS_METHODS.subscribeServerConfig, field: "data", size: 1, limit: 8 },
+    {
+      tag: WS_METHODS.subscribeOrchestrationDomainEvents,
+      field: "data",
+      size: 64 * 1024,
+      limit: 8,
+    },
+    { tag: WS_METHODS.terminalWrite, field: "data", size: 1, limit: 1 },
+  ] as const)(
+    "limits $tag with $size-byte $field values to $limit pending chunks",
+    ({ tag, field, size, limit }) =>
+      Effect.gen(function* () {
+        const { output, responses, write } = yield* makeHarness(tag, yield* Ref.make(new Set([0])));
+        yield* write(0, { _tag: "Request", id: "1", tag, payload: null, headers: [] });
 
-      for (let index = 0; index < limit; index++) {
-        const value = String(index).repeat(size);
-        yield* Queue.offer(output, value);
+        for (let index = 0; index < limit; index++) {
+          const value = eventWith(field, String(index).repeat(size));
+          yield* Queue.offer(output, value);
+          yield* TestClock.adjust(0);
+          assert.equal(yield* Queue.size(responses), 1);
+          assert.deepEqual(yield* Queue.take(responses), {
+            _tag: "Chunk",
+            requestId: "1",
+            values: [value],
+          });
+        }
+        // The window is full: the next chunk waits for a real client ack.
+        const resumedValue = eventWith(field, "i".repeat(size));
+        yield* Queue.offer(output, resumedValue);
         yield* TestClock.adjust(0);
-        assert.equal(yield* Queue.size(responses), 1);
-        assert.deepEqual(yield* Queue.take(responses), {
-          _tag: "Chunk",
-          requestId: "1",
-          values: [value],
-        });
-      }
-      // The window is full: the next chunk waits for a real client ack.
-      yield* Queue.offer(output, "i".repeat(size));
-      yield* TestClock.adjust(0);
-      assert.equal(yield* Queue.size(responses), 0);
-      yield* write(0, { _tag: "Ack", requestId: "1" });
-      const resumed = yield* Queue.take(responses);
-      assert.equal(resumed._tag, "Chunk");
-      if (resumed._tag === "Chunk") assert.deepEqual(resumed.values, ["i".repeat(size)]);
+        assert.equal(yield* Queue.size(responses), 0);
+        yield* write(0, { _tag: "Ack", requestId: "1" });
+        const resumed = yield* Queue.take(responses);
+        assert.equal(resumed._tag, "Chunk");
+        if (resumed._tag === "Chunk") assert.deepEqual(resumed.values, [resumedValue]);
 
-      yield* write(0, { _tag: "Interrupt", requestId: "1" });
-      assert.equal((yield* Queue.take(responses))._tag, "Exit");
-    }).pipe(Effect.provide(RpcSerialization.layerJson), Effect.scoped),
+        yield* write(0, { _tag: "Interrupt", requestId: "1" });
+        assert.equal((yield* Queue.take(responses))._tag, "Exit");
+      }).pipe(Effect.provide(RpcSerialization.layerJson), Effect.scoped),
   );
 
   it.effect("prunes windows of disconnected clients when a new window opens", () =>

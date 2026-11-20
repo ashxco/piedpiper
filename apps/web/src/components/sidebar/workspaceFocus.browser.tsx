@@ -61,11 +61,19 @@ function setup() {
 
 describe("workspace area focus", () => {
   it("describes an area for the F6 cycle", () => {
-    expect(workspaceAreaProps("composer", 2, "Message input")).toEqual({
+    expect(workspaceAreaProps("conversation", 1, "Conversation")).toEqual({
+      "data-workspace-area": "conversation",
+      "data-workspace-order": 1,
+      "aria-label": "Conversation",
+      role: "region",
+      tabIndex: -1,
+    });
+  });
+
+  it("leaves an unlabeled area out of the landmarks", () => {
+    expect(workspaceAreaProps("composer", 2)).toEqual({
       "data-workspace-area": "composer",
       "data-workspace-order": 2,
-      "aria-label": "Message input",
-      role: "region",
       tabIndex: -1,
     });
   });
@@ -298,6 +306,23 @@ describe("window refocus and real focus", () => {
     await userEvent.keyboard("{Shift}");
     area.focus();
     expect(shouldRefocusComposerOnWindowFocus(document.activeElement)).toBe(false);
+  });
+
+  it("leaves a text selection in the timeline alone on window return", async () => {
+    const fixture = setup();
+    const timeline = fixture.append(
+      '<div tabindex="-1"><p>Steel bridges are also easy to recycle at the end of their life.</p></div>',
+    );
+    const reply = timeline.querySelector("p")!;
+
+    await userEvent.tripleClick(reply);
+    expect(document.activeElement).toBe(timeline);
+    expect(document.getSelection()?.toString()).toContain("Steel bridges");
+    expect(
+      shouldRefocusComposerOnWindowFocus(document.activeElement, document.getSelection()),
+      "refocusing the composer would clear the selected reply text",
+    ).toBe(false);
+    document.getSelection()?.removeAllRanges();
   });
 });
 

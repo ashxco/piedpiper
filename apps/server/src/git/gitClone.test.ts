@@ -63,6 +63,13 @@ const TestLayer = Layer.mergeAll(
 );
 
 describe("parseGitCloneProgressLine", () => {
+  it("parses hostile remote progress in linear time", () => {
+    const hostile = `Receiving objects: 1% (1/2),${" ".repeat(20_000)}x\u2028`.repeat(3);
+    const started = performance.now();
+    parseGitCloneProgressLine(hostile);
+    assert.isBelow(performance.now() - started, 500);
+  });
+
   it("reads stages, percents and transfer detail", () => {
     assert.deepEqual(
       parseGitCloneProgressLine("Receiving objects:  42% (42/100), 12.30 MiB | 5.00 MiB/s"),
@@ -86,6 +93,10 @@ describe("parseGitCloneProgressLine", () => {
   });
 
   it("ignores anything else", () => {
+    assert.deepEqual(
+      parseGitCloneProgressLine("Receiving objects: 100% (5/5), 40.00 MiB | 1.40 MiB/s, done."),
+      { stage: "receiving", percent: 100, detail: "40.00 MiB | 1.40 MiB/s" },
+    );
     assert.isNull(parseGitCloneProgressLine("Cloning into 'repo'..."));
     assert.isNull(parseGitCloneProgressLine("fatal: repository not found"));
     assert.isNull(parseGitCloneProgressLine(""));

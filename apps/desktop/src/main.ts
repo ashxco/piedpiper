@@ -67,11 +67,12 @@ import {
   isQuitConfirmationMode,
   makeQuitShortcutHandler,
 } from "./quitShortcutGuard";
+import { createRendererRecoveryPolicy } from "./rendererRecovery";
 import {
-  RENDERER_RECOVERY_RELOAD_DELAY_MS,
-  createRendererRecoveryPolicy,
-} from "./rendererRecovery";
-import { createShellEnvironmentSync } from "./syncShellEnvironment";
+  createShellEnvironmentSync,
+  retryShellEnvironmentRefresh,
+  type ShellEnvironmentRefreshResult,
+} from "./syncShellEnvironment";
 import { guardDesktopIpc } from "./trustedIpc";
 import {
   getAutoUpdateDisabledReason,
@@ -1278,7 +1279,29 @@ function startBackend(): void {
 }
 
 async function refreshShellEnvironment(): Promise<void> {
-  const { changed, hydrated } = await shellEnvironmentSync.refresh();
+  const result = await shellEnvironmentSync.refresh();
+  await applyShellEnvironmentRefresh(result);
+  if (result.probed || isQuitting) return;
+  // A slow shell or a Mac asleep at launch fails the first probe; keep asking in the background so
+  // the next backend start (and the cache for the next launch) gets the real PATH.
+  desktopLogging.writeHeader("login shell probe failed; retrying in the background");
+  void retryShellEnvironmentRefresh({
+    refresh: shellEnvironmentSync.refresh,
+    onResult: applyShellEnvironmentRefresh,
+    isCancelled: () => isQuitting,
+  })
+    .then((retried) => {
+      if (retried) desktopLogging.writeHeader("login shell probe retry succeeded");
+    })
+    .catch((error) => {
+      console.warn("[desktop] failed to retry the login shell environment", error);
+    });
+}
+
+async function applyShellEnvironmentRefresh({
+  changed,
+  hydrated,
+}: ShellEnvironmentRefreshResult): Promise<void> {
   shellEnvironmentHydrated = hydrated;
   if (isQuitting) return;
   if (!shellEnvironmentReady) {
@@ -1626,12 +1649,19 @@ function readDisplayBounds(): Electron.Rectangle[] {
   }
 }
 
+// Electron throws when a window created without a title bar overlay is asked to update one.
+const titleBarOverlayWindows = new WeakSet<BrowserWindow>();
+
 function createWindow(): BrowserWindow {
   const savedWindowState = readWindowState(WINDOW_STATE_PATH);
   const initialBounds = resolveInitialWindowBounds(savedWindowState.bounds, readDisplayBounds());
   if (savedWindowState.bounds !== null && initialBounds !== savedWindowState.bounds) {
     console.warn("[desktop] saved main window bounds could not be restored; using defaults");
   }
+  const titleBarOptions = getWindowTitleBarOptions(
+    process.platform,
+    nativeTheme.shouldUseDarkColors,
+  );
   const window = new BrowserWindow({
     ...initialBounds,
     minWidth: MAIN_WINDOW_MIN_SIZE.width,
@@ -1640,7 +1670,7 @@ function createWindow(): BrowserWindow {
     autoHideMenuBar: true,
     ...getIconOption(),
     title: APP_DISPLAY_NAME,
-    ...getWindowTitleBarOptions(process.platform, nativeTheme.shouldUseDarkColors),
+    ...titleBarOptions,
     webPreferences: {
       preload: Path.join(__dirname, "preload.js"),
       contextIsolation: true,
@@ -1650,6 +1680,9 @@ function createWindow(): BrowserWindow {
       backgroundThrottling: false,
     },
   });
+  if (titleBarOptions.titleBarOverlay !== undefined && titleBarOptions.titleBarOverlay !== false) {
+    titleBarOverlayWindows.add(window);
+  }
 
   // Applies the configured direct, hold or double-press behavior to the quit accelerator.
   const quitShortcutHandler = makeQuitShortcutHandler({
@@ -1749,18 +1782,21 @@ function createWindow(): BrowserWindow {
   // backend keeps running; reload so it rehydrates, bounded so a boot crash cannot loop.
   const rendererRecovery = createRendererRecoveryPolicy();
   window.webContents.on("render-process-gone", (_event, details) => {
-    const recovering =
-      !isQuitting &&
-      !window.isDestroyed() &&
-      rendererRecovery.shouldRecover(details.reason, Date.now());
-    const summary = `reason=${details.reason} exitCode=${details.exitCode} recovering=${recovering}`;
+    const reloadInMs =
+      isQuitting || window.isDestroyed()
+        ? null
+        : rendererRecovery.reloadDelayMs(details.reason, Date.now());
+    const recovering = reloadInMs !== null;
+    const summary =
+      `reason=${details.reason} exitCode=${details.exitCode} recovering=${recovering}` +
+      (recovering ? ` reloadInMs=${reloadInMs}` : "");
     console.error(`[desktop] renderer process gone ${summary}`);
     desktopLogging.writeHeader(`renderer process gone ${summary}`);
-    if (!recovering) return;
+    if (reloadInMs === null) return;
     setTimeout(() => {
       if (isQuitting || window.isDestroyed()) return;
       loadMainWindowContent(window);
-    }, RENDERER_RECOVERY_RELOAD_DELAY_MS);
+    }, reloadInMs);
   });
 
   // Register the owner before preload can issue its first synchronous IPC request.
@@ -1861,7 +1897,12 @@ app
     configureAutoUpdater();
     nativeTheme.on("updated", () => {
       for (const window of BrowserWindow.getAllWindows()) {
-        syncWindowTitleBarTheme(window, process.platform, nativeTheme.shouldUseDarkColors);
+        syncWindowTitleBarTheme(
+          window,
+          process.platform,
+          nativeTheme.shouldUseDarkColors,
+          titleBarOverlayWindows.has(window),
+        );
       }
     });
     if (process.platform === "linux") themeSourceController.startFollowingLinuxPortal();

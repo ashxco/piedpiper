@@ -32,9 +32,22 @@ export function completeProjectPath(suggestion: ProjectPathSuggestion): string {
   return `${suggestion.fullPath}${isWindowsAbsolutePath(suggestion.fullPath) ? "\\" : "/"}`;
 }
 
+// macOS Finder stores names decomposed (NFD), while typed text is composed (NFC).
+function folderNameKey(name: string): string {
+  return name.normalize("NFC").toLowerCase();
+}
+
 function splitPartialPath(path: string): { directory: string; prefix: string } {
   const end = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\")) + 1;
-  return { directory: path.slice(0, end), prefix: path.slice(end).toLowerCase() };
+  return { directory: path.slice(0, end), prefix: path.slice(end) };
+}
+
+// Raw too: "De" typed so far is a prefix of decomposed "De\u0301v" but not of its composed form.
+function folderNameStartsWith(name: string, prefix: string): boolean {
+  return (
+    name.toLowerCase().startsWith(prefix.toLowerCase()) ||
+    folderNameKey(name).startsWith(folderNameKey(prefix))
+  );
 }
 
 /**
@@ -49,10 +62,13 @@ export function visibleProjectPathSuggestions(
   if (listing.queriedPath === path) return listing.entries;
   const queried = splitPartialPath(listing.queriedPath);
   const current = splitPartialPath(path);
-  if (queried.directory !== current.directory || !current.prefix.startsWith(queried.prefix)) {
+  if (
+    queried.directory !== current.directory ||
+    !folderNameStartsWith(current.prefix, queried.prefix)
+  ) {
     return [];
   }
-  return listing.entries.filter((entry) => entry.name.toLowerCase().startsWith(current.prefix));
+  return listing.entries.filter((entry) => folderNameStartsWith(entry.name, current.prefix));
 }
 
 /** Arrow-key movement through the list, wrapping at both ends; nothing is highlighted at first. */

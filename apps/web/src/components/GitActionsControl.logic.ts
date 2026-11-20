@@ -269,3 +269,16 @@ export function resolveLiveThreadBranchUpdate(input: {
 
 // Re-export from shared for backwards compatibility in this module's exports
 export { resolveAutoFeatureBranchName } from "@piedpiper/shared/git";
+
+/**
+ * The commit dialog clears its message as the commit starts. A failed commit puts the typed
+ * message back for the retry, unless the user already started typing a new one.
+ */
+export function resolveCommitMessageAfterAction(
+  current: string,
+  submittedMessage: string,
+  committed: boolean,
+): string {
+  if (committed || !submittedMessage) return current;
+  return current || submittedMessage;
+}

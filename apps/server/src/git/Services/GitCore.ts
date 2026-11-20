@@ -39,6 +39,8 @@ export interface ExecuteGitInput {
   readonly timeoutMs?: number | null;
   readonly maxOutputBytes?: number;
   readonly truncateOutputAtMaxBytes?: boolean;
+  /** Keeps feeding progress line callbacks after output truncates (for unbounded hook output). */
+  readonly keepLineCallbacksAfterTruncation?: boolean;
   readonly progress?: ExecuteGitProgress;
 }
 

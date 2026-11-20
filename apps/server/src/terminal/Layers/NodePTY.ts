@@ -76,7 +76,7 @@ export class NodePtyProcess implements PtyProcess {
     return this.process.pid;
   }
 
-  write(data: string): void {
+  write(data: string | Buffer): void {
     this.process.write(data);
   }
 

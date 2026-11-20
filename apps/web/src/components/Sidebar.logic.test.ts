@@ -112,6 +112,20 @@ describe("hasUnseenCompletion", () => {
       }),
     ).toBe(true);
   });
+
+  it("does not show a stopped run as an unseen completion", () => {
+    const stopped = {
+      hasActionableProposedPlan: false,
+      hasPendingApprovals: false,
+      hasPendingUserInput: false,
+      interactionMode: "default" as const,
+      latestTurn: makeLatestTurn({ state: "interrupted" }),
+      lastVisitedAt: "2026-03-09T10:04:00.000Z",
+      session: null,
+    };
+    expect(hasUnseenCompletion(stopped)).toBe(false);
+    expect(resolveThreadStatusPill({ thread: stopped })).toBeNull();
+  });
 });
 
 describe("createThreadJumpHintVisibilityController", () => {
@@ -700,7 +714,7 @@ describe("resolveThreadStatusPill failures", () => {
     ).toBeNull();
   });
 
-  it("keeps an interrupted turn as completed", () => {
+  it("shows neither Failed nor Completed for an interrupted turn", () => {
     expect(
       resolveThreadStatusPill({
         thread: {
@@ -709,7 +723,7 @@ describe("resolveThreadStatusPill failures", () => {
           lastVisitedAt: "2026-03-09T10:04:00.000Z",
         },
       }),
-    ).toMatchObject({ label: "Completed" });
+    ).toBeNull();
   });
 
   it("hasUnseenFailure ignores successful turns", () => {

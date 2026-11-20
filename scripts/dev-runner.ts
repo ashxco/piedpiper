@@ -150,11 +150,6 @@ const optionalBooleanConfig = (name: string): Config.Config<boolean | undefined>
     Config.option,
     Config.map((value) => Option.getOrUndefined(value)),
   );
-const optionalPortConfig = (name: string): Config.Config<number | undefined> =>
-  Config.port(name).pipe(
-    Config.option,
-    Config.map((value) => Option.getOrUndefined(value)),
-  );
 const optionalIntegerConfig = (name: string): Config.Config<number | undefined> =>
   Config.int(name).pipe(
     Config.option,
@@ -315,6 +310,8 @@ export function createDevRunnerEnv({
 
     if (!isDesktopMode && host !== undefined) {
       output.PIEDPIPER_HOST = host;
+    } else {
+      delete output.PIEDPIPER_HOST;
     }
 
     if (!isDesktopMode && authToken !== undefined) {
@@ -727,12 +724,14 @@ const devRunnerCli = Command.make("dev-runner", {
   ),
   host: Flag.string("host").pipe(
     Flag.withDescription("Server host/interface override (forwards to PIEDPIPER_HOST)."),
-    Flag.withFallbackConfig(optionalStringConfig("PIEDPIPER_HOST")),
+    Flag.optional,
+    Flag.map(Option.getOrUndefined),
   ),
   port: Flag.integer("port").pipe(
     Flag.withSchema(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 65535 }))),
     Flag.withDescription("Server port override (forwards to PIEDPIPER_PORT)."),
-    Flag.withFallbackConfig(optionalPortConfig("PIEDPIPER_PORT")),
+    Flag.optional,
+    Flag.map(Option.getOrUndefined),
   ),
   devUrl: Flag.string("dev-url").pipe(
     Flag.withSchema(Schema.URLFromString),

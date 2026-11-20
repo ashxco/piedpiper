@@ -17,6 +17,7 @@ import { EDITORS, OpenError, type EditorId } from "@piedpiper/contracts";
 import {
   hasWindowsShimUnsafeChars,
   resolveSpawnCommand,
+  resolveWindowsPathExtensions,
   type ResolvedSpawnCommand,
 } from "@piedpiper/shared/windowsCommand";
 import { ServiceMap, Effect, Layer, Option } from "effect";
@@ -34,6 +35,8 @@ export interface OpenInEditorInput {
   readonly editor: EditorId;
   /** File manager only: show the target selected in its folder. */
   readonly reveal?: boolean | undefined;
+  /** Workspace the target belongs to; JetBrains IDEs open positioned files in this project. */
+  readonly projectRoot?: string | undefined;
 }
 
 export interface EditorLaunch {
@@ -111,6 +114,8 @@ function parseTargetPathAndPosition(target: string): {
 function resolveCommandEditorArgs(
   editor: (typeof EDITORS)[number],
   target: string,
+  isDirectory: boolean,
+  projectRoot: string | undefined,
 ): ReadonlyArray<string> {
   const parsedTarget = parseTargetPathAndPosition(target);
 
@@ -118,6 +123,9 @@ function resolveCommandEditorArgs(
     case "direct-path":
       return [target];
     case "goto":
+      // An existing folder wins over a position: `build:2026` is a legal folder name.
+      // Without a window flag, VS Code's window settings may replace the user's last active window.
+      if (isDirectory) return ["--new-window", target];
       return parsedTarget ? ["--goto", target] : [target];
     case "line-column": {
       if (!parsedTarget) {
@@ -128,6 +136,8 @@ function resolveCommandEditorArgs(
       // JetBrains IDEs count `--column` from 0; targets count columns from 1.
       const zeroBasedColumn = column ? String(Math.max(0, Number(column) - 1)) : undefined;
       return [
+        // Only positioned targets get the root: a folder target would open as a second project.
+        ...(projectRoot === undefined ? [] : [projectRoot]),
         ...(line ? ["--line", line] : []),
         ...(zeroBasedColumn ? ["--column", zeroBasedColumn] : []),
         path,
@@ -214,19 +224,6 @@ function stripWrappingQuotes(value: string): string {
 
 function resolvePathEnvironmentVariable(env: NodeJS.ProcessEnv): string {
   return env.PATH ?? env.Path ?? env.path ?? "";
-}
-
-function resolveWindowsPathExtensions(env: NodeJS.ProcessEnv): ReadonlyArray<string> {
-  const rawValue = env.PATHEXT;
-  const fallback = [".COM", ".EXE", ".BAT", ".CMD"];
-  if (!rawValue) return fallback;
-
-  const parsed = rawValue
-    .split(";")
-    .map((entry) => entry.trim())
-    .filter((entry) => entry.length > 0)
-    .map((entry) => (entry.startsWith(".") ? entry.toUpperCase() : `.${entry.toUpperCase()}`));
-  return parsed.length > 0 ? Array.from(new Set(parsed)) : fallback;
 }
 
 function resolveCommandCandidates(
@@ -525,6 +522,7 @@ async function editorInstallCandidates(
   const home = env.HOME?.trim() || undefined;
   const jetbrainsPrefixes = JETBRAINS_INSTALL_PREFIXES[editor.id];
   const candidates: string[] = [];
+  let toolbox: { readonly dir: string; readonly suffix: string } | undefined;
 
   if (platform === "darwin") {
     const roots = uniquePaths(
@@ -549,9 +547,11 @@ async function editorInstallCandidates(
       }
     }
     if (home && jetbrainsPrefixes) {
-      candidates.push(
-        join(home, "Library", "Application Support", "JetBrains", "Toolbox", "scripts", command),
-      );
+      toolbox = {
+        dir: join(home, "Library", "Application Support", "JetBrains", "Toolbox", "scripts"),
+        suffix: "",
+      };
+      candidates.push(join(toolbox.dir, command));
     }
   } else if (platform === "win32") {
     // ProgramW6432 is usually the same folder as ProgramFiles.
@@ -566,9 +566,11 @@ async function editorInstallCandidates(
     );
     if (jetbrainsPrefixes) {
       if (env.LOCALAPPDATA) {
-        candidates.push(
-          join(env.LOCALAPPDATA, "JetBrains", "Toolbox", "scripts", `${command}.cmd`),
-        );
+        toolbox = {
+          dir: join(env.LOCALAPPDATA, "JetBrains", "Toolbox", "scripts"),
+          suffix: ".cmd",
+        };
+        candidates.push(join(toolbox.dir, `${command}.cmd`));
       }
       for (const directory of roots.flatMap((root) => [root, join(root, "JetBrains")])) {
         for (const entry of await listMatchingEntries(entries, directory, jetbrainsPrefixes, "")) {
@@ -603,9 +605,27 @@ async function editorInstallCandidates(
     ];
     if (jetbrainsPrefixes) {
       const dataHome = env.XDG_DATA_HOME || (home ? join(home, ".local", "share") : undefined);
-      if (dataHome) dirs.push(join(dataHome, "JetBrains", "Toolbox", "scripts"));
+      if (dataHome) {
+        toolbox = { dir: join(dataHome, "JetBrains", "Toolbox", "scripts"), suffix: "" };
+        dirs.push(toolbox.dir);
+      }
     }
     candidates.push(...dirs.map((dir) => join(dir, command)));
+  }
+
+  if (toolbox) {
+    // Toolbox names a launch script `idea1`, `idea2`, ... while `idea` is taken, and keeps that
+    // name after the other install is removed. Try these only after every canonical candidate.
+    const { dir, suffix } = toolbox;
+    const numbered = (await readDirectoryEntries(entries, dir))
+      .filter(
+        (entry) =>
+          entry.startsWith(command) &&
+          entry.endsWith(suffix) &&
+          /^\d+$/.test(entry.slice(command.length, entry.length - suffix.length)),
+      )
+      .toSorted((a, b) => a.length - b.length || a.localeCompare(b));
+    candidates.push(...numbered.map((entry) => join(dir, entry)));
   }
 
   return Array.from(new Set(candidates));
@@ -885,9 +905,19 @@ export const resolveEditorLaunch = Effect.fn("resolveEditorLaunch")(function* (
       command: editorCommandNames(editorDef, platform)[0] ?? editorDef.commands[0],
       baseArgs: editorBaseArgs(editorDef),
     };
+    const isDirectory =
+      editorDef.launchStyle === "goto" &&
+      (yield* Effect.tryPromise(() => fsStat(cwd)).pipe(
+        Effect.map((info) => info.isDirectory()),
+        Effect.orElseSucceed(() => false),
+      ));
+    const projectRoot =
+      input.projectRoot === undefined
+        ? undefined
+        : expandHomePathForPlatform(input.projectRoot, platform, lookup.homeDir);
     return {
       command,
-      args: [...baseArgs, ...resolveCommandEditorArgs(editorDef, cwd)],
+      args: [...baseArgs, ...resolveCommandEditorArgs(editorDef, cwd, isDirectory, projectRoot)],
     };
   }
 

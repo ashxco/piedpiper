@@ -460,13 +460,16 @@ export function deriveQaCardMessages(
   return cards;
 }
 
-// Returning to the window should land the caret in the composer unless focus is deliberate:
-// another text field, an editable region, or an open dialog or popup.
+// Returning to the window should land the caret in the composer unless focus or a selection is
+// deliberate: another text field, an editable region, an open dialog or popup, or selected text
+// that focusing the composer would clear.
 export function shouldRefocusComposerOnWindowFocus(
   activeElement:
     | (Pick<Element, "tagName" | "closest" | "getAttribute"> & { isContentEditable?: boolean })
     | null,
+  selection: Pick<Selection, "isCollapsed"> | null = null,
 ): boolean {
+  if (selection !== null && !selection.isCollapsed) return false;
   if (activeElement === null || activeElement.tagName === "BODY") return true;
   if (
     activeElement.tagName === "INPUT" ||
@@ -761,6 +764,19 @@ export function shouldRestoreComposerAfterFailedSend(input: {
   return input.movesToRetryDraft || !input.threadIsCurrent
     ? !input.draftHasUserContent
     : input.liveComposerEmpty;
+}
+
+/**
+ * The failed message's text when it has nowhere else to go: a draft typed meanwhile keeps the
+ * composer, and the failed bubble leaves the timeline, so a toast offers to copy it instead.
+ */
+export function failedSendTextToOffer(input: {
+  restoredComposer: boolean;
+  cancelled: boolean;
+  failedText: string;
+}): string | null {
+  if (input.restoredComposer || input.cancelled) return null;
+  return input.failedText.trim().length > 0 ? input.failedText : null;
 }
 
 /** Thrown out of a send the user cancelled while its worktree was being created. */

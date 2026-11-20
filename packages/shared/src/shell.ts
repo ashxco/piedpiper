@@ -167,13 +167,40 @@ function buildNushellCaptureValue(name: string): string {
   );
 }
 
+const POSIX_PRINTENV_CAPTURE_SYNTAX = { assignment: "__PIEDPIPER_PRINTENV=$(", orElse: " || " };
+const PRINTENV_CAPTURE_SYNTAX: ReadonlyMap<string, { assignment: string; orElse: string }> =
+  new Map([
+    ...["sh", "bash", "zsh", "ksh", "ksh93", "dash", "ash"].map(
+      (name) => [name, POSIX_PRINTENV_CAPTURE_SYNTAX] as const,
+    ),
+    ["fish", { assignment: "set -l __PIEDPIPER_PRINTENV (", orElse: "; or " }] as const,
+  ]);
+// A profile that replaces PATH can hide printenv. Resolve it with an absolute /bin/sh: first on the
+// profile's PATH, then on the PATH this process inherited, then at its usual location.
+const PRINTENV_LOOKUP_COMMAND = `/bin/sh -c 'command -v printenv || { [ -n "$1" ] && PATH="$1" command -v printenv; } || printf %s /usr/bin/printenv' piedpiper`;
+
+function quotePosixSingle(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
 /** The `-ilc` command that prints each variable between markers, in POSIX sh or Nushell syntax. */
 export function buildLoginShellEnvironmentCaptureCommand(
   shell: string,
   names: ReadonlyArray<string>,
+  inheritedPath: string | undefined = process.env.PATH,
 ): string {
   const nushell = isNushell(shell);
-  return names
+  const executableName = shell.split(/[\\/]/).pop()?.toLowerCase() ?? "";
+  const syntax = nushell ? undefined : PRINTENV_CAPTURE_SYNTAX.get(executableName);
+  const absoluteInheritedPath = (inheritedPath ?? "")
+    .split(":")
+    .filter((entry) => entry.length > 0)
+    .map((entry) => NodePath.posix.resolve(entry))
+    .join(":");
+  const resolvePrintenv = syntax
+    ? `${syntax.assignment}${PRINTENV_LOOKUP_COMMAND} ${quotePosixSingle(absoluteInheritedPath)}); `
+    : "";
+  const capture = names
     .map((name) => {
       if (!SHELL_ENV_NAME_PATTERN.test(name)) {
         throw new Error(`Unsupported environment variable name: ${name}`);
@@ -189,11 +216,14 @@ export function buildLoginShellEnvironmentCaptureCommand(
 
       return [
         `printf '%s\\n' '${envCaptureStart(name)}'`,
-        `printenv ${name} || true`,
+        syntax
+          ? `printenv ${name}${syntax.orElse}"$__PIEDPIPER_PRINTENV" ${name}${syntax.orElse}true`
+          : `printenv ${name} || true`,
         `printf '%s\\n' '${envCaptureEnd(name)}'`,
       ].join("; ");
     })
     .join("; ");
+  return resolvePrintenv + capture;
 }
 
 function extractEnvironmentValue(output: string, name: string): string | undefined {

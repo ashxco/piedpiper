@@ -29,8 +29,6 @@ export const CODEX_ACCOUNT_PROBE_TIMEOUT_MS = 15_000;
 const PROBE_DEADLINE_MARGIN_MS = 250;
 /** How long a finished model/list waits for a config/read answer that has not arrived yet. */
 const CODEX_CONFIG_READ_GRACE_MS = 1_000;
-/** Usage is optional, so a slow `account/rateLimits/read` costs at most this much of the probe. */
-const CODEX_RATE_LIMITS_READ_TIMEOUT_MS = 3_000;
 
 /** app-server exited before the probe completed, such as when launch arguments are rejected. */
 export class CodexAppServerEarlyExitError extends Error {
@@ -73,16 +71,30 @@ export function buildCodexInitializeParams() {
   } as const;
 }
 
+const pendingKills = new WeakSet<ChildProcessWithoutNullStreams>();
+const CODEX_FORCE_KILL_AFTER_MS = 2_000;
+
 export function killCodexChildProcess(child: ChildProcessWithoutNullStreams): void {
+  if (child.exitCode != null || child.signalCode != null || pendingKills.has(child)) return;
+  pendingKills.add(child);
   if (process.platform === "win32" && child.pid !== undefined) {
     try {
-      spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore" });
-      return;
+      const result = spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"], {
+        stdio: "ignore",
+        timeout: CODEX_FORCE_KILL_AFTER_MS,
+      });
+      if (result.status === 0) return;
     } catch {
       // Fall through to direct kill when taskkill is unavailable.
     }
   }
 
+  // `killed` only reports that a signal was sent, so wait for an actual exit.
+  const timer = setTimeout(() => {
+    if (child.exitCode == null && child.signalCode == null) child.kill("SIGKILL");
+  }, CODEX_FORCE_KILL_AFTER_MS);
+  timer.unref();
+  child.once("exit", () => clearTimeout(timer));
   child.kill();
 }
 
@@ -95,6 +107,7 @@ export async function probeCodexAccount(input: {
   /** Total probe budget from spawn; the model/list wait never runs past it. */
   readonly probeTimeoutMs?: number;
   readonly configReadGraceMs?: number;
+  /** Defaults to the rest of the probe budget, so a slow usage answer is still shown. */
   readonly rateLimitsTimeoutMs?: number;
 }): Promise<CodexAccountSnapshot> {
   const startedAt = Date.now();
@@ -253,7 +266,7 @@ export async function probeCodexAccount(input: {
             readAt: new Date().toISOString(),
             failure: "Codex did not answer the usage request.",
           }),
-        untilDeadline(input.rateLimitsTimeoutMs ?? CODEX_RATE_LIMITS_READ_TIMEOUT_MS),
+        untilDeadline(input.rateLimitsTimeoutMs ?? Number.POSITIVE_INFINITY),
       );
       writeMessage({ id: RATE_LIMITS_READ_ID, method: "account/rateLimits/read" });
     };

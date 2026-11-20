@@ -176,6 +176,25 @@ export function isCodexRevertPlanSettled(
 }
 
 /** Whether a `requestUserInput` has anything to show; without it nothing could ever answer. */
+export type CodexReasoningSummary = "auto" | "concise" | "detailed" | "none";
+
+const CODEX_REASONING_SUMMARIES: ReadonlySet<string> = new Set([
+  "auto",
+  "concise",
+  "detailed",
+  "none",
+]);
+
+/** The user's `model_reasoning_summary` from a `config/read` result, when set to a known value. */
+export function readCodexConfiguredReasoningSummary(
+  response: unknown,
+): CodexReasoningSummary | undefined {
+  const summary = readString(readObject(response, "config"), "model_reasoning_summary");
+  return summary !== undefined && CODEX_REASONING_SUMMARIES.has(summary)
+    ? (summary as CodexReasoningSummary)
+    : undefined;
+}
+
 export function hasCodexUserInputQuestions(params: unknown): boolean {
   const questions = readObject(params)?.questions;
   return Array.isArray(questions) && questions.some((question) => readObject(question));

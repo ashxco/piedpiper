@@ -80,7 +80,9 @@ export const makeKeyedCoalescingWorker = <K, V, E, R>(options: {
       Effect.flatMap((item) =>
         item === null
           ? Effect.void
-          : options.process(item.key, item.value).pipe(
+          : // Suspend so a processor that throws synchronously becomes a defect we
+            // ignore, instead of killing the worker fiber and stalling every key.
+            Effect.suspend(() => options.process(item.key, item.value)).pipe(
               Effect.catchCause(() => Effect.void),
               Effect.ensuring(completeKey(item.key)),
             ),

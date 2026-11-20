@@ -10,7 +10,7 @@
 import { Effect, FileSystem, Layer, Option, Path, Schema, Stream } from "effect";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
-import { ClaudeModelSelection } from "@piedpiper/contracts";
+import { type ChatAttachment, ClaudeModelSelection } from "@piedpiper/contracts";
 import { resolveApiModelId } from "@piedpiper/shared/model";
 import { sanitizeFeatureBranchName } from "@piedpiper/shared/git";
 import { resolveSpawnCommand } from "@piedpiper/shared/windowsCommand";
@@ -36,6 +36,12 @@ import { ServerSettingsService } from "../../serverSettings.ts";
 import { getClaudeModelCapabilities } from "../../provider/Layers/ClaudeProvider.ts";
 import { ServerConfig } from "../../config.ts";
 import { buildClaudeChildEnv } from "../../provider/Layers/ClaudeExecutable.ts";
+import {
+  claudeLaunchExtraArgs,
+  normalizeSupportedClaudeImageMimeType,
+  readClaudeLaunchSettings,
+} from "../../provider/Layers/ClaudeAdapterHelpers.ts";
+import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import {
   claudeManagedMcpConfigPath,
   claudeMcpIsolationArgs,
@@ -101,11 +107,46 @@ const makeClaudeTextGeneration = Effect.gen(function* () {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const serverSettingsService = yield* Effect.service(ServerSettingsService);
+  const serverConfig = yield* Effect.service(ServerConfig);
   // One stable private directory, so Claude's per-cwd transcripts collapse into a single project entry.
-  const titleWorkingDirectory = path.join(
-    (yield* Effect.service(ServerConfig)).stateDir,
-    "claude-title-generation",
-  );
+  const titleWorkingDirectory = path.join(serverConfig.stateDir, "claude-title-generation");
+
+  /** Attached images as Claude content blocks; unreadable or unsupported ones are left out. */
+  const readImageBlocks = Effect.fn("readImageBlocks")(function* (
+    attachments: ReadonlyArray<ChatAttachment> | undefined,
+  ) {
+    const blocks: Array<{
+      readonly type: "image";
+      readonly source: {
+        readonly type: "base64";
+        readonly media_type: string;
+        readonly data: string;
+      };
+    }> = [];
+    for (const attachment of attachments ?? []) {
+      if (attachment.type !== "image") continue;
+      const mediaType = normalizeSupportedClaudeImageMimeType(attachment.mimeType);
+      if (!mediaType) continue;
+      const attachmentPath = resolveAttachmentPath({
+        attachmentsDir: serverConfig.attachmentsDir,
+        attachment,
+      });
+      if (!attachmentPath) continue;
+      const bytes = yield* fileSystem
+        .readFile(attachmentPath)
+        .pipe(Effect.orElseSucceed(() => null));
+      if (!bytes) continue;
+      blocks.push({
+        type: "image",
+        source: {
+          type: "base64",
+          media_type: mediaType,
+          data: Buffer.from(bytes).toString("base64"),
+        },
+      });
+    }
+    return blocks;
+  });
 
   const readStreamAsString = <E>(
     operation: string,
@@ -132,6 +173,7 @@ const makeClaudeTextGeneration = Effect.gen(function* () {
     prompt,
     outputSchemaJson,
     modelSelection,
+    attachments,
   }: {
     operation:
       | "generateCommitMessage"
@@ -142,13 +184,30 @@ const makeClaudeTextGeneration = Effect.gen(function* () {
     prompt: string;
     outputSchemaJson: S;
     modelSelection: ClaudeModelSelection;
+    attachments?: ReadonlyArray<ChatAttachment> | undefined;
   }): Effect.fn.Return<S["Type"], TextGenerationError, S["DecodingServices"]> {
     const jsonSchemaStr = JSON.stringify(toJsonSchemaObject(outputSchemaJson));
     const normalizedOptions = normalizeClaudeModelOptionsWithCapabilities(
       getClaudeModelCapabilities(modelSelection.model),
       modelSelection.options,
     );
+    const claudeSettings = yield* Effect.map(
+      serverSettingsService.getSettings,
+      (settings) => settings.providers.claudeAgent,
+    ).pipe(Effect.catch(() => Effect.undefined));
+    // The instance's --settings launch argument (such as a Vertex or Bedrock env) applies here
+    // too, beneath what text generation sets itself; the session would fail on a bad one as well.
+    const launchSettingsArg = claudeLaunchExtraArgs(claudeSettings?.launchArgs).settingsArg;
+    const launchSettings =
+      launchSettingsArg === undefined
+        ? undefined
+        : yield* readClaudeLaunchSettings({ settingsArg: launchSettingsArg, cwd, fileSystem }).pipe(
+            Effect.mapError(
+              (cause) => new TextGenerationError({ operation, detail: cause.issue, cause }),
+            ),
+          );
     const settings = {
+      ...launchSettings,
       disableAllHooks: true,
       ...(typeof normalizedOptions?.thinking === "boolean"
         ? { alwaysThinkingEnabled: normalizedOptions.thinking }
@@ -156,10 +215,15 @@ const makeClaudeTextGeneration = Effect.gen(function* () {
       ...(normalizedOptions?.fastMode ? { fastMode: true } : {}),
     };
 
-    const claudeSettings = yield* Effect.map(
-      serverSettingsService.getSettings,
-      (settings) => settings.providers.claudeAgent,
-    ).pipe(Effect.catch(() => Effect.undefined));
+    // `claude -p` accepts images only as content blocks of a stream-json user message.
+    const imageBlocks = yield* readImageBlocks(attachments);
+    const streamJson = imageBlocks.length > 0;
+    const stdin = streamJson
+      ? `${JSON.stringify({
+          type: "user",
+          message: { role: "user", content: [{ type: "text", text: prompt }, ...imageBlocks] },
+        })}\n`
+      : prompt;
 
     const runClaudeCommand = Effect.fn("runClaudeJson.runClaudeCommand")(function* (
       noSessionPersistence: boolean,
@@ -182,8 +246,9 @@ const makeClaudeTextGeneration = Effect.gen(function* () {
         try: () =>
           resolveSpawnCommand(claudeSettings?.binaryPath || "claude", [
             "-p",
-            "--output-format",
-            "json",
+            ...(streamJson
+              ? ["--input-format", "stream-json", "--output-format", "stream-json", "--verbose"]
+              : ["--output-format", "json"]),
             "--json-schema",
             jsonSchemaStr,
             "--model",
@@ -211,7 +276,7 @@ const makeClaudeTextGeneration = Effect.gen(function* () {
         env: buildClaudeChildEnv(undefined, { homePath: claudeSettings?.homePath }),
         forceKillAfter: CLAUDE_FORCE_KILL_AFTER,
         stdin: {
-          stream: Stream.encodeText(Stream.make(prompt)),
+          stream: Stream.encodeText(Stream.make(stdin)),
         },
       });
 
@@ -255,7 +320,12 @@ const makeClaudeTextGeneration = Effect.gen(function* () {
         { concurrency: "unbounded" },
       );
 
-      return { stdout, stderr, exitCode };
+      // stream-json prints one message per line and ends with the result message.
+      return {
+        stdout: streamJson ? (stdout.trim().split("\n").at(-1) ?? "") : stdout,
+        stderr,
+        exitCode,
+      };
     });
 
     const rawStdout = yield* runClaudeCommand(true).pipe(
@@ -418,6 +488,7 @@ const makeClaudeTextGeneration = Effect.gen(function* () {
       prompt,
       outputSchemaJson: outputSchema,
       modelSelection: input.modelSelection,
+      attachments: input.attachments,
     });
 
     return {
@@ -434,6 +505,7 @@ const makeClaudeTextGeneration = Effect.gen(function* () {
       previousTitle: input.previousTitle,
       additionalInstructions: input.additionalInstructions,
       linkedContext: input.linkedContext,
+      projectTitle: input.projectTitle,
     });
 
     if (input.modelSelection.provider !== "claudeAgent") {
@@ -449,6 +521,7 @@ const makeClaudeTextGeneration = Effect.gen(function* () {
       prompt,
       outputSchemaJson: outputSchema,
       modelSelection: input.modelSelection,
+      attachments: input.attachments,
     });
 
     return {

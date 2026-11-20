@@ -363,6 +363,86 @@ it.layer(ClaudeTextGenerationTestLayer)("ClaudeTextGenerationLive", (it) => {
     }).pipe(Effect.scoped),
   );
 
+  it.effect("sends attached images to Claude as stream-json content blocks", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const { attachmentsDir } = yield* ServerConfig;
+      const attachmentId = `thread-title-image-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+      yield* fs.makeDirectory(attachmentsDir, { recursive: true });
+      yield* fs.writeFile(path.join(attachmentsDir, `${attachmentId}.png`), Buffer.from("hello"));
+      yield* withFakeClaudeEnv(
+        {
+          // stream-json prints one message per line and ends with the result.
+          output: [
+            JSON.stringify({ type: "system", subtype: "init" }),
+            JSON.stringify({
+              type: "result",
+              subtype: "success",
+              is_error: false,
+              structured_output: { title: "Fix screenshot layout" },
+            }),
+          ].join("\n"),
+          argsMustContain: "-p --input-format stream-json --output-format stream-json --verbose",
+          stdinMustContain:
+            '{"type":"image","source":{"type":"base64","media_type":"image/png","data":"aGVsbG8="}}',
+        },
+        Effect.gen(function* () {
+          const textGeneration = yield* TextGeneration;
+          const generated = yield* textGeneration.generateThreadTitle({
+            cwd: process.cwd(),
+            message: "What is wrong here?",
+            attachments: [
+              {
+                type: "image",
+                id: attachmentId,
+                name: "bug.png",
+                mimeType: "image/png",
+                sizeBytes: 5,
+              },
+            ],
+            modelSelection: { provider: "claudeAgent", model: "claude-haiku-4-5" },
+          });
+          expect(generated.title).toBe("Fix screenshot layout");
+        }),
+      );
+    }),
+  );
+
+  it.effect("passes --settings from the instance launch args to Claude text generation", () =>
+    Effect.gen(function* () {
+      const serverSettings = yield* ServerSettingsService;
+      const launchArgs = `--settings '{"env":{"ANTHROPIC_VERTEX_PROJECT_ID":"vertex-project-a"},"disableAllHooks":false}'`;
+      yield* Effect.acquireUseRelease(
+        serverSettings.updateSettings({ providers: { claudeAgent: { launchArgs } } }),
+        () =>
+          withFakeClaudeEnv(
+            {
+              output: JSON.stringify({ structured_output: { subject: "Use settings", body: "" } }),
+              // Text generation's own keys stay on top of the launch argument's.
+              argsMustContain:
+                '--settings {"env":{"ANTHROPIC_VERTEX_PROJECT_ID":"vertex-project-a"},"disableAllHooks":true}',
+            },
+            Effect.gen(function* () {
+              const textGeneration = yield* TextGeneration;
+              const generated = yield* textGeneration.generateCommitMessage({
+                cwd: process.cwd(),
+                branch: "feature/settings",
+                stagedSummary: "M README.md",
+                stagedPatch: "diff --git a/README.md b/README.md",
+                modelSelection: { provider: "claudeAgent", model: "claude-haiku-4-5" },
+              });
+              expect(generated.subject).toBe("Use settings");
+            }),
+          ),
+        () =>
+          serverSettings
+            .updateSettings({ providers: { claudeAgent: { launchArgs: "" } } })
+            .pipe(Effect.orDie),
+      );
+    }),
+  );
+
   it.effect("forwards Claude thinking settings for Haiku without passing effort", () =>
     withFakeClaudeEnv(
       {

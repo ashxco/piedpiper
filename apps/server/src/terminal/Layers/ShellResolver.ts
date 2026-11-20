@@ -7,6 +7,7 @@
  * the error cause chain to detect ENOENT-style failures so the manager
  * can fall through to the next candidate.
  */
+import { statSync } from "node:fs";
 import path from "node:path";
 
 import type { PtySpawnError } from "../Services/PTY";
@@ -26,9 +27,20 @@ export function defaultShellResolver(
   return env.SHELL ?? "bash";
 }
 
+export type ShellPathIsFile = (candidate: string) => boolean;
+
+function defaultShellPathIsFile(candidate: string): boolean {
+  try {
+    return statSync(candidate).isFile();
+  } catch {
+    return false;
+  }
+}
+
 export function normalizeShellCommand(
   value: string | undefined,
   platform: NodeJS.Platform = process.platform,
+  isFile: ShellPathIsFile = defaultShellPathIsFile,
 ): string | null {
   if (!value) return null;
   const trimmed = value.trim();
@@ -38,10 +50,28 @@ export function normalizeShellCommand(
     return trimmed;
   }
 
-  const firstToken = trimmed.split(/\s+/g)[0]?.trim();
-  if (!firstToken) return null;
-  return firstToken.replace(/^['"]|['"]$/g, "");
+  // A quoted path is kept whole, even when it contains " -".
+  const quoted = /^(['"])(.*?)\1(?:\s|$)/.exec(trimmed);
+  if (quoted) return quoted[2] || null;
+
+  // A shell path can contain spaces, so an unquoted absolute path is ambiguous with
+  // `shell -flag`; prefer the longest prefix that is an existing file.
+  if (trimmed.startsWith("/") && /\s/.test(trimmed)) {
+    const ends = [...trimmed.matchAll(/\s+/g)].map((match) => match.index);
+    for (const end of [trimmed.length, ...ends.reverse()]) {
+      const candidate = trimmed.slice(0, end);
+      if (isFile(candidate)) return candidate;
+    }
+  }
+
+  // Otherwise only text from the first flag (`bash -l`) is dropped.
+  return trimmed.split(/\s+(?=-)/)[0]?.replace(/^['"]|['"]$/g, "") || null;
 }
+
+// PowerShell decodes native output with the console code page (often OEM 437), mangling UTF-8.
+const POWERSHELL_UTF8_SETUP =
+  "[Console]::OutputEncoding = $OutputEncoding = [System.Text.UTF8Encoding]::new()";
+const POWERSHELL_ARGS = ["-NoLogo", "-NoExit", "-Command", POWERSHELL_UTF8_SETUP];
 
 export function shellCandidateFromCommand(
   command: string | null,
@@ -52,7 +82,7 @@ export function shellCandidateFromCommand(
     platform === "win32" ? path.win32.basename(command) : path.basename(command)
   ).toLowerCase();
   if (platform === "win32" && (shellName === "pwsh.exe" || shellName === "powershell.exe")) {
-    return { shell: command, args: ["-NoLogo"] };
+    return { shell: command, args: [...POWERSHELL_ARGS] };
   }
   if (platform !== "win32" && shellName === "zsh") {
     return { shell: command, args: ["-o", "nopromptsp"] };
@@ -89,9 +119,10 @@ export function resolveShellCandidates(
   shellResolver: () => string,
   platform: NodeJS.Platform = process.platform,
   env: NodeJS.ProcessEnv = process.env,
+  isFile: ShellPathIsFile = defaultShellPathIsFile,
 ): ShellCandidate[] {
   const candidate = (command: string | null) => shellCandidateFromCommand(command, platform);
-  const requested = candidate(normalizeShellCommand(shellResolver(), platform));
+  const requested = candidate(normalizeShellCommand(shellResolver(), platform, isFile));
 
   if (platform === "win32") {
     const system32 = path.win32.join(windowsSystemRoot(env), "System32");
@@ -109,7 +140,7 @@ export function resolveShellCandidates(
 
   return uniqueShellCandidates([
     requested,
-    candidate(normalizeShellCommand(env.SHELL, platform)),
+    candidate(normalizeShellCommand(env.SHELL, platform, isFile)),
     candidate("/bin/zsh"),
     candidate("/bin/bash"),
     candidate("/bin/sh"),

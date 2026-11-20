@@ -376,6 +376,39 @@ describe("handleTerminalCustomKeyEvent", () => {
     }
   });
 
+  it("hands thread navigation shortcuts back to the sidebar instead of the shell", () => {
+    const navigationBindings: ResolvedKeybindingsConfig = [
+      ...keybindings,
+      { command: "thread.next", shortcut: modShortcut("]", true) },
+      { command: "thread.jump.1", shortcut: modShortcut("1") },
+      {
+        command: "thread.previous",
+        shortcut: modShortcut("[", true),
+        whenAst: { type: "not", node: { type: "identifier", name: "terminalFocus" } },
+      },
+    ];
+    for (const event of [
+      keyEvent({ key: "]", metaKey: true, shiftKey: true }),
+      keyEvent({ key: "1", metaKey: true }),
+    ]) {
+      const sendInput = vi.fn();
+      expect(handleTerminalCustomKeyEvent(event, navigationBindings, sendInput, "MacIntel")).toBe(
+        false,
+      );
+      expect(sendInput).not.toHaveBeenCalled();
+      expect(event.preventDefault).not.toHaveBeenCalled();
+    }
+    // A binding the sidebar would reject while the terminal has focus stays with the shell.
+    expect(
+      handleTerminalCustomKeyEvent(
+        keyEvent({ key: "[", metaKey: true, shiftKey: true }),
+        navigationBindings,
+        vi.fn(),
+        "MacIntel",
+      ),
+    ).toBe(true);
+  });
+
   it("swallows auto-repeated close shortcuts so a held Cmd+W cannot cascade", () => {
     const sendInput = vi.fn();
     const event = keyEvent({ key: "w", metaKey: true, repeat: true });

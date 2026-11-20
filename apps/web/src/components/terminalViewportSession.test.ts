@@ -92,6 +92,22 @@ describe("terminal session ownership", () => {
     expect(detach).toHaveBeenCalledWith(expect.objectContaining({ viewerId: expect.any(String) }));
   });
 
+  it("sends a failed resize once more, but not a superseded or repeated failure", async () => {
+    const { owner, resize } = setup(true);
+    resize.mockRejectedValue(new Error("offline"));
+
+    owner.fit();
+    await vi.waitFor(() => expect(resize).toHaveBeenCalledTimes(2));
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(resize).toHaveBeenCalledTimes(2);
+    expect(resize.mock.calls[1]).toEqual(resize.mock.calls[0]);
+
+    // The retry recorded the grid, so an unchanged refit sends nothing new.
+    owner.fit(true);
+    expect(resize).toHaveBeenCalledTimes(2);
+  });
+
   it("ignores a pending open after disposal and removes the reconnect subscription", async () => {
     const { owner, pending, open, write } = setup();
     owner.dispose();

@@ -99,6 +99,13 @@ describe("markdownImageCopy", () => {
   it("escapes the alt text", () => {
     expect(markdownImageCopy("a [b]", "x.png")).toBe("![a \\[b\\]](x.png)");
   });
+
+  it("copies an image whose path has a space or parentheses as Markdown that is still that image", () => {
+    // Raw HTML <img> and <picture> sources reach the copy with the space unencoded.
+    const copied = markdownImageCopy("Shot", "/work/my shot (1).png");
+    expect(copied).toBe("![Shot](</work/my shot (1).png>)");
+    expect(html(copied)).toContain('src="/work/my%20shot%20(1).png"');
+  });
 });
 
 const html = (markdown: string) =>

@@ -58,12 +58,15 @@ const POWERSHELL_PROMPT_PATH_PATTERN = /^PS ((?:[A-Za-z]:[\\/]|\\\\|\/)[^>\r\n]*
 // Bare relative paths start only at a segment boundary (lookbehind) so Unicode names stay whole
 // and separator-free output is not rescanned at every suffix.
 // Brackets must pair so a bare path cannot absorb a run of `]`.
-// Parentheses count only before a slash, so `src/foo.ts(3,10)` stays a compiler location.
+// Parentheses count only before a slash, so `src/foo.ts(3,10)` stays a compiler location; a
+// TypeScript `file.ts(3,10): error TS…` location is kept and rewritten to `file.ts:3:10`.
 const FILE_PATH_PATTERN =
-  /(?:~[\\/]|\.{1,2}[\\/]|\/|[A-Za-z]:[\\/]|\\\\)[^\s"'`<>]+|(?<![\p{L}\p{M}\p{N}._-])[\p{L}\p{M}\p{N}._-]+(?:[\\/](?:[\p{L}\p{M}\p{N}._$+@-]|\[{1,2}[\p{L}\p{M}\p{N}._-]+\]{1,2}|\([\p{L}\p{M}\p{N}._-]+\)(?=[\\/]))+)+(?::\d+){0,2}/gu;
+  /(?:~[\\/]|\.{1,2}[\\/]|\/|[A-Za-z]:[\\/]|\\\\)[^\s"'`<>]+|(?<![\p{L}\p{M}\p{N}._-])[\p{L}\p{M}\p{N}._-]+(?:[\\/](?:[\p{L}\p{M}\p{N}._$+@-]|\[{1,2}[\p{L}\p{M}\p{N}._-]+\]{1,2}|\([\p{L}\p{M}\p{N}._-]+\)(?=[\\/]))+)+(?:(?::\d+){1,2}|\(\d+,\d+\)(?=:\s+(?:error|warning) TS\d+:))?/gu;
 // Quoted paths may contain spaces; a `:line:col` position may follow the closing quote.
 const QUOTED_FILE_PATH_PATTERN =
   /(["'`])(?<path>(?:~[\\/]|\.{1,2}[\\/]|\/|[A-Za-z]:[\\/]|\\\\|[\p{L}\p{M}\p{N}._ -]+[\\/])[^\r\n]*?|[\p{L}\p{M}\p{N}._ -]+\.[\p{L}\p{M}\p{N}_-]+(?::\d+){0,2})\1(?<position>(?::\d+){0,2})/gu;
+// What tsc prints after a `file.ts(line,col)` location.
+const TYPESCRIPT_DIAGNOSTIC_SUFFIX = /^:\s+(?:error|warning) TS\d+:/u;
 const TRAILING_PUNCTUATION_PATTERN = /[.,;!?]+$/;
 // Paths also drop a trailing colon: compilers end `file:line:col:` with one.
 const TRAILING_PATH_PUNCTUATION_PATTERN = /[.,;:!?]+$/;
@@ -72,6 +75,9 @@ const REQUEST_ROUTE_PATTERN =
   /(?:^|[\s"'`])(?:GET|HEAD|POST|PUT|PATCH|DELETE|OPTIONS|CONNECT|TRACE|proxying)\s+["'`]?(?:\/|[A-Za-z0-9_-]+\/)[^\s?]*\?\S*/g;
 // The tail of `redis://host/0` or `file:///a.mjs` is not a path; one-letter schemes stay drives.
 const SCHEME_URL_PATTERN = /(?<![A-Za-z\d+.-])[+-]?[A-Za-z][A-Za-z\d+.-]+:\/\/[^\s"'`<>]+/gu;
+// Nor is the tail of an SCP-style Git remote such as `git@github.com:acme/widgets.git`. Only a
+// path wholly inside the tail is dropped, so `src/contact@support.vue:12:3` keeps its link.
+const SCP_REMOTE_PATTERN = /(?<![\w.@-])[\w.-]+@[\w.-]+:[^\s"'`<>]+/gu;
 
 function trimClosingDelimiters(value: string, kind: TerminalLinkKind): string {
   let output = value.replace(
@@ -125,7 +131,10 @@ function collectMatches(
 
     const candidate: TerminalLinkMatch = {
       kind,
-      text: trimmed,
+      text:
+        kind === "path" && TYPESCRIPT_DIAGNOSTIC_SUFFIX.test(line.slice(start + trimmed.length))
+          ? trimmed.replace(/\((\d+),(\d+)\)$/, ":$1:$2")
+          : trimmed,
       start,
       // A position outside the quotes spans the closing quote in the terminal buffer.
       end: start + trimmed.length + (position.length > 0 ? 1 : 0),
@@ -214,6 +223,10 @@ export function extractTerminalLinks(line: string): TerminalLinkMatch[] {
     [...line.matchAll(REQUEST_ROUTE_PATTERN), ...line.matchAll(SCHEME_URL_PATTERN)],
     (match) => ({ start: match.index ?? 0, end: (match.index ?? 0) + match[0].length }),
   );
+  const remoteTails = Array.from(line.matchAll(SCP_REMOTE_PATTERN), (match) => ({
+    start: (match.index ?? 0) + match[0].indexOf(":") + 1,
+    end: (match.index ?? 0) + match[0].length,
+  }));
   const promptPath = POWERSHELL_PROMPT_PATH_PATTERN.exec(line)?.[1];
   const promptMatches: TerminalLinkMatch[] = promptPath
     ? [{ kind: "path", text: promptPath, start: 3, end: 3 + promptPath.length }]
@@ -230,7 +243,10 @@ export function extractTerminalLinks(line: string): TerminalLinkMatch[] {
   ]);
   return [...promptMatches, ...urlMatches, ...quotedMatches, ...pathMatches]
     .filter(
-      (match) => match.kind === "url" || !nonPathRanges.some((range) => overlaps(match, range)),
+      (match) =>
+        match.kind === "url" ||
+        (!nonPathRanges.some((range) => overlaps(match, range)) &&
+          !remoteTails.some((tail) => match.start >= tail.start && match.end <= tail.end)),
     )
     .toSorted((a, b) => a.start - b.start);
 }

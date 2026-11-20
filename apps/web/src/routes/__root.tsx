@@ -32,7 +32,7 @@ import { Button } from "../components/ui/button";
 import { AnchoredToastProvider, ToastProvider, toastManager } from "../components/ui/toast";
 import { resolveAndPersistPreferredEditor } from "../editorPreferences";
 import { useCopyToClipboard } from "../hooks/useCopyToClipboard";
-import { isChunkReloadScheduled } from "../lib/chunkReloadGuard";
+import { isChunkReloadScheduled, shouldRetryByReloading } from "../lib/chunkReloadGuard";
 import { buildErrorReport, errorMessage } from "../lib/rootErrorReport";
 import { readNativeApi } from "../nativeApi";
 import {
@@ -163,7 +163,11 @@ function RootRouteErrorContent({ error, reset }: ErrorComponentProps) {
       <p className="mt-3 max-w-md text-center text-sm text-muted-foreground">{message}</p>
 
       <div className="mt-8 flex items-center gap-3">
-        <Button size="sm" variant="outline" onClick={() => reset()}>
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => (shouldRetryByReloading(error) ? window.location.reload() : reset())}
+        >
           Try again
         </Button>
         <Button size="sm" variant="ghost" onClick={() => window.location.reload()}>

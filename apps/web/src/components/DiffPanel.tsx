@@ -2,7 +2,7 @@ import { DEFAULT_VIRTUAL_FILE_METRICS, type SelectedLineRange } from "@pierre/di
 import { FileDiff, type FileDiffMetadata, Virtualizer } from "@pierre/diffs/react";
 import { useInfiniteQuery, useQueries, useQuery } from "@tanstack/react-query";
 import { useNavigate, useParams, useSearch } from "@tanstack/react-router";
-import { ThreadId, type TurnId } from "@piedpiper/contracts";
+import { CHECKPOINT_DIFF_TRUNCATED_MARKER, ThreadId, type TurnId } from "@piedpiper/contracts";
 import type { DiffLayout } from "@piedpiper/contracts/settings";
 import * as Schema from "effect/Schema";
 import {
@@ -729,6 +729,15 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
       : selectedTurn
         ? selectedTurnCheckpointDiff
         : conversationCheckpointDiff;
+  // The server marks a checkpoint diff it cut off at its size limit.
+  const isCheckpointDiffTruncated =
+    !toolId && !gitScope && selectedPatch?.endsWith(CHECKPOINT_DIFF_TRUNCATED_MARKER) === true;
+  const diffNotices = isCheckpointDiffTruncated
+    ? [
+        ...gitDiffPreviewNotices,
+        "This diff is too large to show in full; later files are left out.",
+      ]
+    : gitDiffPreviewNotices;
   const hasResolvedPatch = typeof selectedPatch === "string";
   const hasNoNetChanges = hasResolvedPatch && selectedPatch.trim().length === 0;
   const renderablePatch = useMemo(
@@ -916,8 +925,9 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
     diffFilesCollapsedBySetting,
   ]);
 
-  // Diff paths are repo-root-relative; the project cwd can be a repository subdirectory.
-  const repoRoot = gitStatusQuery.data?.workingTree.rootPath;
+  // Turn and git diff paths are repo-root-relative; the project cwd can be a repository
+  // subdirectory. A tool input's diff names files relative to the workspace (or absolute).
+  const repoRoot = toolId ? undefined : gitStatusQuery.data?.workingTree.rootPath;
   const openDiffFileInEditor = useStableCallback((filePath: string) => {
     const api = readNativeApi();
     if (!api) return;
@@ -1473,7 +1483,7 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
       </div>
       <div className="flex shrink-0 items-center gap-3">
         {/* A cut patch would understate the totals with nothing marking them as partial. */}
-        {renderableFiles.length > 0 && !gitDiffPreview?.truncated && (
+        {renderableFiles.length > 0 && !gitDiffPreview?.truncated && !isCheckpointDiffTruncated && (
           <span className="text-[11px] tabular-nums">
             <DiffStatLabel additions={diffLineStat.additions} deletions={diffLineStat.deletions} />
           </span>
@@ -1647,9 +1657,9 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
                 onClose={diffFind.close}
               />
             )}
-            {renderablePatch && gitDiffPreviewNotices.length > 0 && (
+            {renderablePatch && diffNotices.length > 0 && (
               <p className="shrink-0 border-b border-border/60 px-3 py-1 text-[11px] text-muted-foreground/75">
-                {gitDiffPreviewNotices.join(" ")}
+                {diffNotices.join(" ")}
               </p>
             )}
             {!renderablePatch ? (

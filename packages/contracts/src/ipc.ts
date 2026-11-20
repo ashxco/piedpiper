@@ -205,7 +205,11 @@ export interface NativeApi {
     openInEditor: (
       cwd: string,
       editor: EditorId,
-      options?: { readonly reveal?: boolean },
+      options?: {
+        readonly reveal?: boolean;
+        /** Workspace the target belongs to; JetBrains IDEs open positioned files in it. */
+        readonly projectRoot?: string;
+      },
     ) => Promise<void>;
     openExternal: (url: string) => Promise<void>;
   };

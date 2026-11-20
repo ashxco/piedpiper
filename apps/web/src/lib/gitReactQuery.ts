@@ -18,7 +18,7 @@ const GIT_STATUS_STALE_TIME_MS = 5_000;
 const GIT_STATUS_REFETCH_INTERVAL_MS = 15_000;
 const GIT_BRANCHES_STALE_TIME_MS = 15_000;
 const GIT_BRANCHES_REFETCH_INTERVAL_MS = 60_000;
-const GIT_BRANCHES_PAGE_SIZE = 100;
+export const GIT_BRANCHES_PAGE_SIZE = 100;
 const GIT_DIFF_PREVIEW_STALE_TIME_MS = 5_000;
 
 /** The chat does not render file counts or the working-tree file list. */

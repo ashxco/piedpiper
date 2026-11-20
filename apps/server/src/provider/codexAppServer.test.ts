@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   CodexAppServerEarlyExitError,
   probeCodexAccount,
+  killCodexChildProcess,
   readConfiguredServiceTier,
 } from "./codexAppServer";
 
@@ -342,6 +343,36 @@ describe("probeCodexAccount usage limits", () => {
     expect(snapshot.rateLimits).toMatchObject({ response: rateLimits });
   });
 
+  it("keeps a usage answer that arrives after three seconds inside the probe budget", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    try {
+      const child = spawnProbeChild({
+        stallAfterPages: 1,
+        lastPage: true,
+        serviceTier: "fast",
+        rateLimits: null,
+      });
+      spawnMock.mockReturnValueOnce(child);
+      child.stdin.on("data", (chunk: Buffer) => {
+        for (const line of chunk.toString().split("\n")) {
+          if (!line.includes("account/rateLimits/read")) continue;
+          const { id } = JSON.parse(line) as { id: number };
+          setTimeout(() => {
+            child.stdout.write(`${JSON.stringify({ id, result: rateLimits })}\n`);
+          }, 4_000);
+        }
+      });
+
+      const probe = probeCodexAccount({ binaryPath: "codex" });
+      await vi.advanceTimersByTimeAsync(5_000);
+      const snapshot = await probe;
+
+      expect(snapshot.rateLimits).toMatchObject({ response: rateLimits });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("does not ask an API key account for subscription usage", async () => {
     const child = spawnProbeChild({
       stallAfterPages: 1,
@@ -369,3 +400,31 @@ describe("readConfiguredServiceTier", () => {
     expect(readConfiguredServiceTier(undefined)).toBeUndefined();
   });
 });
+
+const once = (emitter: EventEmitter, event: string) =>
+  new Promise<unknown[]>((resolve) => emitter.once(event, (...args) => resolve(args)));
+
+it.skipIf(process.platform === "win32")(
+  "force-kills a Codex process that ignores SIGTERM",
+  async () => {
+    const { spawn } =
+      await vi.importActual<typeof import("node:child_process")>("node:child_process");
+    const child = spawn(
+      process.execPath,
+      ["-e", "process.on('SIGTERM', () => {}); console.log('ready'); setInterval(() => {}, 1000)"],
+      { stdio: "pipe" },
+    );
+    try {
+      await once(child.stdout, "data");
+      const exited = once(child, "exit");
+      killCodexChildProcess(child);
+      killCodexChildProcess(child);
+      const [code, signal] = await exited;
+      expect(code).toBeNull();
+      expect(signal).toBe("SIGKILL");
+    } finally {
+      child.kill("SIGKILL");
+    }
+  },
+  7_000,
+);

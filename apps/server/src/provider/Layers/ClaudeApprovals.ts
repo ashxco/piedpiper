@@ -462,12 +462,14 @@ export function makeClaudeApprovals<Context extends ClaudeApprovalContext>({
     const acceptance = claudeMcpElicitationAcceptance(request);
     const context = yield* getContext;
     if (!acceptance || !context || context.stopped) {
-      yield* Effect.logWarning("Declined an MCP elicitation the approval card cannot answer", {
+      yield* Effect.logWarning("Cancelled an MCP elicitation the approval card cannot answer", {
         serverName: request.serverName,
         mode: request.mode,
         hasSession: context !== undefined && !context.stopped,
       });
-      return { action: "decline" } satisfies ElicitationResult;
+      // No card was shown, so the user made no choice. MCP reserves "decline" for an explicit
+      // no; "cancel" tells the server the request was dismissed and may be asked another way.
+      return { action: "cancel" } satisfies ElicitationResult;
     }
 
     const requestId = ApprovalRequestId.makeUnsafe(yield* Random.nextUUIDv4);

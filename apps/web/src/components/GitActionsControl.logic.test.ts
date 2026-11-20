@@ -4,6 +4,7 @@ import {
   buildGitActionProgressStages,
   buildMenuItems,
   resolveAutoFeatureBranchName,
+  resolveCommitMessageAfterAction,
   resolveLiveThreadBranchUpdate,
   resolveQuickAction,
   resolveThreadBranchUpdate,
@@ -745,5 +746,20 @@ describe("resolveAutoFeatureBranchName", () => {
   it("falls back to feature/update when no preferred name is provided", () => {
     const branch = resolveAutoFeatureBranchName(["main"]);
     assert.equal(branch, "feature/update");
+  });
+});
+
+describe("resolveCommitMessageAfterAction", () => {
+  it("puts the typed message back after a failed commit", () => {
+    assert.equal(resolveCommitMessageAfterAction("", "fix: typo", false), "fix: typo");
+  });
+
+  it("keeps a message the user started typing while the commit ran", () => {
+    assert.equal(resolveCommitMessageAfterAction("new", "fix: typo", false), "new");
+  });
+
+  it("leaves the dialog empty after a successful commit or an empty message", () => {
+    assert.equal(resolveCommitMessageAfterAction("", "fix: typo", true), "");
+    assert.equal(resolveCommitMessageAfterAction("", "", false), "");
   });
 });

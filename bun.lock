@@ -21,7 +21,7 @@
       "dependencies": {
         "effect": "catalog:",
         "electron": "44.10.2",
-        "electron-updater": "^6.6.2",
+        "electron-updater": "6.8.3",
       },
       "devDependencies": {
         "@piedpiper/contracts": "workspace:*",
@@ -190,6 +190,7 @@
     "node-pty",
   ],
   "patchedDependencies": {
+    "electron-updater@6.8.3": "patches/electron-updater@6.8.3.patch",
     "@effect/platform-bun@4.0.0-beta.43": "patches/@effect%2Fplatform-bun@4.0.0-beta.43.patch",
     "@effect/platform-node@4.0.0-beta.43": "patches/@effect%2Fplatform-node@4.0.0-beta.43.patch",
     "@effect/platform-node-shared@4.0.0-beta.43": "patches/@effect%2Fplatform-node-shared@4.0.0-beta.43.patch",

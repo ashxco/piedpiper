@@ -48,11 +48,28 @@ function codeFenceFor(code: string): string {
   return "`".repeat(Math.max(3, longestRun + 1));
 }
 
-function outsideCodeFences(markdown: string, tidy: (prose: string) => string): string {
-  // A fence closes only at its own opening run, so split yields [prose, fence, run] triples.
+export function serializeCodeBlockToMarkdown(source: string, language: string | null): string {
+  const code = source.replace(/\n$/, "");
+  const fence = codeFenceFor(code);
+  return `${fence}${language ?? ""}\n${code}\n${fence}\n\n`;
+}
+
+// Brackets copied code so tidyMarkdown leaves its whitespace alone. Code is copied as shown,
+// without fences, so a command copied along with prose still pastes into a shell; DOM text
+// from rendered markdown carries no NUL.
+const CODE_BOUNDARY = "\u0000";
+
+function verbatimBlock(code: string): string {
+  return `${CODE_BOUNDARY}${code}${CODE_BOUNDARY}\n\n`;
+}
+
+// Odd parts are code and keep their markers, so outer passes still skip them.
+function outsideCode(markdown: string, tidy: (prose: string) => string): string {
   return markdown
-    .split(/((`{3,})[\s\S]*?(?:\2|$))/)
-    .map((part, index) => (index % 3 === 0 ? tidy(part) : index % 3 === 1 ? part : ""))
+    .split(CODE_BOUNDARY)
+    .map((part, index) =>
+      index % 2 === 1 ? `${CODE_BOUNDARY}${part}${CODE_BOUNDARY}` : tidy(part),
+    )
     .join("");
 }
 
@@ -65,14 +82,16 @@ function resolveCodeBlockLanguage(pre: Element): string | null {
   return declared && declared !== "text" ? declared : null;
 }
 
-export function serializeCodeBlockToMarkdown(source: string, language: string | null): string {
-  const code = source.replace(/\n$/, "");
-  const fence = codeFenceFor(code);
-  return `${fence}${language ?? ""}\n${code}\n${fence}\n\n`;
-}
+// Set for one synchronous serialization: a quote into the composer keeps code fenced, so the
+// agent can tell code from prose, while the clipboard copies code as shown.
+let fenceCodeBlocks = false;
 
 function serializeCodeBlock(pre: Element): string {
-  return serializeCodeBlockToMarkdown(pre.textContent ?? "", resolveCodeBlockLanguage(pre));
+  const source = pre.textContent ?? "";
+  if (!fenceCodeBlocks) return verbatimBlock(source.replace(/\n$/, ""));
+  return verbatimBlock(
+    serializeCodeBlockToMarkdown(source, resolveCodeBlockLanguage(pre)).replace(/\n+$/, ""),
+  );
 }
 
 function serializeTableCell(cell: Element): string {
@@ -124,11 +143,11 @@ function serializeListItem(
   const task = checkbox ? `[${(checkbox as HTMLInputElement).checked ? "x" : " "}] ` : "";
   const bullet = ordered ? `${index}. ` : "- ";
   const marker = `${bullet}${task}`;
-  let content = outsideCodeFences(serializeChildren(item, inTableCell), (prose) =>
+  let content = outsideCode(serializeChildren(item, inTableCell), (prose) =>
     prose.replace(/\n{3,}/g, "\n\n"),
   ).trim();
   if (!item.querySelector(":scope > p")) {
-    content = outsideCodeFences(content, (prose) => prose.replace(/\n{2,}/g, "\n"));
+    content = outsideCode(content, (prose) => prose.replace(/\n{2,}/g, "\n"));
   }
   // Continuations align after the bullet; task boxes belong to the item text.
   const continuationIndent = " ".repeat(bullet.length);
@@ -139,15 +158,29 @@ function serializeListItem(
   ].join("\n");
 }
 
+/** A list's items with the numbers an ordered list shows: from `start`, reset by each `value`. */
+function numberedListItems(list: Element): { item: Element; number: number }[] {
+  const start = Number.parseInt(list.getAttribute("start") ?? "1", 10);
+  let next = Number.isNaN(start) ? 1 : start;
+  return [...list.children]
+    .filter((child) => child.tagName === "LI")
+    .map((item) => {
+      const value = Number.parseInt(item.getAttribute("value") ?? "", 10);
+      if (!Number.isNaN(value)) next = value;
+      return { item, number: next++ };
+    });
+}
+
 function serializeList(list: Element, ordered: boolean, inTableCell: boolean): string {
-  const start = Number.parseInt(list.getAttribute("start") ?? "1", 10) || 1;
-  const items = [...list.children].filter((child) => child.tagName === "LI");
+  const items = numberedListItems(list);
   if (items.length === 0) return "";
-  return `${items.map((item, index) => serializeListItem(item, ordered, start + index, inTableCell)).join("\n")}\n\n`;
+  return `${items
+    .map(({ item, number }) => serializeListItem(item, ordered, number, inTableCell))
+    .join("\n")}\n\n`;
 }
 
 function serializeBlockquote(quote: Element, inTableCell: boolean): string {
-  const content = outsideCodeFences(serializeChildren(quote, inTableCell), (prose) =>
+  const content = outsideCode(serializeChildren(quote, inTableCell), (prose) =>
     prose.replace(/\n{3,}/g, "\n\n"),
   ).trim();
   if (!content) return "";
@@ -178,12 +211,17 @@ function serializeDetails(details: Element, inTableCell: boolean): string {
 
 function serializeAnchor(anchor: Element, inTableCell: boolean): string {
   const content = serializeChildren(anchor, inTableCell);
-  const href = escapeTablePipes(anchor.getAttribute("href") ?? "", inTableCell);
-  if (!/^https?:\/\//i.test(href)) return content;
+  const href = anchor.getAttribute("href") ?? "";
+  if (!/^(?:https?:\/\/|mailto:)/i.test(href)) return content;
   const label = content.trim();
   if (!label) return "";
-  if (label === href) return href;
-  return `[${label}](${href})`;
+  const cellHref = escapeTablePipes(href, inTableCell);
+  if (cellHref === label) return label;
+  // GFM autolinks a bare address only when it fits this shape.
+  if (cellHref === `mailto:${label}` && /^[\w.+-]+@[\w-]+(?:\.[\w-]+)+(?<=[a-zA-Z])$/.test(label))
+    return label;
+  const destination = escapeTablePipes(href.replace(/[\\()]/g, "\\$&"), inTableCell);
+  return `[${label}](${destination})`;
 }
 
 // GFM splits a table row at every unescaped pipe.
@@ -209,7 +247,13 @@ function serializeNode(node: Node, inTableCell = false): string {
   const element = node as Element;
   // Rendered widgets (file chips, diagrams) declare the Markdown they stand for.
   const markdownCopy = element.getAttribute("data-markdown-copy");
-  if (markdownCopy !== null) return escapeTablePipes(markdownCopy, inTableCell);
+  if (markdownCopy !== null) {
+    // A diagram copies as its fenced source, which is code too.
+    if (element.hasAttribute("data-markdown-diagram-source")) {
+      return verbatimBlock(escapeTablePipes(markdownCopy.trimEnd(), inTableCell));
+    }
+    return escapeTablePipes(markdownCopy, inTableCell);
+  }
   if (isSkippedElement(element)) return "";
   if (element.getAttribute("data-markdown-details") !== null) {
     return serializeDetails(element, inTableCell);
@@ -321,19 +365,43 @@ function soleCodeBlock(container: Node): Element | null {
 }
 
 function tidyMarkdown(markdown: string): string {
-  return outsideCodeFences(markdown, (prose) =>
-    prose.replace(/[ \t]+(?=\n)/g, "").replace(/\n{3,}/g, "\n\n"),
-  ).trim();
+  // Odd parts are code, kept verbatim, so a selection that starts or ends inside
+  // code keeps that code's leading and trailing whitespace.
+  const parts = markdown.split(CODE_BOUNDARY);
+  const last = parts.length - 1;
+  return parts
+    .map((part, index) => {
+      if (index % 2 === 1) return part;
+      let prose = part.replace(/[ \t]+(?=\n)/g, "").replace(/\n{3,}/g, "\n\n");
+      if (index === 0) prose = prose.trimStart();
+      if (index === last) prose = prose.trimEnd();
+      return prose;
+    })
+    .join("");
 }
 
-export function serializeRenderedMarkdownFragment(container: Node): string {
+export interface MarkdownSerializationOptions {
+  /** Fence code blocks with their language instead of copying the code as shown. */
+  readonly fenceCode?: boolean;
+}
+
+export function serializeRenderedMarkdownFragment(
+  container: Node,
+  options: MarkdownSerializationOptions = {},
+): string {
   const codeBlock = soleCodeBlock(container);
   if (codeBlock) return (codeBlock.textContent ?? "").replace(/\n$/, "");
-  return tidyMarkdown(serializeChildren(container));
+  fenceCodeBlocks = options.fenceCode === true;
+  try {
+    return tidyMarkdown(serializeChildren(container));
+  } finally {
+    fenceCodeBlocks = false;
+  }
 }
 
 export function serializeTableElementToMarkdown(table: Element): string {
-  return serializeTable(table).trim();
+  // Raw HTML can put a pre in a cell; with no tidy pass here, drop its markers.
+  return serializeTable(table).replaceAll(CODE_BOUNDARY, "").trim();
 }
 
 // The wrapper ChatMarkdownMath puts on every formula; it holds the TeX in data-markdown-copy.
@@ -454,8 +522,39 @@ function sanitizedHtmlFrom(container: Element): string {
 }
 
 /** Markdown (text/plain) and cleaned HTML (text/html) for the current selection, or null. */
+/** A list cloned from a later item would renumber from its start; restart it at the shown number. */
+function keepStartListNumbers(range: Range, container: Element): void {
+  // The start's ancestors below the common ancestor clone as the fragment's first-child chain.
+  const chain: Node[] = [];
+  for (
+    let node: Node | null = range.startContainer;
+    node && node !== range.commonAncestorContainer;
+    node = node.parentNode
+  ) {
+    chain.unshift(node);
+  }
+  let clone: Node | null = container;
+  for (const [depth, source] of chain.entries()) {
+    clone = clone?.firstChild ?? null;
+    if (!(clone instanceof Element) || !(source instanceof Element) || source.tagName !== "OL")
+      continue;
+    const firstCopied = chain[depth + 1] ?? source.childNodes[range.startOffset];
+    if (!firstCopied) continue;
+    const shown = numberedListItems(source).find(
+      ({ item }) =>
+        item === firstCopied ||
+        firstCopied.compareDocumentPosition(item) & Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+    const cloned = numberedListItems(clone)[0];
+    if (shown && cloned && shown.number !== cloned.number) {
+      clone.setAttribute("start", String(shown.number));
+    }
+  }
+}
+
 export function chatMarkdownClipboardPayload(
   selection: Selection,
+  options: MarkdownSerializationOptions = {},
 ): MarkdownClipboardPayload | null {
   const texts: string[] = [];
   const htmls: string[] = [];
@@ -464,6 +563,7 @@ export function chatMarkdownClipboardPayload(
     if (range.collapsed) continue;
     const container = document.createElement("div");
     container.appendChild(range.cloneContents());
+    keepStartListNumbers(range, container);
     const ancestor = range.commonAncestorContainer;
     const ancestorElement =
       ancestor.nodeType === Node.ELEMENT_NODE ? (ancestor as Element) : ancestor.parentElement;
@@ -495,7 +595,7 @@ export function chatMarkdownClipboardPayload(
       }
       continue;
     }
-    const text = serializeRenderedMarkdownFragment(container);
+    const text = serializeRenderedMarkdownFragment(container, options);
     if (!text) continue;
     texts.push(text);
     htmls.push(sanitizedHtmlFrom(container));

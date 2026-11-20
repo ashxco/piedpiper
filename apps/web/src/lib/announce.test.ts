@@ -89,4 +89,32 @@ describe("announce", () => {
 
     expect(fake.spoken()).toEqual([]);
   });
+
+  it("removes a spoken message from the page once it has had time to be read", async () => {
+    const fake = installFakeDocument();
+    const { announce, ANNOUNCE_FOCUS_SETTLE_MS, ANNOUNCE_CLEAR_SPOKEN_AFTER_MS } =
+      await import("./announce");
+
+    announce("Model: Claude Sonnet 5.5");
+    vi.advanceTimersByTime(ANNOUNCE_FOCUS_SETTLE_MS);
+    expect(fake.spoken()).toEqual(["Model: Claude Sonnet 5.5"]);
+
+    vi.advanceTimersByTime(ANNOUNCE_CLEAR_SPOKEN_AFTER_MS);
+    expect(fake.spoken()).toEqual([]);
+  });
+
+  it("removes a spoken message from the page when its source cancels it", async () => {
+    const fake = installFakeDocument();
+    const { announce, cancelAnnouncement, ANNOUNCE_FOCUS_SETTLE_MS } = await import("./announce");
+
+    announce("Settled 1 thread, Ctrl+Z to undo", "thread-undo-notice");
+    announce("Opening in Zed");
+    vi.advanceTimersByTime(ANNOUNCE_FOCUS_SETTLE_MS);
+    expect(fake.spoken()).toEqual(["Settled 1 thread, Ctrl+Z to undo. Opening in Zed"]);
+
+    cancelAnnouncement("model");
+    expect(fake.spoken()).toHaveLength(1);
+    cancelAnnouncement("thread-undo-notice");
+    expect(fake.spoken()).toEqual([]);
+  });
 });

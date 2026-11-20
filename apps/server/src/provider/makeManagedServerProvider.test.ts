@@ -202,6 +202,96 @@ describe("makeManagedServerProvider", () => {
     ),
   );
 
+  it.effect("holds one failed periodic check over a ready provider for a recheck", () =>
+    withDefaultSettings(
+      Effect.gen(function* () {
+        const results = yield* Ref.make<ReadonlyArray<ServerProvider["status"]>>([
+          "ready",
+          "error",
+          "ready",
+          "error",
+          "error",
+        ]);
+        const checkCalls = yield* Ref.make(0);
+        const updates = yield* Queue.unbounded<ServerProvider>();
+        const provider = yield* makeManagedServerProvider<TestSettings>({
+          getSettings: Effect.succeed({ enabled: true }),
+          streamSettings: Stream.empty,
+          haveSettingsChanged: () => false,
+          initialSnapshot: () => snapshotFor(true, 0),
+          checkProvider: Effect.gen(function* () {
+            const count = yield* Ref.updateAndGet(checkCalls, (value) => value + 1);
+            const [status = "ready", ...rest] = yield* Ref.get(results);
+            yield* Ref.set(results, rest);
+            return { ...snapshotFor(true, count), status };
+          }),
+          refreshInterval: "5 minutes",
+        });
+        yield* provider.streamChanges.pipe(
+          Stream.runForEach((snapshot) => Queue.offer(updates, snapshot)),
+          Effect.forkScoped,
+        );
+        yield* Effect.yieldNow;
+        // The placeholder is replaced by a ready check.
+        yield* provider.refresh;
+        assert.strictEqual((yield* Queue.take(updates)).status, "ready");
+
+        // A failed periodic check is held, and the sooner recheck that passes keeps it ready.
+        yield* advance("5 minutes");
+        assert.strictEqual(yield* Ref.get(checkCalls), 2);
+        assert.strictEqual(yield* Queue.size(updates), 0);
+        yield* advance("30 seconds");
+        assert.strictEqual(yield* Ref.get(checkCalls), 3);
+        assert.strictEqual((yield* Queue.take(updates)).status, "ready");
+
+        // Two failures in a row are shown.
+        yield* advance("5 minutes");
+        assert.strictEqual(yield* Queue.size(updates), 0);
+        yield* advance("30 seconds");
+        assert.strictEqual(yield* Ref.get(checkCalls), 5);
+        assert.strictEqual((yield* Queue.take(updates)).status, "error");
+      }),
+    ),
+  );
+
+  it.effect("rechecks a failed sign-in whenever settings are applied", () =>
+    withDefaultSettings(
+      Effect.gen(function* () {
+        const settingsChanges = yield* PubSub.unbounded<TestSettings>();
+        const checkCalls = yield* Ref.make(0);
+        const provider = yield* makeManagedServerProvider<TestSettings>({
+          getSettings: Effect.succeed({ enabled: true }),
+          streamSettings: Stream.fromPubSub(settingsChanges),
+          haveSettingsChanged: () => false,
+          checkProvider: Ref.updateAndGet(checkCalls, (value) => value + 1).pipe(
+            Effect.map(
+              (count): ServerProvider => ({
+                ...snapshotFor(true, count),
+                ...(count === 1
+                  ? { status: "error" as const, auth: { status: "unauthenticated" as const } }
+                  : {}),
+              }),
+            ),
+          ),
+          refreshInterval: "5 minutes",
+        });
+        yield* Effect.yieldNow;
+        assert.strictEqual(yield* Ref.get(checkCalls), 1);
+        assert.strictEqual((yield* provider.getSnapshot).auth.status, "unauthenticated");
+
+        yield* PubSub.publish(settingsChanges, { enabled: true });
+        yield* Effect.yieldNow;
+        assert.strictEqual(yield* Ref.get(checkCalls), 2);
+        assert.strictEqual((yield* provider.getSnapshot).auth.status, "authenticated");
+
+        // Signed in, unchanged settings no longer probe.
+        yield* PubSub.publish(settingsChanges, { enabled: true });
+        yield* Effect.yieldNow;
+        assert.strictEqual(yield* Ref.get(checkCalls), 2);
+      }),
+    ),
+  );
+
   it.effect("retries a failed re-enable check on the next periodic tick", () =>
     withDefaultSettings(
       Effect.gen(function* () {

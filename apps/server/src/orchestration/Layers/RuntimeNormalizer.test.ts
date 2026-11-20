@@ -54,6 +54,18 @@ describe("runtimeEventToActivities — usage limits", () => {
   });
 });
 
+describe("runtimeEventToActivities — context window", () => {
+  it("records a zero reading, which /clear reports", () => {
+    const [activity] = runtimeEventToActivities({
+      type: "thread.token-usage.updated",
+      ...baseStamps,
+      payload: { usage: { usedTokens: 0, lastUsedTokens: 0, maxTokens: 200_000 } },
+    });
+    expect(activity?.kind).toBe("context-window.updated");
+    expect(activity?.payload).toEqual({ usedTokens: 0, lastUsedTokens: 0, maxTokens: 200_000 });
+  });
+});
+
 describe("runtimeEventToActivities — tool lifecycle", () => {
   it("forwards data (toolName + input) on item.started so the frontend can build friendly action labels", () => {
     const event: ProviderRuntimeEvent = {

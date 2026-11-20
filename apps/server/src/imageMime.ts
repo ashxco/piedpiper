@@ -41,7 +41,8 @@ function isBase64Char(code: number): boolean {
 }
 
 function isBase64Whitespace(code: number): boolean {
-  return code === 0x0d || code === 0x0a || code === 0x20; // \r \n space
+  // ASCII whitespace as defined by forgiving-base64 decode: \t \n \f \r space
+  return code === 0x09 || code === 0x0a || code === 0x0c || code === 0x0d || code === 0x20;
 }
 
 // Never run a regex over the payload: V8's regex engine uses the JS call stack, and matching a

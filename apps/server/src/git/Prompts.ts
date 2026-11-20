@@ -37,7 +37,7 @@ function additionalInstructionLines(instructions: string | undefined): ReadonlyA
 }
 
 const CONVENTIONAL_COMMITS_INSTRUCTIONS =
-  "Use Conventional Commits for the subject (type(scope): description). Prefer the narrowest accurate type and include a scope only when it is obvious from the diff.";
+  "Use Conventional Commits for the subject (type(scope): description). Prefer the narrowest accurate type and include a scope only when it is obvious from the diff. Start the description after the colon with a lowercase word, never a proper noun or acronym, because commitlint rejects a capitalized description.";
 const REPOSITORY_CONVENTIONS_INSTRUCTIONS =
   "Follow the repository's established commit subject style shown in these recent examples (prefixes, casing, scopes, tense), while keeping the rules above.";
 
@@ -293,6 +293,7 @@ export function buildBranchNamePrompt(input: BranchNamePromptInput) {
       "Branch should describe the requested work from the user message.",
       ...branchNamingRules(input.naming),
       "If images are attached, use them as primary context for visual/UI issues.",
+      "The user message describes work for another agent. Do not answer it, start the work, read files, or run commands; name the branch from the message and its attachments.",
     ],
     afterRules: branchNamingInstructionLines(input.naming),
     message: input.message,
@@ -318,6 +319,16 @@ export interface ThreadTitlePromptInput {
   additionalInstructions?: string | undefined;
   /** Subjects of PRs and issues linked from the user's messages (see threadTitleLinks.ts). */
   linkedContext?: string | undefined;
+  /** The thread's project, which the UI shows beside the title. */
+  projectTitle?: string | undefined;
+}
+
+// The UI shows the project beside the title; naming it lets small models actually omit it.
+function threadTitleAvoidRule(projectTitle: string | undefined, others: string): string {
+  const name = projectTitle?.trim();
+  return name
+    ? `Never include the project name (${JSON.stringify(name)}); the UI already shows it next to the title. Avoid ${others}.`
+    : `Avoid project names already visible in the UI, ${others}.`;
 }
 
 const THREAD_TITLE_LOCAL_HISTORY_RULE =
@@ -364,7 +375,10 @@ export function buildThreadTitlePrompt(input: ThreadTitlePromptInput) {
           "For research, name the question domain rather than the requested research process.",
           "Do not claim the work is complete.",
           "Do not copy and truncate the user's message.",
-          "Avoid project names already visible in the UI, quotes, labels, filler, prefixes, and trailing punctuation.",
+          threadTitleAvoidRule(
+            input.projectTitle,
+            "quotes, labels, filler, prefixes, and trailing punctuation",
+          ),
           "If images are attached, use them as primary context for visual/UI issues.",
           "When a link or attachment is the only clue to the subject, stay accurate rather than guessing.",
           THREAD_TITLE_LOCAL_HISTORY_RULE,
@@ -405,7 +419,10 @@ function buildThreadTitleRegenerationPrompt(
       "Ignore deliverables and operations such as plans, branches, PRs, tests, CI, commits and merging unless they are the actual topic.",
       "Do not claim the work is complete.",
       "Do not copy and truncate a thread message.",
-      "Avoid quotes, filler, prefixes, and trailing punctuation.",
+      threadTitleAvoidRule(
+        input.projectTitle,
+        "quotes, filler, prefixes, and trailing punctuation",
+      ),
       "Return a meaningfully different title from the previous one, not a cosmetic paraphrase.",
       THREAD_TITLE_LOCAL_HISTORY_RULE,
       THREAD_TITLE_UNREADABLE_LINK_RULE,

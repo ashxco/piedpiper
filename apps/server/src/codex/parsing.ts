@@ -215,6 +215,8 @@ const CODEX_STDERR_TAIL_MAX_CHARS = 8_192;
 const CODEX_STDERR_EXCERPT_MAX_CHARS = 512;
 // `Error: …`, `TypeError: …`, `Error [ERR_MODULE_NOT_FOUND]: …`, `error: …`, `fatal: …`
 const CODEX_STDERR_ERROR_LINE_REGEX = /^(?:[a-z]*error|fatal)(?: ?\[[^\]]+\])?:\s*\S/i;
+// A wrapper's generic exit-status summary, printed after the failure that actually explains it.
+const CODEX_STDERR_EXIT_SUMMARY_REGEX = /\b(?:exit status|exit code|exited with code)\s+\d+\.?$/i;
 
 /** Appends a stderr chunk, keeping only the last 8 KB so a chatty process cannot grow memory. */
 export function appendCodexStderrTail(current: string, chunk: string): string {
@@ -224,20 +226,37 @@ export function appendCodexStderrTail(current: string, chunk: string): string {
     : next.slice(-CODEX_STDERR_TAIL_MAX_CHARS);
 }
 
-/** The stderr line that best explains an exit: the last error-looking line, else the last line. */
+/**
+ * The stderr that best explains an exit: the last error-looking line, else the last line. A final
+ * exit-status summary from a launcher wrapper also keeps the two lines before it, which usually
+ * hold the actual failure.
+ */
 export function codexStderrExcerpt(tail: string): string | undefined {
   const lines = stripVTControlCharacters(tail)
     .split(/\r?\n/)
     .map((line) => line.trim().replace(/\s+/g, " "))
     .filter((line) => line.length > 0);
-  const line =
-    lines.findLast((candidate) => CODEX_STDERR_ERROR_LINE_REGEX.test(candidate)) ?? lines.at(-1);
+  const errorIndex = lines.findLastIndex((candidate) =>
+    CODEX_STDERR_ERROR_LINE_REGEX.test(candidate),
+  );
+  const lineIndex =
+    errorIndex === -1 || CODEX_STDERR_EXIT_SUMMARY_REGEX.test(lines.at(-1) ?? "")
+      ? lines.length - 1
+      : errorIndex;
+  const line = lines[lineIndex];
   if (line === undefined) {
     return undefined;
   }
-  return line.length <= CODEX_STDERR_EXCERPT_MAX_CHARS
-    ? line
-    : `${line.slice(0, CODEX_STDERR_EXCERPT_MAX_CHARS - 1)}…`;
+  const excerpt = CODEX_STDERR_EXIT_SUMMARY_REGEX.test(line)
+    ? lines.slice(Math.max(0, lineIndex - 2), lineIndex + 1).join(" | ")
+    : line;
+  if (excerpt.length <= CODEX_STDERR_EXCERPT_MAX_CHARS) {
+    return excerpt;
+  }
+  // A joined excerpt keeps its end, where the summary and the failure just before it are.
+  return excerpt !== line
+    ? `…${excerpt.slice(-(CODEX_STDERR_EXCERPT_MAX_CHARS - 1))}`
+    : `${excerpt.slice(0, CODEX_STDERR_EXCERPT_MAX_CHARS - 1)}…`;
 }
 
 export function formatCodexExitMessage(

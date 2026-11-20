@@ -100,6 +100,15 @@ describe("resolveWindowsExecutable", () => {
     ).toBe("D:\\bin\\gh.exe");
   });
 
+  it("honors PATHEXT whatever the casing of its key", () => {
+    const isFile = fileSet("C:\\bin\\gh.cmd", "C:\\bin\\gh.exe");
+    for (const key of ["PATHEXT", "PathExt", "pathext"]) {
+      expect(resolveWindowsExecutable("gh", { PATH: "C:\\bin", [key]: ".CMD" }, isFile)).toBe(
+        "C:\\bin\\gh.cmd",
+      );
+    }
+  });
+
   it("probes each repeated PATH directory once but keeps entries that differ in case", () => {
     const probes: Array<string> = [];
     const isFile = (filePath: string) => {

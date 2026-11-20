@@ -10,6 +10,8 @@ function fixture(
     wrapper?: string;
     listedTool?: string;
     installed?: boolean;
+    /** The name the mise config requests the tool by, such as `npm:<pkg>`. */
+    configuredAs?: string;
   } = {},
 ) {
   const root = "/custom-mise/installs/claude/1.0.0";
@@ -23,7 +25,9 @@ function fixture(
       if (args[0] === "which") return `${root}/bin/claude`;
       if (args[0] === "ls")
         return JSON.stringify({
-          [options.listedTool ?? "claude"]:
+          [args.length === 3
+            ? (options.configuredAs ?? "claude")
+            : (options.listedTool ?? "claude")]:
             options.installed === false
               ? []
               : [
@@ -62,6 +66,15 @@ describe("mise provider maintenance", () => {
     });
     await f.run();
     expect(f.calls.filter((call) => call === "latest claude")).toHaveLength(1);
+  });
+  it("upgrades a tool configured by its backend name by that name", async () => {
+    const f = fixture({ configuredAs: "npm:@anthropic-ai/claude-code" });
+    expect(await f.run()).toMatchObject({
+      tool: "npm:@anthropic-ai/claude-code",
+      canUpgrade: true,
+    });
+    expect(f.calls).toContain("ls --json --installed claude");
+    expect(f.calls).toContain("ls --json --installed");
   });
   it("supports named shims but preserves pins, version paths, inactive installs and wrappers", async () => {
     expect((await fixture({ command: "/custom-mise/shims/claude" }).run())?.canUpgrade).toBe(true);

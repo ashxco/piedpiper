@@ -100,7 +100,7 @@ export function ChatMarkdownFileChip({
       return;
     }
     void resolveTarget()
-      .then((openTarget) => (openTarget ? openInPreferredEditor(api, openTarget) : undefined))
+      .then((openTarget) => (openTarget ? openInPreferredEditor(api, openTarget, cwd) : undefined))
       .catch((error: unknown) => {
         toastManager.add({
           type: "error",

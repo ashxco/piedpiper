@@ -87,6 +87,9 @@ describe("commit message style", () => {
       commitMessageStyleInstructions({ mode: "conventional_commits", customInstructions: "x" }),
     ).toContain("Conventional Commits");
     expect(
+      commitMessageStyleInstructions({ mode: "conventional_commits", customInstructions: "x" }),
+    ).toContain("Start the description after the colon with a lowercase word");
+    expect(
       commitMessageStyleInstructions({ mode: "custom", customInstructions: " Be terse. " }),
     ).toBe("Be terse.");
     expect(commitMessageStyleInstructions({ mode: "custom", customInstructions: " " })).toBe(
@@ -185,6 +188,11 @@ describe("buildBranchNamePrompt", () => {
     }
   });
 
+  it("tells the model to name the branch rather than start the user's task", () => {
+    const { prompt } = buildBranchNamePrompt({ message: "Fix the login bug" });
+    expect(prompt).toContain("Do not answer it, start the work, read files, or run commands");
+  });
+
   it("asks for a semantic prefix in semantic mode", () => {
     const { prompt } = buildBranchNamePrompt({ message: "Fix it", naming: naming("semantic") });
     expect(prompt).toContain("Include a semantic prefix and a slash");
@@ -251,6 +259,20 @@ describe("buildBranchNamePrompt", () => {
 });
 
 describe("buildThreadTitlePrompt", () => {
+  it("names the project to leave out of initial and regenerated titles", () => {
+    for (const previousTitle of [undefined, "Hyperdrive Config Crash"]) {
+      const { prompt } = buildThreadTitlePrompt({
+        message: "hyperdrive init crashes without a config",
+        previousTitle,
+        projectTitle: "Hyperdrive",
+      });
+      expect(prompt).toContain('Never include the project name ("Hyperdrive")');
+    }
+    expect(buildThreadTitlePrompt({ message: "hello" }).prompt).toContain(
+      "Avoid project names already visible in the UI",
+    );
+  });
+
   it("includes the user message in the prompt", () => {
     const result = buildThreadTitlePrompt({
       message: "Investigate reconnect regressions after session restore",

@@ -67,6 +67,8 @@ import {
   readChildParentTurnId,
   readCodexTurnsPage,
   readObject,
+  readCodexConfiguredReasoningSummary,
+  type CodexReasoningSummary,
   readProviderConversationId,
   readResumeCursorThreadId,
   readResumeThreadId,
@@ -183,10 +185,13 @@ const CODEX_GOAL_CONTINUATION_GRACE_MS = 5_000;
  * Codex 0.152 made the update_plan checklist opt-in, and its 1 s MCP startup grace
  * drops cold npx/uvx servers from the first turn; a hung server delays only that turn.
  */
+/** A config/read only picks the reasoning summary, so it must not hold up a session start. */
+const CODEX_CONFIG_READ_TIMEOUT_MS = 5_000;
+
 const CODEX_THREAD_CONFIG = {
   "tools.update_plan.enabled": true,
   mcp_optional_startup_grace_ms: 10_000,
-  // Tool calls stop waiting on the detailed summary requested on turn/start. Checked on CLI 0.166 only.
+  // Tool calls stop waiting on the reasoning summary requested on turn/start. Checked on CLI 0.166 only.
   "features.concurrent_reasoning_summaries": true,
 } as const;
 
@@ -297,6 +302,22 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
         }).pipe(this.runPromise);
       } catch (error) {
         await Effect.logDebug("codex app-server account/read failed", {
+          threadId,
+          cause: error instanceof Error ? error.message : String(error),
+        }).pipe(this.runPromise);
+      }
+      // turn/start's summary overrides the user's config, so read theirs and pass it through.
+      // Best effort: older CLIs without config/read answer with an error and get `auto`.
+      try {
+        const configReadResponse = await this.sendRequest(
+          context,
+          "config/read",
+          { cwd: resolvedCwd, includeLayers: false },
+          CODEX_CONFIG_READ_TIMEOUT_MS,
+        );
+        context.reasoningSummary = readCodexConfiguredReasoningSummary(configReadResponse);
+      } catch (error) {
+        await Effect.logDebug("codex app-server config/read failed", {
           threadId,
           cause: error instanceof Error ? error.message : String(error),
         }).pipe(this.runPromise);
@@ -545,7 +566,7 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
       model?: string;
       serviceTier?: string | null;
       effort?: string;
-      summary: "detailed";
+      summary: CodexReasoningSummary;
       collaborationMode?: {
         mode: "default" | "plan";
         settings: {
@@ -556,7 +577,9 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
     } = {
       threadId: providerThreadId,
       input: turnInput,
-      summary: "detailed",
+      // Catalogues can default summaries to "none", and turn/start overrides the user's config,
+      // so pass theirs through or `auto`: some providers (Amazon Bedrock) reject `detailed`.
+      summary: context.reasoningSummary ?? "auto",
     };
     const normalizedModel = resolveCodexModelForAccount(
       normalizeCodexModelSlug(input.model ?? context.session.model),

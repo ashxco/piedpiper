@@ -5,7 +5,7 @@
  */
 import { Effect, Option, Schema } from "effect";
 
-import { TextGenerationError } from "@piedpiper/contracts";
+import { GitCommandError, TextGenerationError } from "@piedpiper/contracts";
 
 import { execFile } from "node:child_process";
 import { access, realpath, stat } from "node:fs/promises";
@@ -14,24 +14,83 @@ import { dirname, join } from "node:path";
 import { resolveGitExecutableCached } from "@piedpiper/shared/shell";
 import { sliceSurrogateSafe } from "@piedpiper/shared/String";
 
-import { explicitBareRepositoryEnv } from "./gitConfigEnv.ts";
+import { explicitBareRepositoryEnv, unsetInheritedRepositoryEnv } from "./gitConfigEnv.ts";
 
 const GIT_WORK_TREE_PROBE_TIMEOUT_MS = 5_000;
 
 function isInsideGitWorkTree(cwd: string): Promise<boolean> {
-  return new Promise((resolvePromise) => {
+  return new Promise((resolvePromise, reject) => {
     execFile(
       resolveGitExecutableCached(),
       ["rev-parse", "--is-inside-work-tree"],
       {
         cwd,
-        env: { ...process.env, ...explicitBareRepositoryEnv(process.env, process.platform) },
+        env: {
+          ...process.env,
+          ...unsetInheritedRepositoryEnv(process.env, process.platform),
+          ...explicitBareRepositoryEnv(process.env, process.platform),
+        },
         timeout: GIT_WORK_TREE_PROBE_TIMEOUT_MS,
         killSignal: "SIGKILL",
         windowsHide: true,
       },
-      (error, stdout) => resolvePromise(!error && String(stdout).trim() === "true"),
+      (error, stdout, stderr) => {
+        if (!error) resolvePromise(String(stdout).trim() === "true");
+        // Git 2.56+ words a `.git` gitfile pointing nowhere differently from older releases.
+        else if (
+          error.code === 128 &&
+          /fatal: (not a git repository|gitfile does not point to a valid repository)/i.test(stderr)
+        )
+          resolvePromise(false);
+        else reject(new Error(stderr.trim() || error.message, { cause: error }));
+      },
     );
+  });
+}
+
+function isMissingPath(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    "code" in error &&
+    (error.code === "ENOENT" || error.code === "ENOTDIR")
+  );
+}
+
+/** Strict probe used by checkpoint operations, where an operational failure must be reported. */
+export function probeGitRepository(cwd: string): Effect.Effect<boolean, GitCommandError> {
+  return Effect.tryPromise({
+    try: async () => {
+      let physical: string;
+      try {
+        physical = await realpath(cwd);
+        if (!(await stat(physical)).isDirectory()) return false;
+      } catch (error) {
+        if (isMissingPath(error)) return false;
+        throw error;
+      }
+      let current = physical;
+      while (true) {
+        const found = await access(join(current, ".git")).then(
+          () => true,
+          (error: unknown) => {
+            if (!isMissingPath(error)) throw error;
+            return false;
+          },
+        );
+        if (found) return await isInsideGitWorkTree(physical);
+        const parent = dirname(current);
+        if (parent === current) return false;
+        current = parent;
+      }
+    },
+    catch: (cause) =>
+      new GitCommandError({
+        operation: "probeGitRepository",
+        command: "git rev-parse --is-inside-work-tree",
+        cwd,
+        detail: cause instanceof Error ? cause.message : String(cause),
+        cause,
+      }),
   });
 }
 
@@ -40,23 +99,7 @@ function isInsideGitWorkTree(cwd: string): Promise<boolean> {
  * subfolders of a repository (monorepo packages) and linked worktrees.
  */
 export function isGitRepository(cwd: string): Effect.Effect<boolean> {
-  return Effect.tryPromise(async () => {
-    // Walk the physical path, as git does, so symlinked folders resolve to their real repository.
-    const physical = await realpath(cwd);
-    if (!(await stat(physical)).isDirectory()) return false;
-    let current = physical;
-    while (true) {
-      const found = await access(join(current, ".git")).then(
-        () => true,
-        () => false,
-      );
-      // The walk is a cheap pre-check; git itself rejects stray `.git` entries, safe.directory, etc.
-      if (found) return await isInsideGitWorkTree(physical);
-      const parent = dirname(current);
-      if (parent === current) return false;
-      current = parent;
-    }
-  }).pipe(Effect.catch(() => Effect.succeed(false)));
+  return probeGitRepository(cwd).pipe(Effect.catch(() => Effect.succeed(false)));
 }
 
 /** Convert an Effect Schema to a flat JSON Schema object, inlining `$defs` when present. */
@@ -123,15 +166,18 @@ export function sanitizeThreadTitle(raw: string): string {
   // Models sometimes answer `{"title": "..."}` as text; unwrap before truncation cuts the brace.
   const decoded = decodeJsonThreadTitle(raw.trim());
   const title = Option.isSome(decoded) ? decoded.value.title : raw;
-  const normalized = title
-    .trim()
-    .split(/\r?\n/g)[0]
-    ?.trim()
-    .replace(/^['"`]+|['"`]+$/g, "")
-    .trim()
-    .replace(/\s+/g, " ");
+  let normalized = title.trim().split(/\r?\n/g)[0]?.trim() ?? "";
+  // Only quote pairs around the whole title (nested ones too, like `"'title'"`):
+  // `"Open in" ignores "Finder"` keeps both of its pairs.
+  for (;;) {
+    const unwrapped = normalized.replace(/^(['"`])((?:(?!\1).)*)\1$/, "$2").trim();
+    if (unwrapped === normalized) break;
+    normalized = unwrapped;
+  }
+  normalized = normalized.replace(/\s+/g, " ");
 
-  if (!normalized || normalized.trim().length === 0) {
+  // A title of nothing but quotes is empty.
+  if (/^['"`\s]*$/.test(normalized)) {
     return "New thread";
   }
 

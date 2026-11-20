@@ -45,6 +45,11 @@ export function foldThreadFindText(text: string): string {
       folded += "'";
       continue;
     }
+    // Lowercasing İ adds a combining dot; fold it to a plain i so offsets stay put.
+    if (unit === "\u0130") {
+      folded += "i";
+      continue;
+    }
     const lower = unit.toLowerCase();
     folded += lower.length === 1 ? lower : unit;
   }

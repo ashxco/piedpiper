@@ -69,7 +69,19 @@ function escapeMarkdownLabel(text: string): string {
 }
 
 export function markdownImageCopy(alt: string, src: string): string {
-  return `![${escapeMarkdownLabel(alt)}](${src})`;
+  return `![${escapeMarkdownLabel(alt)}](${markdownDestination(src)})`;
+}
+
+// Raw HTML sources keep spaces and parentheses that a bare Markdown destination cannot hold.
+function markdownDestination(src: string): string {
+  if (!/[\s<>()]/.test(src)) return src;
+  const escaped = src
+    .replaceAll("\\", "\\\\")
+    .replaceAll("<", "\\<")
+    .replaceAll(">", "\\>")
+    .replaceAll("\n", "%0A")
+    .replaceAll("\r", "%0D");
+  return `<${escaped}>`;
 }
 
 export interface MarkdownImageGallery {

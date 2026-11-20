@@ -26,7 +26,8 @@ const naturalSizes = new LRUCache<MarkdownImageSize>(
 );
 
 function authoredPixels(value: string | number | undefined): number | undefined {
-  const pixels = Number(value);
+  // Raw HTML often writes `width="14px"`; browsers read a trailing `px` as pixels.
+  const pixels = Number(typeof value === "string" ? value.trim().replace(/px$/i, "") : value);
   return Number.isFinite(pixels) && pixels > 0 ? pixels : undefined;
 }
 

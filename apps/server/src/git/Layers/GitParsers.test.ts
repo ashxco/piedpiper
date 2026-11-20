@@ -225,7 +225,14 @@ describe("isNotGitRepositoryStderr", () => {
         "fatal: cannot use bare repository '/tmp/x' (safe.bareRepository is 'explicit')",
       ),
     ).toBe(true);
+    // Git 2.56+ wording for a `.git` gitfile that points at a missing directory.
+    expect(
+      isNotGitRepositoryStderr(
+        "fatal: gitfile does not point to a valid repository: /tmp/worktrees/feature/.git",
+      ),
+    ).toBe(true);
     expect(isNotGitRepositoryStderr("fatal: bad revision")).toBe(false);
+    expect(isNotGitRepositoryStderr("fatal: invalid gitfile format: /repo/.git")).toBe(false);
   });
 });
 
@@ -242,6 +249,20 @@ describe("parseRemoteFetchUrls", () => {
     expect([...remotes]).toEqual([
       ["origin", "git@github.com:acme/app.git"],
       ["fork", "https://github.com/me/app.git"],
+    ]);
+  });
+
+  it("keeps spaces inside remote URLs", () => {
+    const remotes = parseRemoteFetchUrls(
+      [
+        "local\t/Users/me/My Repos/app (fetch)",
+        "local\t/Users/me/My Repos/app (push)",
+        "odd\t/tmp/a (fetch) b (fetch)",
+      ].join("\n"),
+    );
+    expect([...remotes]).toEqual([
+      ["local", "/Users/me/My Repos/app"],
+      ["odd", "/tmp/a (fetch) b"],
     ]);
   });
 });

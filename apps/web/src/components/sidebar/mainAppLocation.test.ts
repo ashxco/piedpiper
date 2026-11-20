@@ -4,6 +4,7 @@ import {
   rememberMainAppLocation,
   resetMainAppLocationForTests,
   resolveMainAppHref,
+  resolveMainAppReturnSteps,
 } from "./mainAppLocation";
 
 describe("mainAppLocation", () => {
@@ -29,5 +30,21 @@ describe("mainAppLocation", () => {
     rememberMainAppLocation({ pathname: "/virtual-office", href: "/virtual-office" });
     rememberMainAppLocation({ pathname: "/settings/general", href: "/settings/general" });
     expect(resolveMainAppHref()).toBe("/virtual-office");
+  });
+
+  it("steps back past the main-app entry so closing Settings leaves no forward stop", () => {
+    rememberMainAppLocation({ pathname: "/thread-2", href: "/thread-2", historyIndex: 2 });
+    rememberMainAppLocation({ pathname: "/settings/general", href: "/settings/general" });
+    // From two settings entries above the thread, go back three, then push the thread again.
+    expect(resolveMainAppReturnSteps(4)).toBe(3);
+  });
+
+  it("pushes when there is no earlier entry to reuse", () => {
+    expect(resolveMainAppReturnSteps(3)).toBeNull();
+    rememberMainAppLocation({ pathname: "/thread-1", href: "/thread-1", historyIndex: 0 });
+    expect(resolveMainAppReturnSteps(2)).toBeNull();
+    rememberMainAppLocation({ pathname: "/thread-1", href: "/thread-1", historyIndex: 5 });
+    // History moved back below the remembered entry.
+    expect(resolveMainAppReturnSteps(4)).toBeNull();
   });
 });

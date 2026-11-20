@@ -1,6 +1,6 @@
 const SCP_SSH_REMOTE_PATTERN = /^[a-zA-Z0-9._-]+@([^:/\s]+):(?!\/\/)(\S+)$/;
 // Git also reads `host:path` as SSH. A single letter is a Windows drive and `::` names a remote helper.
-const USERLESS_SCP_SSH_REMOTE_PATTERN = /^([^@:/\\\s]{2,}):(?!:)(\/?[^/\s]+(?:\/[^/\s]+)+\/?)$/;
+const USERLESS_SCP_SSH_REMOTE_PATTERN = /^([^@:/\\\s]{2,}):(?!:)(\/?[^/\s]+(?:\/[^/\s]+)*\/?)$/;
 const URL_SCHEME_PATTERN = /^[a-z][a-z0-9+.-]*:\/\//i;
 const SSH_URL_PROTOCOLS = new Set(["ssh:", "git+ssh:", "ssh+git:"]);
 const GIT_PROTOCOL_DEFAULT_PORT = "9418";

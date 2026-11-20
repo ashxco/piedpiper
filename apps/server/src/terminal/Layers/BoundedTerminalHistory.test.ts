@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { BoundedTerminalHistory } from "./BoundedTerminalHistory";
+import { terminalSequenceEnd, terminalSequenceStateAfter } from "./TerminalSequenceState";
 
 // Apply the line policy, then keep the longest code-point-aligned byte tail.
 function retainedHistory(text: string, maxLines: number, maxBytes = Infinity): string {
@@ -9,7 +10,6 @@ function retainedHistory(text: string, maxLines: number, maxBytes = Infinity): s
   if (terminated) lines.pop();
   const retained = lines.slice(Math.max(0, lines.length - maxLines)).join("\n");
   const capped = terminated ? `${retained}\n` : retained;
-  if (Buffer.byteLength(capped) <= maxBytes) return capped;
   const points = Array.from(capped);
   let start = points.length;
   let bytes = 0;
@@ -19,7 +19,11 @@ function retainedHistory(text: string, maxLines: number, maxBytes = Infinity): s
     bytes += next;
     start -= 1;
   }
-  return points.slice(start).join("");
+  const kept = points.slice(start).join("");
+  if (maxLines <= 0 || maxBytes <= 0) return kept;
+  // A cut inside a control sequence drops the rest of that sequence too.
+  const state = terminalSequenceStateAfter(0, text, 0, text.length - kept.length);
+  return kept.slice(terminalSequenceEnd(state, kept));
 }
 
 describe("BoundedTerminalHistory", () => {
@@ -38,6 +42,10 @@ describe("BoundedTerminalHistory", () => {
       "\u001b[31m",
       "\u001b[0m",
       "\u001b]8;;url\u0007",
+      "\u001b]0;",
+      "\u001bP",
+      "\u0007",
+      "\u001b\\",
       "\ud83d",
       "\ude80",
     ];
@@ -48,23 +56,37 @@ describe("BoundedTerminalHistory", () => {
 
     for (const maxBytes of [0, 3, 8, 64, Infinity]) {
       for (const maxLines of [0, 1, 3, 5, 5_000]) {
-        let expected = retainedHistory("before\ninitial\n", maxLines, maxBytes);
-        const history = new BoundedTerminalHistory(maxLines, "before\ninitial\n", maxBytes);
+        let full = "before\ninitial\n";
+        let expected = retainedHistory(full, maxLines, maxBytes);
+        const history = new BoundedTerminalHistory(maxLines, full, maxBytes);
         expect(history.value()).toBe(expected);
 
         for (let step = 0; step < 300; step += 1) {
           if (step % 73 === 0) {
             history.clear();
-            expected = "";
-            expect(history.value()).toBe(expected);
+            full = "";
+            expect(history.value()).toBe("");
           }
           const chunk = nextFragment() + nextFragment();
           history.append(chunk);
-          expected = retainedHistory(expected + chunk, maxLines, maxBytes);
+          full += chunk;
+          expected = retainedHistory(full, maxLines, maxBytes);
           expect(history.value()).toBe(expected);
           expect(history.bytes).toBe(Buffer.byteLength(expected));
         }
       }
+    }
+  });
+
+  it("does not retain the tail of a control sequence whose introducer was trimmed", () => {
+    for (const [text, maxBytes, retained] of [
+      ["prefix\u001b[31mOK", 6, "OK"],
+      ["prefix\u001b]0;HIDDEN\u0007OK", 10, "OK"],
+      ["prefix\u001b]0;🙂HIDDEN\u0007OK", 9, "OK"],
+      // libghostty leaves every string but OSC at the emoji's second byte, so HELLO was visible.
+      ["prefix\u001bP🙂HELLO\u001b\\OK", 9, "HELLO\u001b\\OK"],
+    ] as const) {
+      expect(new BoundedTerminalHistory(5_000, text, maxBytes).value()).toBe(retained);
     }
   });
 
@@ -154,5 +176,41 @@ describe("BoundedTerminalHistory", () => {
     expect(history.value()).toBe(`${"x".repeat(19_998)}\n${line}\n${line}`);
     history.append("\n🚀".repeat(3));
     expect(history.value()).toBe("\n🚀\n🚀\n🚀".slice(1));
+  });
+
+  it("persists by appending new output, compacting, clearing and joining split Unicode", () => {
+    const maxBytes = 64;
+    const history = new BoundedTerminalHistory(3, "", maxBytes);
+    let cursor: ReturnType<typeof history.persistenceUpdate>["cursor"] | undefined;
+    let persisted = "";
+    let compactions = 0;
+    const flush = () => {
+      const update = history.persistenceUpdate(cursor);
+      if (!update.append) compactions += 1;
+      // Round-trip through UTF-8 like the file does, so lone surrogates become U+FFFD.
+      const encoded = Buffer.from(update.data).toString();
+      persisted = update.append ? persisted + encoded : encoded;
+      cursor = update.cursor;
+      expect(Buffer.byteLength(persisted)).toBeLessThanOrEqual(maxBytes * 2);
+      expect(retainedHistory(persisted, 3, maxBytes)).toBe(Buffer.from(history.value()).toString());
+    };
+    for (let index = 0; index < 100; index += 1) {
+      history.append(`line ${index} 名\n`);
+      flush();
+    }
+    expect(compactions).toBeGreaterThan(1);
+    expect(compactions).toBeLessThan(50);
+    history.clear();
+    flush();
+    expect(persisted).toBe("");
+    history.append("\ud83d");
+    flush();
+    history.append("\ude80");
+    flush();
+    expect(persisted).toBe("🚀");
+    // More output than the retained window between flushes must replace the file.
+    history.append("z".repeat(maxBytes * 3));
+    flush();
+    expect(persisted).toBe("z".repeat(maxBytes));
   });
 });

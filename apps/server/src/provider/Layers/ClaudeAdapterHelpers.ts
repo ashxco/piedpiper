@@ -678,6 +678,45 @@ export const CLAUDE_SETTING_SOURCES = [
   "local",
 ] as const satisfies ReadonlyArray<SettingSource>;
 
+/**
+ * A resumed session's first request otherwise goes out before its MCP servers connect, and Claude
+ * Code tells the agent they disconnected. An explicit MCP_CONNECTION_NONBLOCKING still wins.
+ */
+export function claudeQueryEnvironment(
+  environment: NodeJS.ProcessEnv,
+  resume: boolean,
+): NodeJS.ProcessEnv {
+  return resume && environment.MCP_CONNECTION_NONBLOCKING === undefined
+    ? { ...environment, MCP_CONNECTION_NONBLOCKING: "0" }
+    : environment;
+}
+
+const CLAUDE_CAN_USE_TOOL_SHADOWED_WARNING = "CLAUDE_SDK_CAN_USE_TOOL_SHADOWED";
+
+/**
+ * query() warns when canUseTool meets bypassPermissions or bare allowedTools. Pied Piper installs
+ * canUseTool in every mode on purpose (AskUserQuestion, ask rules), so it is per-session noise.
+ */
+export function withoutClaudeCanUseToolShadowedWarning<A>(run: () => A): A {
+  const emitWarning = process.emitWarning;
+  process.emitWarning = function (this: NodeJS.Process, ...args: Parameters<typeof emitWarning>) {
+    const [, options] = args;
+    if (
+      typeof options === "object" &&
+      options !== null &&
+      options.code === CLAUDE_CAN_USE_TOOL_SHADOWED_WARNING
+    ) {
+      return;
+    }
+    return Reflect.apply(emitWarning, this, args);
+  } as typeof emitWarning;
+  try {
+    return run();
+  } finally {
+    process.emitWarning = emitWarning;
+  }
+}
+
 /** CLI flags the SDK or adapter controls; a user launch argument with one of these names is dropped. */
 export const CLAUDE_RESERVED_LAUNCH_FLAGS: ReadonlySet<string> = new Set([
   "allow-dangerously-skip-permissions",
@@ -733,6 +772,8 @@ export interface ClaudeLaunchExtraArgs {
   readonly appendFlagMissingValue?: ClaudeAppendFlag;
   /** The raw `--settings` value, empty when the flag has none; the SDK replaces the flag with its own. */
   readonly settingsArg?: string;
+  /** Every `--plugin-dir` value in order; `extraArgs` holds one value per flag, so these use the SDK option. */
+  readonly pluginDirectories?: ReadonlyArray<string>;
 }
 
 export type ClaudeAppendFlag = "--append-system-prompt" | "--append-system-prompt-file";
@@ -747,6 +788,7 @@ export function claudeLaunchExtraArgs(launchArgs: string | undefined): ClaudeLau
   let appendSystemPromptFile: string | undefined;
   let appendFlagMissingValue: ClaudeAppendFlag | undefined;
   let settingsArg: string | undefined;
+  const pluginDirectories: Array<string> = [];
   for (let index = 0; index < tokens.length; index++) {
     const token = tokens[index]!;
     if (token === "--") {
@@ -781,8 +823,13 @@ export function claudeLaunchExtraArgs(launchArgs: string | undefined): ClaudeLau
     }
     const next = tokens[index + 1];
     if (name === "append-system-prompt" || name === "append-system-prompt-file") {
-      // Folded out of extraArgs, so a dash-led value such as "- be brief" is safe to take.
-      if (value === null && next !== undefined && !next.startsWith("--")) {
+      // Folded out of extraArgs, so a dash-led value such as "- be brief" is safe to take. The
+      // CLI takes the next token as the inline text even when it starts with `--`.
+      if (
+        value === null &&
+        next !== undefined &&
+        (name === "append-system-prompt" || !next.startsWith("--"))
+      ) {
         value = next;
         index++;
       }
@@ -808,6 +855,10 @@ export function claudeLaunchExtraArgs(launchArgs: string | undefined): ClaudeLau
     }
     if (name === "settings") {
       settingsArg = value ?? "";
+    } else if (name === "plugin-dir" && value) {
+      // Repeatable, so each one goes to the SDK's plugins; a bare flag still reaches Claude below,
+      // which reports the missing path.
+      pluginDirectories.push(value);
     } else if (CLAUDE_RESERVED_LAUNCH_FLAGS.has(name)) {
       ignored.push(`--${name}`);
     } else {
@@ -822,6 +873,7 @@ export function claudeLaunchExtraArgs(launchArgs: string | undefined): ClaudeLau
     ...(appendSystemPromptFile === undefined ? {} : { appendSystemPromptFile }),
     ...(appendFlagMissingValue === undefined ? {} : { appendFlagMissingValue }),
     ...(settingsArg === undefined ? {} : { settingsArg }),
+    ...(pluginDirectories.length === 0 ? {} : { pluginDirectories }),
   };
 }
 
@@ -1637,6 +1689,91 @@ export function toolResultBlocksFromUserMessage(message: SDKMessage): Array<{
   return blocks;
 }
 
+/** One stable id per session: Claude keeps one pending wakeup, and a new ScheduleWakeup replaces it. */
+export const CLAUDE_SCHEDULED_WAKEUP_TASK_ID = "claude-scheduled-wakeup";
+
+// Claude Code jitters one-shot wakeups early but never before the requested time, which is at
+// most 60 s before the minute-rounded scheduledFor it reports; the rest is slack.
+export const CLAUDE_SCHEDULED_WAKEUP_EARLY_FIRE_MARGIN_MS = 120_000;
+
+export interface ClaudeScheduledWakeupState {
+  /** ScheduleWakeup calls whose result has not come back. */
+  readonly calls: Set<string>;
+  /** Epoch ms of the pending wakeup; undefined when none is pending. */
+  scheduledFor: number | undefined;
+  /** Claude started the current turn by itself inside the early-fire margin. */
+  possibleEarlyWake: boolean;
+}
+
+export function makeClaudeScheduledWakeupState(): ClaudeScheduledWakeupState {
+  return { calls: new Set(), scheduledFor: undefined, possibleEarlyWake: false };
+}
+
+/**
+ * ScheduleWakeup reports no background task: its tool result is the only sign that Claude will
+ * start a turn by itself. Updates `state` from one SDK message; the caller compares
+ * `scheduledFor` before and after to report the change.
+ */
+export function trackClaudeScheduledWakeup(
+  state: ClaudeScheduledWakeupState,
+  message: SDKMessage,
+  input: { readonly nowMs: number; readonly userTurnActive: boolean },
+): void {
+  if (message.type === "system" && message.subtype === "init") {
+    const scheduledFor = state.scheduledFor;
+    if (scheduledFor === undefined) return;
+    if (input.nowMs >= scheduledFor) {
+      state.scheduledFor = undefined;
+    } else if (
+      !input.userTurnActive &&
+      input.nowMs >= scheduledFor - CLAUDE_SCHEDULED_WAKEUP_EARLY_FIRE_MARGIN_MS
+    ) {
+      state.possibleEarlyWake = true;
+    }
+    return;
+  }
+  // A task notification also starts a turn by itself, so an early turn is the wake only when its
+  // result is not a task notification's.
+  if (message.type === "result") {
+    if (state.possibleEarlyWake) {
+      state.possibleEarlyWake = false;
+      if (message.origin?.kind !== "task-notification") state.scheduledFor = undefined;
+    }
+    return;
+  }
+  if (message.type === "assistant") {
+    const content = (message.message as { content?: unknown } | undefined)?.content;
+    if (!Array.isArray(content)) return;
+    for (const block of content) {
+      if (
+        block !== null &&
+        typeof block === "object" &&
+        block.type === "tool_use" &&
+        block.name === "ScheduleWakeup" &&
+        typeof block.id === "string"
+      ) {
+        state.calls.add(block.id);
+      }
+    }
+    return;
+  }
+  if (message.type !== "user" || state.calls.size === 0) return;
+  const returned = toolResultBlocksFromUserMessage(message).filter((result) =>
+    state.calls.delete(result.toolUseId),
+  );
+  if (returned.length === 0) return;
+  const result = message.tool_use_result;
+  const scheduledFor =
+    returned.length === 1 && typeof result === "object" && result !== null
+      ? Reflect.get(result, "scheduledFor")
+      : undefined;
+  // stop:true reports scheduledFor 0. A failed call also clears: losing the hold early is
+  // recoverable, a hold that outlives its wakeup is not.
+  state.possibleEarlyWake = false;
+  state.scheduledFor =
+    typeof scheduledFor === "number" && scheduledFor > 0 ? scheduledFor : undefined;
+}
+
 /** Max characters of tool result text kept in persisted tool lifecycle events. */
 export const MAX_PERSISTED_TOOL_RESULT_TEXT_LENGTH = 4_000;
 
@@ -1661,6 +1798,66 @@ function imageMimeTypeOf(record: Record<string, unknown>): string | undefined {
  * (Anthropic `source.data` and MCP `data` shapes) become `{ type: "image", mimeType }`
  * placeholders and text is capped at a shared budget.
  */
+// Claude Code wraps a foreground Agent result in notes for the parent model, not the report: the
+// tools it used, a hand-back frame that indents each report line by two spaces, and a trailer.
+const CLAUDE_TOOLS_USED_NOTE =
+  /^\s*<tools-used-before-summary>[^<]*<\/tools-used-before-summary>\s*/;
+const CLAUDE_HAND_BACK_FRAME =
+  /^\[Subagent hand-back\] The text below is the final report of a subagent [^\n]* The report follows:\n/;
+const CLAUDE_USAGE_TRAILER = /(?:^|\n)<usage>[^<]*<\/usage>\s*$/;
+const CLAUDE_AGENT_ID_TRAILER =
+  /(?:^|\n)agentId: ([\w-]+) \(use SendMessage with to: '\1'[^\n]*\)\s*$/;
+
+/** A subagent's report without Claude Code's notes, frame and trailer for the parent model. */
+export function unwrapClaudeSubagentReport(text: string): string {
+  const unwrapped = text
+    .replace(CLAUDE_TOOLS_USED_NOTE, "")
+    .replace(CLAUDE_USAGE_TRAILER, "")
+    .replace(CLAUDE_AGENT_ID_TRAILER, "");
+  const report = unwrapped.replace(CLAUDE_HAND_BACK_FRAME, "");
+  // Only a framed report had its lines indented; an unframed one keeps its own indentation.
+  return report === unwrapped ? report : report.replace(/^ {2}/gm, "");
+}
+
+const isTextEntry = (
+  entry: unknown,
+): entry is Record<string, unknown> & { readonly text: string } =>
+  entry !== null &&
+  typeof entry === "object" &&
+  (entry as Record<string, unknown>).type === "text" &&
+  typeof (entry as Record<string, unknown>).text === "string";
+
+/** Unwraps a subagent's tool_result block to its report; text blocks are joined when it changes. */
+export function unwrapClaudeSubagentResult(
+  block: Record<string, unknown>,
+): Record<string, unknown> {
+  const content = block.content;
+  if (typeof content === "string") {
+    const report = unwrapClaudeSubagentReport(content);
+    return report === content ? block : { ...block, content: report };
+  }
+  if (!Array.isArray(content)) return block;
+  const firstTextIndex = content.findIndex(isTextEntry);
+  if (firstTextIndex < 0) return block;
+  const joined = content
+    .filter(isTextEntry)
+    .map((entry) => entry.text)
+    .join("\n");
+  const report = unwrapClaudeSubagentReport(joined);
+  if (report === joined) return block;
+  const first = content[firstTextIndex] as Record<string, unknown>;
+  const next = content.flatMap((entry, index) =>
+    index === firstTextIndex
+      ? report.length === 0
+        ? []
+        : [{ ...first, text: report }]
+      : isTextEntry(entry)
+        ? []
+        : [entry],
+  );
+  return { ...block, content: next };
+}
+
 export function sanitizeToolResultForPersistence(
   block: Record<string, unknown>,
   maxTextLength: number = MAX_PERSISTED_TOOL_RESULT_TEXT_LENGTH,

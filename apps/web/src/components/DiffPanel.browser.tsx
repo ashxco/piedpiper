@@ -2,7 +2,7 @@ import "../index.css";
 
 import { VirtualizedFileDiff } from "@pierre/diffs";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { ThreadId, TurnId } from "@piedpiper/contracts";
+import { CHECKPOINT_DIFF_TRUNCATED_MARKER, ThreadId, TurnId } from "@piedpiper/contracts";
 import { StrictMode } from "react";
 import { page, userEvent } from "vitest/browser";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -637,6 +637,22 @@ describe("DiffPanel", () => {
       untrackedIncomplete: false,
     });
     await panel.queryClient.invalidateQueries({ queryKey: ["git", "diff-preview"] });
+
+    await expect
+      .element(page.getByText("This diff is too large to show in full; later files are left out."))
+      .toBeVisible();
+    expect(diffStatLabel()).toBeNull();
+  });
+
+  it("says a checkpoint diff cut off at the size limit is incomplete", async () => {
+    seedThreadWithTurn();
+    getFullThreadDiffSpy.mockResolvedValue({
+      threadId: THREAD_ID,
+      fromTurnCount: 0,
+      toTurnCount: 1,
+      diff: `${FULL_CONTEXT_PATCH}${CHECKPOINT_DIFF_TRUNCATED_MARKER}`,
+    });
+    await using _panel = await mountPanel();
 
     await expect
       .element(page.getByText("This diff is too large to show in full; later files are left out."))

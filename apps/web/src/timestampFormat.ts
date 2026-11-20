@@ -51,6 +51,13 @@ function readHostSystemLocale(): string | null {
 /** Packaged desktop builds pin the runtime default to en-US, so the host's locale goes first. */
 export const timestampLocale = resolveTimestampLocale(readHostSystemLocale());
 
+// A formatter keeps the default zone it was built in, so a cached one would keep showing the old
+// zone after a system time zone change. Formatters therefore run in UTC on the wall-clock time,
+// which Date reads from the current zone.
+export function wallClockAsUtc(date: Date): Date {
+  return new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
+}
+
 const timestampFormatterCache = new Map<string, Intl.DateTimeFormat>();
 
 function getTimestampFormatter(
@@ -63,10 +70,10 @@ function getTimestampFormatter(
     return cachedFormatter;
   }
 
-  const formatter = new Intl.DateTimeFormat(
-    timestampLocale,
-    getTimestampFormatOptions(timestampFormat, includeSeconds),
-  );
+  const formatter = new Intl.DateTimeFormat(timestampLocale, {
+    ...getTimestampFormatOptions(timestampFormat, includeSeconds),
+    timeZone: "UTC",
+  });
   timestampFormatterCache.set(cacheKey, formatter);
   return formatter;
 }
@@ -80,13 +87,13 @@ export function parseTimestampDate(isoDate: string): Date | null {
 export function formatTimestamp(isoDate: string, timestampFormat: TimestampFormat): string {
   const date = parseTimestampDate(isoDate);
   if (!date) return "";
-  return getTimestampFormatter(timestampFormat, true).format(date);
+  return getTimestampFormatter(timestampFormat, true).format(wallClockAsUtc(date));
 }
 
 export function formatShortTimestamp(isoDate: string, timestampFormat: TimestampFormat): string {
   const date = parseTimestampDate(isoDate);
   if (!date) return "";
-  return getTimestampFormatter(timestampFormat, false).format(date);
+  return getTimestampFormatter(timestampFormat, false).format(wallClockAsUtc(date));
 }
 
 const SECOND_MS = 1_000;
@@ -98,11 +105,13 @@ const DAY_MS = 86_400_000;
 const numericDateFormatter = new Intl.DateTimeFormat(timestampLocale, {
   month: "numeric",
   day: "numeric",
+  timeZone: "UTC",
 });
 const numericDateWithYearFormatter = new Intl.DateTimeFormat(timestampLocale, {
   month: "numeric",
   day: "numeric",
   year: "numeric",
+  timeZone: "UTC",
 });
 
 /**
@@ -117,7 +126,7 @@ export function formatDayAwareTimestamp(
 ): string {
   const date = parseTimestampDate(isoDate);
   if (!date) return "";
-  const time = getTimestampFormatter(timestampFormat, false).format(date);
+  const time = getTimestampFormatter(timestampFormat, false).format(wallClockAsUtc(date));
 
   const now = new Date(nowMs);
   const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
@@ -129,7 +138,7 @@ export function formatDayAwareTimestamp(
   if (dayDiff === 1) return `yesterday at ${time}`;
   const dateFormatter =
     date.getFullYear() === now.getFullYear() ? numericDateFormatter : numericDateWithYearFormatter;
-  return `${dateFormatter.format(date)} ${time}`;
+  return `${dateFormatter.format(wallClockAsUtc(date))} ${time}`;
 }
 
 /** Start of the local calendar day containing `nowMs`. */

@@ -1247,6 +1247,9 @@ export const OrchestrationGetTurnDiffInput = TurnCountRange.mapFields(
 );
 export type OrchestrationGetTurnDiffInput = typeof OrchestrationGetTurnDiffInput.Type;
 
+/** Appended to a checkpoint diff the server cut off at its size limit. */
+export const CHECKPOINT_DIFF_TRUNCATED_MARKER = "\n\n[truncated]";
+
 export const OrchestrationGetTurnDiffResult = ThreadTurnDiff;
 export type OrchestrationGetTurnDiffResult = typeof OrchestrationGetTurnDiffResult.Type;
 

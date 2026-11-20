@@ -12,7 +12,7 @@ import "./index.css";
 import { isElectron } from "./env";
 import { getRouter } from "./router";
 import { APP_DISPLAY_NAME } from "./branding";
-import { isChunkReloadScheduled, scheduleChunkReloadGuardRearm } from "./lib/chunkReloadGuard";
+import { isChunkReloadScheduled } from "./lib/chunkReloadGuard";
 import { isAppBooted, markAppBooted, showBootError } from "./lib/bootError";
 import { syncDocumentWindowControlsOverlayClass } from "./lib/windowControlsOverlay";
 import { resolveAuthToken } from "./rpc/authToken";
@@ -30,11 +30,9 @@ export function startApp(): void {
 
   document.title = APP_DISPLAY_NAME;
 
-  // main.tsx installs the chunk-failure reload; re-arm it only after a boot that loaded every chunk.
   const unsubscribeFirstResolve = router.subscribe("onResolved", () => {
     unsubscribeFirstResolve();
     markAppBooted();
-    scheduleChunkReloadGuardRearm();
   });
 
   ReactDOM.createRoot(document.getElementById("root") as HTMLElement, {

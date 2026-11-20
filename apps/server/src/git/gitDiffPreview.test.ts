@@ -269,6 +269,39 @@ it.layer(TestLayer)("readGitDiffPreview", (it) => {
       }),
     );
 
+    it.effect("does not minimize the patch, which stalls on large reordered files", () =>
+      Effect.gen(function* () {
+        const root = yield* makeRepo();
+        yield* git(root, ["config", "diff.algorithm", "myers"]);
+        // Repeated lines make the default and minimal algorithms choose different edits.
+        const lines = Array.from({ length: 2000 }, (_, index) => index);
+        writeFileSync(
+          path.join(root, "repeated.txt"),
+          lines.map((index) => `${(index ^ (index >> 3)) % 16}\n`).join(""),
+        );
+        yield* git(root, ["add", "."]);
+        yield* git(root, ["commit", "-m", "repeated lines"]);
+        writeFileSync(
+          path.join(root, "repeated.txt"),
+          lines.map((index) => `${(index ^ (index >> 5)) % 16}\n`).join(""),
+        );
+        const patchArgs = ["diff", "--no-color", "--no-ext-diff", "--src-prefix=a/"];
+        const defaultPatch = yield* git(root, [...patchArgs, "--dst-prefix=b/", "HEAD", "--"]);
+        const minimalPatch = yield* git(root, [
+          ...patchArgs,
+          "--dst-prefix=b/",
+          "--minimal",
+          "HEAD",
+          "--",
+        ]);
+        expect(defaultPatch).not.toBe(minimalPatch);
+
+        const result = yield* preview({ cwd: root, scope: "uncommitted" });
+
+        expect(result.diff.trim()).toBe(defaultPatch);
+      }),
+    );
+
     it.effect("ignores hostile diff configuration", () =>
       Effect.gen(function* () {
         const root = yield* makeRepo();

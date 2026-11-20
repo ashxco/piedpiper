@@ -40,6 +40,8 @@ import {
   ensureInlineTerminalContextPlaceholders,
   normalizeTerminalContextText,
 } from "./lib/terminalContext";
+import { cancelPreparingComposerImages } from "./components/ChatView.preparingImages";
+import { composerImageFingerprint } from "./lib/composerImageFingerprint";
 import { useReviewCommentDraftStore } from "./reviewCommentDraftStore";
 import { DEFAULT_INTERACTION_MODE, DEFAULT_RUNTIME_MODE } from "./types";
 import { create } from "zustand";
@@ -276,10 +278,11 @@ function createEmptyThreadDraft(): ComposerThreadDraftState {
   };
 }
 
-function composerImageDedupKey(image: ComposerImageAttachment): string {
+export function composerImageDedupKey(image: ComposerImageAttachment): string {
   // Keep this independent from File.lastModified so dedupe is stable for hydrated
   // images reconstructed from localStorage (which get a fresh lastModified value).
-  return `${image.mimeType}\u0000${image.sizeBytes}\u0000${image.name}`;
+  // The bytes' fingerprint tells apart distinct images that share a name, type and size.
+  return `${image.mimeType}\u0000${image.sizeBytes}\u0000${image.name}\u0000${composerImageFingerprint(image.file)}`;
 }
 
 // With the text: terminal ids are reused, so a closed term-2's lines 1-5 are not a new term-2's.
@@ -1528,6 +1531,8 @@ export function useThreadHasUnsentDraft(threadId: ThreadId): boolean {
 
 /** Discards a thread's unsent composer content (not its model settings), revoking image previews. */
 export function discardComposerDraftContent(threadId: ThreadId): void {
+  // An image still being fitted would otherwise land in the draft after it was discarded.
+  cancelPreparingComposerImages(threadId);
   const store = useComposerDraftStore.getState();
   const draft = store.draftsByThreadId[threadId];
   if (!draft) return;

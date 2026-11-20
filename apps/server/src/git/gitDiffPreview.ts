@@ -59,7 +59,6 @@ const PATCH_ARGS = [
   "--submodule=short",
   "-M",
   "--patch",
-  "--minimal",
 ] as const;
 
 function splitNullSeparated(stdout: string): string[] {

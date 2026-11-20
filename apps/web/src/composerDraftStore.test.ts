@@ -28,6 +28,11 @@ import {
 } from "./lib/terminalContext";
 import { createDebouncedStorage, createDeferredStorage } from "./lib/storage";
 import { useReviewCommentDraftStore } from "./reviewCommentDraftStore";
+import { readComposerImageBytes } from "./lib/composerImageFingerprint";
+import {
+  addPreparingComposerImages,
+  countPreparingComposerImages,
+} from "./components/ChatView.preparingImages";
 
 function makeImage(input: {
   id: string;
@@ -169,6 +174,31 @@ describe("composerDraftStore addImages", () => {
     expect(revokeSpy).toHaveBeenCalledWith("blob:b");
   });
 
+  it("keeps distinct images that share a name, type and size once their bytes are read", async () => {
+    const pasted = (id: string, fill: number) => {
+      const file = new File([new Uint8Array(3).fill(fill)], "image.png", { type: "image/png" });
+      return {
+        type: "image" as const,
+        id,
+        name: file.name,
+        mimeType: file.type,
+        sizeBytes: 3,
+        previewUrl: `blob:${id}`,
+        file,
+      };
+    };
+    const red = pasted("img-red", 1);
+    const blue = pasted("img-blue", 2);
+    const redAgain = pasted("img-red-again", 1);
+    await Promise.all([red, blue, redAgain].map((image) => readComposerImageBytes(image.file)));
+
+    useComposerDraftStore.getState().addImages(threadId, [red]);
+    useComposerDraftStore.getState().addImages(threadId, [blue, redAgain]);
+
+    const draft = useComposerDraftStore.getState().draftsByThreadId[threadId];
+    expect(draft?.images.map((image) => image.id)).toEqual(["img-red", "img-blue"]);
+  });
+
   it("does not revoke blob URLs that are still used by an accepted duplicate image", () => {
     const first = makeImage({
       id: "img-shared",
@@ -276,6 +306,15 @@ describe("unsent draft marker", () => {
 
     expect(selectThreadHasUnsentDraft(useComposerDraftStore.getState(), threadId)).toBe(false);
     expect(revokeSpy).toHaveBeenCalledWith("blob:discard");
+  });
+
+  it("cancels images still being fitted, so a late fit cannot recreate a discarded draft", () => {
+    useComposerDraftStore.getState().setPrompt(threadId, "draft");
+    addPreparingComposerImages(threadId, [{ id: "img-fitting", name: "a.png", previewUrl: null }]);
+
+    discardComposerDraftContent(threadId);
+
+    expect(countPreparingComposerImages(threadId)).toBe(0);
   });
 });
 

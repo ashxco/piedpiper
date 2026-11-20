@@ -44,6 +44,175 @@ export interface ClaudeProcessGroupOptions {
     readonly signal: NodeJS.Signals | null;
     readonly stderrTail: string;
   }) => void;
+  /**
+   * Called once the CLI is spawned with a function that records its process tree now, so a job it
+   * started since the last poll is still stopped when the CLI is closed right after.
+   */
+  readonly onSpawn?: (handle: { readonly refreshDescendants: () => Promise<void> }) => void;
+}
+
+export interface ClaudeProcessRow {
+  readonly pid: number;
+  readonly ppid: number;
+  readonly pgid: number;
+  readonly started: string;
+}
+
+/** How often live CLIs' process trees are recorded; one `ps` serves every session. */
+const CLAUDE_DESCENDANT_POLL_MS = 1_000;
+const CLAUDE_PS_TIMEOUT_MS = 5_000;
+
+/** Parses `ps -A -o pid=,ppid=,pgid=,lstart=`; pid plus start time tells a process from a reused pid. */
+export function parseClaudeProcessTable(table: string): ReadonlyArray<ClaudeProcessRow> {
+  return table.split("\n").flatMap((line) => {
+    const [pid, ppid, pgid, ...started] = line.trim().split(/\s+/);
+    const row = {
+      pid: Number(pid),
+      ppid: Number(ppid),
+      pgid: Number(pgid),
+      started: started.join(" "),
+    };
+    return Number.isSafeInteger(row.pid) &&
+      Number.isSafeInteger(row.ppid) &&
+      Number.isSafeInteger(row.pgid) &&
+      row.started
+      ? [row]
+      : [];
+  });
+}
+
+/** Every process below `rootPids` in the table, found through parent pids. */
+export function claudeDescendants(
+  rows: ReadonlyArray<ClaudeProcessRow>,
+  rootPids: ReadonlyArray<number>,
+): ReadonlyArray<ClaudeProcessRow> {
+  const children = new Map<number, Array<ClaudeProcessRow>>();
+  for (const row of rows) {
+    const siblings = children.get(row.ppid);
+    if (siblings) siblings.push(row);
+    else children.set(row.ppid, [row]);
+  }
+  const found: Array<ClaudeProcessRow> = [];
+  const seen = new Set<number>(rootPids);
+  const pending = [...rootPids];
+  for (let parent = pending.pop(); parent !== undefined; parent = pending.pop()) {
+    for (const child of children.get(parent) ?? []) {
+      if (seen.has(child.pid)) continue;
+      seen.add(child.pid);
+      found.push(child);
+      pending.push(child.pid);
+    }
+  }
+  return found;
+}
+
+/** One process table read; `readId` orders reads by when they started. */
+export interface ClaudeProcessTableRead {
+  readonly readId: number;
+  readonly rows: ReadonlyArray<ClaudeProcessRow>;
+}
+
+let processTableReads = 0;
+
+async function readClaudeProcessTable(): Promise<ClaudeProcessTableRead> {
+  const readId = ++processTableReads;
+  return { readId, rows: await readClaudeProcessTableRows() };
+}
+
+function readClaudeProcessTableRows(): Promise<ReadonlyArray<ClaudeProcessRow>> {
+  return new Promise((resolve) => {
+    NodeChildProcess.execFile(
+      "ps",
+      ["-A", "-o", "pid=,ppid=,pgid=,lstart="],
+      { timeout: CLAUDE_PS_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024 },
+      (error, stdout) => resolve(error ? [] : parseClaudeProcessTable(stdout)),
+    );
+  });
+}
+
+const processIdentity = (row: ClaudeProcessRow) => `${row.pid} ${row.started}`;
+
+/**
+ * A job that left the CLI's group (Claude's Bash tool starts its commands in their own groups)
+ * escapes the group kill and is re-parented once the CLI exits. So the CLI's tree is recorded
+ * while it runs, and what is still the same process (pid and start time) is stopped after it exits.
+ */
+export class ClaudeDescendantTracker {
+  private readonly tracked = new Map<string, ClaudeProcessRow>();
+  /** The newest table applied; an older one finishing late must not forget newer jobs. */
+  private lastReadId = 0;
+  constructor(private readonly cliPid: number) {}
+
+  /** Jobs recorded so far, by pid and start time. */
+  get trackedRows(): ReadonlyArray<ClaudeProcessRow> {
+    return [...this.tracked.values()];
+  }
+
+  /**
+   * Records the CLI's tree from one table and forgets jobs that table no longer lists: a pid and
+   * start time that has ended never runs again. After exit the CLI's pid may belong to an
+   * unrelated process, so only tracked jobs are roots.
+   */
+  record(read: ClaudeProcessTableRead, cliRunning: boolean): ReadonlySet<string> {
+    const running = new Set(read.rows.map(processIdentity));
+    if (read.readId < this.lastReadId) return running;
+    this.lastReadId = read.readId;
+    // `ps -A` lists itself, so no rows is a failed read, not every job exiting.
+    if (read.rows.length === 0) return running;
+    const roots = cliRunning ? [this.cliPid] : [];
+    for (const [key, row] of this.tracked) {
+      if (running.has(key)) roots.push(row.pid);
+      else this.tracked.delete(key);
+    }
+    for (const row of claudeDescendants(read.rows, roots)) {
+      this.tracked.set(processIdentity(row), row);
+    }
+    return running;
+  }
+
+  /** A job leading its own group takes the processes it started since with it. */
+  stopLeftovers(read: ClaudeProcessTableRead): void {
+    const running = this.record(read, false);
+    for (const row of this.tracked.values()) {
+      if (!running.has(processIdentity(row))) continue;
+      try {
+        if (row.pgid === row.pid) process.kill(-row.pid, "SIGKILL");
+        else process.kill(row.pid, "SIGKILL");
+      } catch {
+        // Already gone.
+      }
+    }
+    this.tracked.clear();
+  }
+}
+
+const liveDescendantTrackers = new Set<ClaudeDescendantTracker>();
+let descendantPollTimer: ReturnType<typeof setInterval> | undefined;
+let descendantPollInFlight = false;
+
+function pollClaudeDescendants(): void {
+  if (descendantPollInFlight) return;
+  descendantPollInFlight = true;
+  void readClaudeProcessTable().then((read) => {
+    descendantPollInFlight = false;
+    for (const tracker of liveDescendantTrackers) tracker.record(read, true);
+  });
+}
+
+function startTrackingDescendants(tracker: ClaudeDescendantTracker): void {
+  liveDescendantTrackers.add(tracker);
+  if (descendantPollTimer === undefined) {
+    descendantPollTimer = setInterval(pollClaudeDescendants, CLAUDE_DESCENDANT_POLL_MS);
+    descendantPollTimer.unref?.();
+  }
+}
+
+function stopTrackingDescendants(tracker: ClaudeDescendantTracker): void {
+  liveDescendantTrackers.delete(tracker);
+  if (liveDescendantTrackers.size === 0 && descendantPollTimer !== undefined) {
+    clearInterval(descendantPollTimer);
+    descendantPollTimer = undefined;
+  }
 }
 
 /** Sends `signal` to every process in the group led by `pid`; a missing group is not an error. */
@@ -60,7 +229,8 @@ export function signalClaudeProcessGroup(pid: number | undefined, signal: NodeJS
  * Starts the Claude CLI as the leader of its own process group. The CLI stops the MCP servers it
  * started, but not their children (a plugin's `bun run start` wrapper dies and its `bun server.ts`
  * keeps running), so the rest of the group gets SIGKILL once the CLI exits. Commands the agent
- * runs through its Bash tool start their own groups, so its background jobs are not affected.
+ * runs through its Bash tool start their own groups, so those are tracked through the CLI's
+ * process tree and stopped after it exits.
  */
 export function makeClaudeProcessGroupSpawner(
   options: ClaudeProcessGroupOptions = {},
@@ -89,8 +259,25 @@ export function makeClaudeProcessGroupSpawner(
     child.stderr?.on("data", (chunk: string) => {
       stderrTail = (stderrTail + chunk).slice(-CLAUDE_STDERR_TAIL_BYTES);
     });
+    const tracker = child.pid === undefined ? undefined : new ClaudeDescendantTracker(child.pid);
+    let exited = false;
+    if (tracker) {
+      startTrackingDescendants(tracker);
+      options.onSpawn?.({
+        refreshDescendants: async () => {
+          if (exited) return;
+          const read = await readClaudeProcessTable();
+          if (!exited) tracker.record(read, true);
+        },
+      });
+    }
     child.once("exit", (code, signal) => {
+      exited = true;
       signalClaudeProcessGroup(child.pid, "SIGKILL");
+      if (tracker) {
+        stopTrackingDescendants(tracker);
+        void readClaudeProcessTable().then((read) => tracker.stopLeftovers(read));
+      }
       if ((code !== null && code !== 0) || signal !== null) {
         options.onAbnormalExit?.({
           code,

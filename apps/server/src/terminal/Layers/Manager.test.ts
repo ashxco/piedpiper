@@ -52,8 +52,11 @@ vi.mock("./PendingProcessEventQueue", async (importOriginal) => {
   return { ...actual, takePendingProcessEvent: vi.fn(actual.takePendingProcessEvent) };
 });
 
+// Closing a terminal hangs up its shell's jobs before SIGTERM everywhere but Windows.
+const HANGUP_SIGNALS = globalThis.process.platform === "win32" ? [] : ["SIGHUP"];
+
 class FakePtyProcess implements PtyProcess {
-  readonly writes: string[] = [];
+  readonly writes: Array<string | Buffer> = [];
   readonly resizeCalls: Array<{ cols: number; rows: number }> = [];
   readonly killSignals: Array<string | undefined> = [];
   private readonly dataListeners = new Set<(data: string) => void>();
@@ -65,7 +68,7 @@ class FakePtyProcess implements PtyProcess {
 
   constructor(readonly pid: number) {}
 
-  write(data: string): void {
+  write(data: string | Buffer): void {
     if (this.writeError) throw this.writeError;
     this.writes.push(data);
   }
@@ -471,9 +474,16 @@ it.layer(NodeServices.layer, { excludeTestServices: true })("TerminalManager", (
 
       yield* manager.write({ threadId: "thread-1", terminalId: "default", data: "pwd\n" });
       yield* manager.write({ threadId: "thread-1", terminalId: "term-2", data: "ls\n" });
+      // A legacy (X10) mouse report reaches the PTY byte for byte, not as UTF-8 text.
+      yield* manager.write({
+        threadId: "thread-1",
+        terminalId: "term-2",
+        data: "\x1b[M \x80(",
+        binary: true,
+      });
 
       expect(first.writes).toEqual(["pwd\n"]);
-      expect(second.writes).toEqual(["ls\n"]);
+      expect(second.writes).toEqual(["ls\n", Buffer.from([0x1b, 0x5b, 0x4d, 0x20, 0x80, 0x28])]);
       expect(ptyAdapter.spawnInputs).toHaveLength(2);
     }),
   );
@@ -730,6 +740,7 @@ it.layer(NodeServices.layer, { excludeTestServices: true })("TerminalManager", (
       process.emitData("prompt ");
       // DECRQM/DECRPM, XTVERSION, and kitty-keyboard CSI query/reply traffic.
       process.emitData("\u001b[?2026$p\u001b[?2026;2$y\u001b[>q\u001b[?u\u001b[?31u");
+      process.emitData("\u001b[=c\u001b[=0c");
       // DECRQSS and XTGETTCAP query/reply traffic in 7-bit and 8-bit DCS form.
       process.emitData("\u001bP$q m\u001b\\\u001bP1$r0m\u001b\\");
       process.emitData("\u001bP+q544e\u001b\\\u001bP1+r544e=1b\u001b\\");
@@ -859,6 +870,24 @@ it.layer(NodeServices.layer, { excludeTestServices: true })("TerminalManager", (
     }),
   );
 
+  it.effect("restores a log tail that starts inside a control sequence without its remainder", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      for (const [persisted, restored] of [
+        ["\u001b]0;x\u0007ABCD", "ABCD"],
+        ["名\u001b]0;名\u0007ABCD", "ABCD"],
+        ["\u001b]0;x\u0007\u001b[31mABCD", "ABCD"],
+      ] as const) {
+        const { manager, logsDir } = yield* createManager(5, { historyByteLimit: 8 });
+        const logPath = multiTerminalHistoryLogPath(logsDir);
+        yield* fs.makeDirectory(path.dirname(logPath), { recursive: true });
+        yield* fs.writeFileString(logPath, persisted);
+        expect((yield* manager.open(openInput())).history).toBe(restored);
+        expect(yield* fs.readFileString(logPath)).toBe(restored);
+      }
+    }),
+  );
+
   for (const source of ["current", "legacy"] as const) {
     it.effect(`reads only a Unicode-safe tail from oversized ${source} history`, () =>
       Effect.gen(function* () {
@@ -901,11 +930,16 @@ it.layer(NodeServices.layer, { excludeTestServices: true })("TerminalManager", (
         const nextPath = historyLogPath(logsDir);
         sourcePath = source === "current" ? nextPath : path.join(logsDir, "thread-1.log");
         yield* fs.makeDirectory(logsDir, { recursive: true });
-        yield* fs.writeFileString(sourcePath, "old".repeat(32_768) + "😀\uFEFFnewest\ré");
+        yield* fs.writeFileString(
+          sourcePath,
+          "old".repeat(32_768) + "\u001b[0m" + "old".repeat(4) + "😀\uFEFFnewest\ré",
+        );
 
         const snapshot = yield* manager.open(openInput());
         assert.equal(snapshot.history, "\uFEFFnewest\ré");
-        expect(readRequests).toEqual([15, 10, 5]);
+        // A backward scan to the last ESC before the tail, the bytes after it, then the tail.
+        expect(readRequests.slice(-3)).toEqual([15, 10, 5]);
+        expect(readRequests.length).toBeLessThan(1_000);
         expect(closedReads).toBe(1);
         assert.equal(Buffer.from(yield* fs.readFile(nextPath)).toString(), "\uFEFFnewest\ré");
         if (source === "legacy") expect(yield* fs.exists(sourcePath)).toBe(false);
@@ -932,6 +966,52 @@ it.layer(NodeServices.layer, { excludeTestServices: true })("TerminalManager", (
       assert.equal(live.history, `${"x".repeat(21)}\nlast line\n`);
       yield* manager.close({ threadId: "thread-1" });
       assert.equal(yield* fs.readFileString(historyLogPath(logsDir)), live.history);
+    }),
+  );
+
+  it.effect("appends small updates and rewrites history after an append fails partway", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const writes = yield* Queue.unbounded<{ readonly data: string; readonly flag?: string }>();
+      let failAppend = false;
+      const { manager, ptyAdapter, logsDir } = yield* createManager().pipe(
+        Effect.provideService(FileSystem.FileSystem, {
+          ...fs,
+          writeFileString: (file, data, options) => {
+            if (options?.flag === "a" && failAppend) {
+              failAppend = false;
+              return fs.writeFileString(file, data.slice(0, 1), options).pipe(
+                // The file cannot also be a parent directory: fail after the partial append.
+                Effect.andThen(fs.writeFileString(`${file}/missing`, data)),
+                Effect.ensuring(Queue.offer(writes, { data: "<failed>" })),
+              );
+            }
+            return fs.writeFileString(file, data, options).pipe(
+              Effect.tap(() =>
+                data.length > 0
+                  ? Queue.offer(writes, {
+                      data,
+                      ...(options?.flag !== undefined ? { flag: options.flag } : {}),
+                    })
+                  : Effect.void,
+              ),
+            );
+          },
+        }),
+      );
+      yield* manager.open(openInput());
+      const process = ptyAdapter.processes[0]!;
+      process.emitData("start:");
+      expect(yield* Queue.take(writes)).toEqual({ data: "start:", flag: "w" });
+      process.emitData("next:");
+      expect(yield* Queue.take(writes)).toEqual({ data: "next:", flag: "a" });
+      failAppend = true;
+      process.emitData("middle");
+      expect((yield* Queue.take(writes)).data).toBe("<failed>");
+      process.emitData(":end");
+      expect(yield* Queue.take(writes)).toEqual({ data: "start:next:middle:end", flag: "w" });
+      expect(yield* fs.readFileString(historyLogPath(logsDir))).toBe("start:next:middle:end");
+      yield* manager.close({ threadId: "thread-1" });
     }),
   );
 
@@ -1032,7 +1112,7 @@ it.layer(NodeServices.layer, { excludeTestServices: true })("TerminalManager", (
       yield* TestClock.adjust("10 millis");
       yield* Fiber.join(closeFiber);
 
-      assert.equal(process.killSignals[0], "SIGTERM");
+      assert.deepEqual(process.killSignals.slice(0, -1), [...HANGUP_SIGNALS, "SIGTERM"]);
       expect(process.killSignals).toContain("SIGKILL");
     }).pipe(Effect.provide(TestClock.layer())),
   );
@@ -1139,7 +1219,15 @@ it.layer(NodeServices.layer, { excludeTestServices: true })("TerminalManager", (
 
       assert.equal(snapshot.status, "running");
       expect(ptyAdapter.spawnInputs.map(({ shell, args }) => ({ shell, args }))).toEqual([
-        { shell: "pwsh.exe", args: ["-NoLogo"] },
+        {
+          shell: "pwsh.exe",
+          args: [
+            "-NoLogo",
+            "-NoExit",
+            "-Command",
+            "[Console]::OutputEncoding = $OutputEncoding = [System.Text.UTF8Encoding]::new()",
+          ],
+        },
         { shell: "D:\\cmd.exe", args: undefined },
         { shell: "E:\\Win\\System32\\cmd.exe", args: undefined },
         { shell: "cmd.exe", args: undefined },
@@ -1901,7 +1989,7 @@ it.layer(NodeServices.layer, { excludeTestServices: true })("TerminalManager", (
       process.emitExit({ exitCode: 0, signal: 15 });
       yield* TestClock.adjust("10 seconds");
 
-      assert.deepEqual(process.killSignals, ["SIGTERM"]);
+      assert.deepEqual(process.killSignals, [...HANGUP_SIGNALS, "SIGTERM"]);
       assert.equal(process.exitListenerCount, 0);
     }).pipe(Effect.provide(TestClock.layer())),
   );
@@ -2040,7 +2128,7 @@ it.layer(NodeServices.layer, { excludeTestServices: true })("TerminalManager", (
       yield* Scope.close(scope, Exit.void);
 
       assert.equal(writes.at(-1), "final prompt % ");
-      assert.deepEqual(process.killSignals, ["SIGTERM"]);
+      assert.deepEqual(process.killSignals, [...HANGUP_SIGNALS, "SIGTERM"]);
     }).pipe(Effect.provide(TestClock.layer())),
   );
 
@@ -2097,11 +2185,12 @@ it.layer(NodeServices.layer, { excludeTestServices: true })("TerminalManager", (
     }).pipe(Effect.provide(TestClock.layer())),
   );
 
-  it.effect("releases the exit listener when kill escalation is interrupted", () =>
+  it.effect("force-kills a closed terminal that ignores SIGTERM when the manager shuts down", () =>
     Effect.gen(function* () {
       const scope = yield* Scope.make("sequential");
       const { manager, ptyAdapter } = yield* createManager(5, {
-        processKillGraceMs: 10_000,
+        processKillGraceMs: 1_000,
+        platform: "linux",
       }).pipe(Effect.provideService(Scope.Scope, scope));
       yield* manager.open(openInput());
       const process = ptyAdapter.processes[0];
@@ -2116,11 +2205,70 @@ it.layer(NodeServices.layer, { excludeTestServices: true })("TerminalManager", (
       yield* Deferred.await(sigterm);
       assert.isAbove(process.exitListenerCount, 0);
 
-      yield* Scope.close(scope, Exit.void);
+      // Shutdown waits for the pending escalation instead of interrupting it.
+      const shutdown = yield* Scope.close(scope, Exit.void).pipe(Effect.forkChild);
+      yield* TestClock.adjust("1 second");
+      yield* Fiber.join(shutdown);
 
       assert.equal(process.exitListenerCount, 0);
-      assert.deepEqual(process.killSignals, ["SIGTERM"]);
+      assert.deepEqual(process.killSignals, ["SIGHUP", "SIGTERM", "SIGKILL"]);
     }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect.each([
+    ["linux", ["SIGHUP", "SIGTERM"]],
+    ["win32", ["SIGTERM"]],
+  ] as const)("closing a %s terminal hangs up the shell's jobs", ([platform, signals]) =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter } = yield* createManager(5, {
+        platform,
+        subprocessChecker: () => Effect.succeed(false),
+      });
+      yield* manager.open(openInput());
+      const shell = ptyAdapter.processes[0]!;
+      const terminated = yield* Deferred.make<void>();
+      shell.onKill = (signal) => {
+        if (signal === "SIGTERM") Deferred.doneUnsafe(terminated, Effect.void);
+      };
+
+      yield* manager.close({ threadId: "thread-1" });
+      yield* Deferred.await(terminated);
+
+      expect(shell.killSignals).toEqual(signals);
+      shell.emitExit({ exitCode: 0, signal: 0 });
+    }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect("clears a terminal that keeps printing while its history is saved", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      let printWhileSaving: Effect.Effect<void> = Effect.void;
+      const printing = FileSystem.FileSystem.of({
+        ...fs,
+        writeFileString: (filePath, data, options) =>
+          printWhileSaving.pipe(Effect.andThen(fs.writeFileString(filePath, data, options))),
+      });
+      const { manager, ptyAdapter, getEvents } = yield* createManager().pipe(
+        Effect.provideService(FileSystem.FileSystem, printing),
+      );
+      yield* manager.open(openInput());
+      const process = ptyAdapter.processes[0]!;
+      // Each save sees fresh output, so the history worker never goes idle.
+      printWhileSaving = Effect.gen(function* () {
+        const printed = yield* Deferred.make<void>();
+        const unsubscribe = yield* manager.subscribe((event) =>
+          event.type === "output" ? Deferred.succeed(printed, undefined) : Effect.void,
+        );
+        process.emitData("tick\n");
+        yield* Deferred.await(printed);
+        unsubscribe();
+      });
+
+      yield* manager.clear({ threadId: "thread-1", terminalId: DEFAULT_TERMINAL_ID });
+
+      expect((yield* getEvents).map((event) => event.type)).toContain("cleared");
+      printWhileSaving = Effect.void;
+    }),
   );
 
   it.effect("coalesces live history writes and flushes on close without waiting the debounce", () =>
@@ -2180,7 +2328,7 @@ it.layer(NodeServices.layer, { excludeTestServices: true })("TerminalManager", (
       yield* TestClock.adjust("10 millis");
       yield* Fiber.join(closeScope);
 
-      assert.equal(process.killSignals[0], "SIGTERM");
+      assert.deepEqual(process.killSignals.slice(0, -1), [...HANGUP_SIGNALS, "SIGTERM"]);
       expect(process.killSignals).toContain("SIGKILL");
     }).pipe(Effect.provide(TestClock.layer())),
   );

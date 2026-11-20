@@ -21,9 +21,16 @@ const CA_TRUST_ENV_NAMES = ["SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERT
 const FILL_IF_UNSET_ENV_NAMES = [
   ...CA_TRUST_ENV_NAMES,
   "JAVA_HOME",
+  // pnpm global commands look for their bin directory here; Finder/Dock launches never see it.
+  "PNPM_HOME",
   "PIEDPIPER_TELEMETRY_ENABLED",
 ] as const;
 const LOGIN_SHELL_PROBE_TIMEOUT_MS = 5000;
+/** A Mac asleep at launch fails the first probe on wake, and nothing else would probe again. */
+export const SHELL_ENVIRONMENT_RETRY_DELAY_MS = 30_000;
+export const SHELL_ENVIRONMENT_RETRIES = 10;
+/** Retries block nothing, so they outlast slow rc files such as pyenv's 60 s rehash-lock wait. */
+export const SHELL_ENVIRONMENT_RETRY_PROBE_TIMEOUT_MS = 120_000;
 const SHELL_ENVIRONMENT_CACHE_VERSION = 1;
 
 export const LOGIN_SHELL_ENV_NAMES = [
@@ -207,6 +214,7 @@ export async function readEnvironmentFromLoginShellCandidatesAsync(
     readEnvironment?: AsyncShellEnvironmentReader | undefined;
     env?: NodeJS.ProcessEnv | undefined;
     budgetMs?: number | undefined;
+    probeTimeoutMs?: number | undefined;
     now?: (() => number) | undefined;
     onProbeError?: ((shell: string, error: unknown) => void) | undefined;
   } = {},
@@ -223,7 +231,7 @@ export async function readEnvironmentFromLoginShellCandidatesAsync(
       lastEnvironment = await readEnvironment(
         shell,
         names,
-        Math.min(remainingMs, LOGIN_SHELL_PROBE_TIMEOUT_MS),
+        Math.min(remainingMs, options.probeTimeoutMs ?? LOGIN_SHELL_PROBE_TIMEOUT_MS),
         options.env,
       );
     } catch (error) {
@@ -310,18 +318,84 @@ function sameEnvironment(left: ShellEnvironment, right: ShellEnvironment): boole
   return LOGIN_SHELL_ENV_NAMES.every((name) => sameEnvValue(name, left[name], right[name]));
 }
 
-interface ShellEnvironmentRefreshResult {
+export interface ShellEnvironmentRefreshResult {
   /** `env` now differs in a way a running backend would notice. */
   readonly changed: boolean;
   /** `env` holds a login-shell (or cached) environment rather than only the inherited GUI one. */
   readonly hydrated: boolean;
+  /** This probe got a PATH from a login shell; false means it is worth probing again later. */
+  readonly probed: boolean;
+}
+
+export interface ShellEnvironmentRefreshOptions {
+  /** Per-shell probe timeout; background retries can afford far longer than startup. */
+  readonly probeTimeoutMs?: number | undefined;
+  /** Total time all candidate shells may take. */
+  readonly budgetMs?: number | undefined;
 }
 
 export interface ShellEnvironmentSync {
   /** Applies the cached login-shell environment; true when the env is ready without probing. */
   readonly applyCached: () => boolean;
   /** Probes the login shell in the background, updates the cache and re-applies it. */
-  readonly refresh: () => Promise<ShellEnvironmentRefreshResult>;
+  readonly refresh: (
+    options?: ShellEnvironmentRefreshOptions,
+  ) => Promise<ShellEnvironmentRefreshResult>;
+}
+
+const APPIMAGE_MOUNT_ENTRY = /^\/tmp\/\.mount_PiedPi[^/]+(?:\/|$)/u;
+
+/**
+ * Drops PATH entries inside an AppImage mount: this launch's (`appDir`) and any earlier launch's,
+ * which a cached or login-shell PATH can outlive. Returns undefined when nothing is left.
+ */
+export function stripAppImagePathEntries(
+  path: string | undefined,
+  appDir: string | undefined,
+): string | undefined {
+  if (path === undefined) return undefined;
+  const root = appDir?.replace(/\/+$/u, "");
+  const kept = path
+    .split(":")
+    .filter(
+      (entry) =>
+        !(root && (entry === root || entry.startsWith(`${root}/`))) &&
+        !APPIMAGE_MOUNT_ENTRY.test(entry),
+    );
+  return kept.length > 0 ? kept.join(":") : undefined;
+}
+
+/**
+ * After a failed startup probe, probes again in the background until one gets a PATH, so
+ * providers can be found without relaunching. Resolves with that result, or null when every
+ * retry failed or `isCancelled` stopped it.
+ */
+export async function retryShellEnvironmentRefresh(input: {
+  readonly refresh: ShellEnvironmentSync["refresh"];
+  readonly onResult: (result: ShellEnvironmentRefreshResult) => void | Promise<void>;
+  readonly isCancelled?: (() => boolean) | undefined;
+  readonly sleep?: ((ms: number) => Promise<void>) | undefined;
+  readonly delayMs?: number | undefined;
+  readonly retries?: number | undefined;
+  readonly probeTimeoutMs?: number | undefined;
+}): Promise<ShellEnvironmentRefreshResult | null> {
+  const sleep =
+    input.sleep ??
+    ((ms: number) =>
+      new Promise<void>((resolve) => {
+        setTimeout(resolve, ms).unref?.();
+      }));
+  const probeTimeoutMs = input.probeTimeoutMs ?? SHELL_ENVIRONMENT_RETRY_PROBE_TIMEOUT_MS;
+  const retries = input.retries ?? SHELL_ENVIRONMENT_RETRIES;
+  for (let attempt = 0; attempt < retries; attempt += 1) {
+    await sleep(input.delayMs ?? SHELL_ENVIRONMENT_RETRY_DELAY_MS);
+    if (input.isCancelled?.()) return null;
+    const result = await input.refresh({ probeTimeoutMs, budgetMs: probeTimeoutMs });
+    if (input.isCancelled?.()) return null;
+    await input.onResult(result);
+    if (result.probed) return result;
+  }
+  return null;
 }
 
 /**
@@ -346,6 +420,16 @@ export function createShellEnvironmentSync(options: {
   const logWarning = options.logWarning ?? logShellEnvironmentWarning;
   const readLaunchctlPath = options.readLaunchctlPath ?? readPathFromLaunchctl;
   const cacheKey = shellEnvironmentCacheKey(env, platform, options.home ?? OS.homedir());
+  const isLinuxAppImage =
+    platform === "linux" && (env.APPIMAGE !== undefined || env.APPDIR !== undefined);
+  const stripAppImagePaths = (target: ShellEnvironment | NodeJS.ProcessEnv) => {
+    if (!isLinuxAppImage || target.PATH === undefined) return;
+    const path = stripAppImagePathEntries(target.PATH, env.APPDIR);
+    if (path === undefined) delete target.PATH;
+    else target.PATH = path;
+  };
+  // An AppImage's own mount must not reach the backend, the probes or the cache.
+  stripAppImagePaths(env);
   const inherited: ShellEnvironment = {};
   for (const name of LOGIN_SHELL_ENV_NAMES) inherited[name] = env[name];
   let appliedFromCache = false;
@@ -368,6 +452,8 @@ export function createShellEnvironmentSync(options: {
       if (!supported) return true;
       const cached = readShellEnvironmentCache(options.cachePath, cacheKey);
       if (cached === null) return false;
+      // A cached PATH can outlive the AppImage mount an earlier launch added to it.
+      stripAppImagePaths(cached);
       try {
         apply(cached);
         appliedFromCache = true;
@@ -376,9 +462,9 @@ export function createShellEnvironmentSync(options: {
       }
       return appliedFromCache;
     },
-    refresh: async () => {
+    refresh: async (refreshOptions = {}) => {
       // The desktop spawns only the backend, which repairs its own Windows PATH at startup.
-      if (!supported) return { changed: false, hydrated: true };
+      if (!supported) return { changed: false, hydrated: true, probed: true };
       // Probe from the inherited baseline so removed cached entries and values cannot survive.
       const probeEnv: NodeJS.ProcessEnv = { ...env };
       for (const name of LOGIN_SHELL_ENV_NAMES) {
@@ -392,19 +478,21 @@ export function createShellEnvironmentSync(options: {
           {
             readEnvironment: options.readEnvironment,
             env: probeEnv,
-            budgetMs: options.probeBudgetMs,
+            budgetMs: refreshOptions.budgetMs ?? options.probeBudgetMs,
+            probeTimeoutMs: refreshOptions.probeTimeoutMs,
             now: options.now,
             onProbeError: (shell, error) =>
               logWarning(`Failed to read login shell environment from ${shell}.`, error),
           },
         );
+        stripAppImagePaths(shellEnvironment);
         if (!shellEnvironment.PATH) {
           // A failed probe must not replace a good cached environment with a launchctl fallback.
           if (appliedFromCache) {
             logWarning("Login shell probe returned no PATH; keeping the cached environment.");
-            return { changed: false, hydrated: true };
+            return { changed: false, hydrated: true, probed: false };
           }
-          return { changed: apply(shellEnvironment), hydrated: false };
+          return { changed: apply(shellEnvironment), hydrated: false, probed: false };
         }
         const cached = readShellEnvironmentCache(options.cachePath, cacheKey);
         if (cached === null || !sameEnvironment(cached, shellEnvironment)) {
@@ -415,10 +503,10 @@ export function createShellEnvironmentSync(options: {
           }
         }
         appliedFromCache = false;
-        return { changed: apply(shellEnvironment), hydrated: true };
+        return { changed: apply(shellEnvironment), hydrated: true, probed: true };
       } catch (error) {
         logWarning("Failed to synchronize the desktop shell environment.", error);
-        return { changed: false, hydrated: appliedFromCache };
+        return { changed: false, hydrated: appliedFromCache, probed: false };
       }
     },
   };

@@ -14,6 +14,7 @@ import { useCallback } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
 
+import { useLiveClaudeSelection } from "../../hooks/useLiveClaudeSelection";
 import { TraitsPicker } from "./TraitsPicker";
 import {
   COMPOSER_DRAFT_STORAGE_KEY,
@@ -132,6 +133,7 @@ const TEST_PROVIDERS: ReadonlyArray<ServerProvider> = [
 
 function ClaudeTraitsPickerHarness(props: {
   model: string;
+  applyLiveSelection?: (threadId: ThreadId, selection: ModelSelection) => Promise<unknown>;
   fallbackModelSelection: ModelSelection | null;
   triggerVariant?: "ghost" | "outline";
 }) {
@@ -146,6 +148,20 @@ function ClaudeTraitsPickerHarness(props: {
     settings: {
       ...DEFAULT_SERVER_SETTINGS,
       ...DEFAULT_CLIENT_SETTINGS,
+    },
+  });
+  useLiveClaudeSelection({
+    threadId: CLAUDE_THREAD_ID,
+    running: props.applyLiveSelection !== undefined,
+    selection: {
+      provider: "claudeAgent",
+      model: selectedModel ?? props.model,
+      ...(modelOptions?.claudeAgent ? { options: modelOptions.claudeAgent } : {}),
+    },
+    savedSelection: props.fallbackModelSelection ?? undefined,
+    apply: props.applyLiveSelection ?? (async () => undefined),
+    onError: (threadId, error) => {
+      throw new Error(`Failed live selection for ${threadId}`, { cause: error });
     },
   });
   const handlePromptChange = useCallback(
@@ -171,6 +187,7 @@ function ClaudeTraitsPickerHarness(props: {
 
 async function mountClaudePicker(props?: {
   model?: string;
+  applyLiveSelection?: (threadId: ThreadId, selection: ModelSelection) => Promise<unknown>;
   prompt?: string;
   options?: ClaudeModelOptions;
   fallbackModelOptions?: {
@@ -224,6 +241,7 @@ async function mountClaudePicker(props?: {
   const screen = await render(
     <ClaudeTraitsPickerHarness
       model={model}
+      {...(props?.applyLiveSelection ? { applyLiveSelection: props.applyLiveSelection } : {})}
       fallbackModelSelection={fallbackModelSelection}
       {...(props?.triggerVariant ? { triggerVariant: props.triggerVariant } : {})}
     />,
@@ -250,6 +268,29 @@ describe("TraitsPicker (Claude)", () => {
       projectDraftThreadIdByProjectId: {},
       stickyModelSelectionByProvider: {},
     });
+  });
+
+  it("applies an effort picker change to the active query without a send", async () => {
+    const apply = vi.fn(async () => undefined);
+    await using _ = await mountClaudePicker({
+      options: { effort: "high" },
+      fallbackModelOptions: { effort: "high" },
+      applyLiveSelection: apply,
+    });
+    expect(apply).not.toHaveBeenCalled();
+    await page.getByRole("button").click();
+    await page.getByRole("menuitemradio", { name: "Low" }).click();
+    await vi.waitFor(() =>
+      expect(apply).toHaveBeenCalledWith(
+        CLAUDE_THREAD_ID,
+        expect.objectContaining({
+          provider: "claudeAgent",
+          model: "claude-opus-4-6",
+          options: expect.objectContaining({ effort: "low" }),
+        }),
+      ),
+    );
+    expect(apply).toHaveBeenCalledTimes(1);
   });
 
   it("shows fast mode controls for Opus", async () => {

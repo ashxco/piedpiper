@@ -158,6 +158,26 @@ export function isSameOrAncestorPath(ancestor: string, path: string): boolean {
   return normalizedPath.startsWith(prefix);
 }
 
+/**
+ * Keeps a picked branch's worktree claim only when a fresh read in that worktree finds it checked
+ * out: the picker's list can predate a checkout an agent ran itself, and trusting it would only
+ * retag the thread instead of switching back. `freshRead` is null when the read failed.
+ */
+export function resolveConfirmedSelectedBranch<
+  T extends Pick<GitBranch, "name" | "isRemote" | "worktreePath">,
+>(
+  listedBranch: T,
+  freshRead: {
+    readonly branches: ReadonlyArray<Pick<GitBranch, "name" | "isRemote" | "current">>;
+  } | null,
+): T {
+  const checkedOut =
+    freshRead?.branches.some(
+      (branch) => branch.name === listedBranch.name && !branch.isRemote && branch.current,
+    ) ?? false;
+  return checkedOut ? listedBranch : { ...listedBranch, worktreePath: null };
+}
+
 export function resolveBranchSelectionTarget(input: {
   activeProjectCwd: string;
   /** Root of the project's own checkout (git status rootPath); undefined while it loads. */

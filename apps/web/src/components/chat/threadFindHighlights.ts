@@ -212,13 +212,23 @@ function foldsHidingMatch(row: Element, range: Range | null): Element[] {
   );
 }
 
-function revealInCodeScroller(range: Range): void {
-  const scroller = range.startContainer.parentElement?.closest("pre");
-  if (!scroller) return;
-  const rect = range.getBoundingClientRect();
-  const bounds = scroller.getBoundingClientRect();
-  if (rect.left < bounds.left) scroller.scrollLeft += rect.left - bounds.left - 16;
-  else if (rect.right > bounds.right) scroller.scrollLeft += rect.right - bounds.right + 16;
+// Code blocks and wide markdown tables scroll sideways inside the message.
+const HORIZONTAL_SCROLLER_SELECTOR = "pre, .chat-markdown-table-scroll";
+
+/** Scrolls each sideways scroller holding the match, innermost first, so nested ones all show it. */
+function revealInHorizontalScrollers(range: Range): void {
+  for (
+    let scroller = range.startContainer.parentElement?.closest<HTMLElement>(
+      HORIZONTAL_SCROLLER_SELECTOR,
+    );
+    scroller;
+    scroller = scroller.parentElement?.closest<HTMLElement>(HORIZONTAL_SCROLLER_SELECTOR)
+  ) {
+    const rect = range.getBoundingClientRect();
+    const bounds = scroller.getBoundingClientRect();
+    if (rect.left < bounds.left) scroller.scrollLeft += rect.left - bounds.left - 16;
+    else if (rect.right > bounds.right) scroller.scrollLeft += rect.right - bounds.right + 16;
+  }
 }
 
 /**
@@ -266,7 +276,7 @@ export function revealThreadFindMatch(input: {
       }
     }
     const target = range ?? ranges.at(-1) ?? null;
-    if (target) revealInCodeScroller(target);
+    if (target) revealInHorizontalScrollers(target);
     const targetRect = target?.getBoundingClientRect();
     const rect = targetRect && targetRect.height > 0 ? targetRect : row.getBoundingClientRect();
     const delta = computeThreadFindScrollDelta(

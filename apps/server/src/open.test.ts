@@ -256,6 +256,83 @@ it.layer(NodeServices.layer)("resolveEditorLaunch", (it) => {
     }),
   );
 
+  it.effect("opens a directory in a new VS Code-style window, but not a file", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "piedpiper-open-" });
+      const file = path.join(directory, "file.ts");
+      yield* fs.writeFileString(file, "");
+
+      for (const editor of ["vscode", "cursor"] as const) {
+        const directoryLaunch = yield* resolveEditorLaunch(
+          { cwd: directory, editor },
+          "darwin",
+          NO_INSTALLED_EDITORS,
+        );
+        assert.deepEqual(directoryLaunch.args.slice(-2), ["--new-window", directory]);
+      }
+      const fileLaunch = yield* resolveEditorLaunch(
+        { cwd: file, editor: "vscode" },
+        "darwin",
+        NO_INSTALLED_EDITORS,
+      );
+      assert.deepEqual(fileLaunch.args, [file]);
+      const positionedLaunch = yield* resolveEditorLaunch(
+        { cwd: `${file}:3`, editor: "vscode" },
+        "darwin",
+        NO_INSTALLED_EDITORS,
+      );
+      assert.deepEqual(positionedLaunch.args, ["--goto", `${file}:3`]);
+      // `build:2026` is a folder, not `build` at line 2026.
+      const colonFolder = path.join(directory, "build:2026");
+      yield* fs.makeDirectory(colonFolder);
+      const colonFolderLaunch = yield* resolveEditorLaunch(
+        { cwd: colonFolder, editor: "vscode" },
+        "darwin",
+        NO_INSTALLED_EDITORS,
+      );
+      assert.deepEqual(colonFolderLaunch.args, ["--new-window", colonFolder]);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("opens positioned JetBrains targets in the thread's project", () =>
+    Effect.gen(function* () {
+      const positioned = yield* resolveEditorLaunch(
+        {
+          cwd: "/workspace with spaces/file.ts:12:4",
+          editor: "idea",
+          projectRoot: "/workspace with spaces",
+        },
+        "darwin",
+        NO_INSTALLED_EDITORS,
+      );
+      assert.deepEqual(positioned, {
+        command: "idea",
+        args: [
+          "/workspace with spaces",
+          "--line",
+          "12",
+          "--column",
+          "3",
+          "/workspace with spaces/file.ts",
+        ],
+      });
+
+      // A folder target would open as a second project, so it never gets the root.
+      const folder = yield* resolveEditorLaunch(
+        {
+          cwd: "/workspace with spaces/src",
+          editor: "idea",
+          projectRoot: "/workspace with spaces",
+        },
+        "darwin",
+        NO_INSTALLED_EDITORS,
+      );
+      assert.deepEqual(folder.args, ["/workspace with spaces/src"]);
+    }),
+  );
+
   it.effect("maps file-manager editor to OS open commands", () =>
     Effect.gen(function* () {
       const launch1 = yield* resolveEditorLaunch(
@@ -776,6 +853,22 @@ it.layer(NodeServices.layer)("isCommandAvailable", (it) => {
     }),
   );
 
+  it.effect("honors a differently cased PATHEXT key on win32", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const dir = yield* fs.makeTempDirectoryScoped({ prefix: "piedpiper-open-test-" });
+      yield* fs.writeFileString(path.join(dir, "code.CUSTOM"), "@echo off\r\n");
+      for (const key of ["PathExt", "pathext"]) {
+        const env = { PATH: dir, [key]: ".CUSTOM" } satisfies NodeJS.ProcessEnv;
+        const result = yield* Effect.tryPromise(() =>
+          isCommandAvailable("code", { platform: "win32", env }),
+        );
+        assert.equal(result, true);
+      }
+    }),
+  );
+
   it.effect("returns false when a command is not on PATH", () =>
     Effect.gen(function* () {
       const env = {
@@ -1142,6 +1235,46 @@ describe("editor install locations", () => {
           command: executable,
           args: [...args],
         });
+      },
+    );
+  }
+
+  for (const row of [
+    {
+      platform: "darwin",
+      scripts: "Library/Application Support/JetBrains/Toolbox/scripts",
+      suffix: "",
+    },
+    { platform: "linux", scripts: ".local/share/JetBrains/Toolbox/scripts", suffix: "" },
+    { platform: "win32", scripts: "JetBrains/Toolbox/scripts", suffix: ".cmd" },
+    {
+      platform: "win32",
+      scripts: "JetBrains/Toolbox/scripts",
+      suffix: ".cmd",
+      install: "Programs/IntelliJ IDEA/bin/idea64.exe",
+    },
+  ] as const) {
+    it.skipIf(windowsHost)(
+      `discovers a numbered JetBrains Toolbox script on ${row.platform}${"install" in row ? " after canonical installs" : ""}`,
+      async () => {
+        const { join } = await import("node:path");
+        const home = await makeTempDir();
+        for (const name of ["idea10", "idea2", "ideax3"]) {
+          await makeExecutable(home, `${row.scripts}/${name}${row.suffix}`);
+        }
+        const install = "install" in row ? await makeExecutable(home, row.install) : undefined;
+        const editor = EDITORS.find((candidate) => candidate.id === "idea")!;
+        const resolved = await resolveEditorCommand(editor, {
+          platform: row.platform,
+          env: {
+            HOME: home,
+            LOCALAPPDATA: home,
+            PATH: join(home, "empty"),
+            PATHEXT: ".COM;.EXE;.BAT;.CMD",
+          },
+          systemRoot: `${home}/system`,
+        });
+        assert.equal(resolved?.command, install ?? join(home, row.scripts, `idea2${row.suffix}`));
       },
     );
   }

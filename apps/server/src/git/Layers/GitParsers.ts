@@ -61,11 +61,17 @@ export function isMissingGitCwdError(error: GitCommandError): boolean {
   );
 }
 
-/** True when git refused the folder, either outright or as a bare repository it may not open. */
+/**
+ * True when git refused the folder, either outright or as a bare repository it may not open.
+ * Git 2.56+ reports a `.git` gitfile pointing nowhere as "gitfile does not point to a valid
+ * repository"; older releases said "not a git repository".
+ */
 export function isNotGitRepositoryStderr(stderr: string): boolean {
   const normalized = stderr.toLowerCase();
   return (
-    normalized.includes("not a git repository") || normalized.includes("cannot use bare repository")
+    normalized.includes("not a git repository") ||
+    normalized.includes("gitfile does not point to a valid repository") ||
+    normalized.includes("cannot use bare repository")
   );
 }
 
@@ -351,11 +357,10 @@ export function sanitizeRemoteName(value: string): string {
 
 export function parseRemoteFetchUrls(stdout: string): Map<string, string> {
   const remotes = new Map<string, string>();
-  for (const line of stdout.split("\n")) {
-    const trimmed = line.trim();
-    if (trimmed.length === 0) continue;
+  for (const line of stdout.split(/\r?\n/)) {
+    // Git uses a tab before the URL and one space before the direction; both can occur in URLs.
     // Partial clones append the filter, e.g. `(fetch) [blob:none]`.
-    const match = /^(\S+)\s+(\S+)\s+\((fetch|push)\)(?:\s+\[[^\]]+\])?$/.exec(trimmed);
+    const match = /^(\S+)\t(.+) \((fetch|push)\)(?:\s+\[[^\]]+\])?$/.exec(line);
     if (!match) continue;
     const [, remoteName = "", remoteUrl = "", direction = ""] = match;
     if (direction !== "fetch" || remoteName.length === 0 || remoteUrl.length === 0) {
@@ -475,7 +480,8 @@ export function parseDefaultBranchFromRemoteHeadRef(
     return null;
   }
   const branch = trimmed.slice(prefix.length).trim();
-  return branch.length > 0 ? branch : null;
+  // A plain (non-symbolic) `<remote>/HEAD` ref resolves to itself, not to a branch.
+  return branch.length > 0 && branch !== "HEAD" ? branch : null;
 }
 
 export function createGitCommandError(

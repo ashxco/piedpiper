@@ -14,11 +14,14 @@ import { isPendingProviderSnapshot, makeManagedServerProvider } from "./makeMana
 import {
   CLAUDE_CLI_MAINTENANCE,
   CODEX_CLI_MAINTENANCE,
+  CODEX_NATIVE_CHANNEL_URL,
+  fetchCodexNativeLatestVersion,
   classifyProviderInstall,
   deriveProviderVersionAdvisory,
   fetchNpmLatestVersion,
   makeCachedLatestVersionLookup,
   makeProviderWithVersionAdvisory,
+  parseCodexNativeLatestVersion,
   parseNpmLatestVersion,
   quoteCommandExecutable,
   npmGlobalPrefixFromCommandPath,
@@ -73,7 +76,35 @@ describe("parseNpmLatestVersion", () => {
   });
 });
 
+describe("parseCodexNativeLatestVersion", () => {
+  it("reads the release version from the channel tag", () => {
+    assert.equal(parseCodexNativeLatestVersion({ tag_name: "rust-v0.172.0" }), "0.172.0");
+  });
+
+  it("rejects malformed channel documents", () => {
+    for (const payload of [null, {}, { tag_name: 1 }, { tag_name: "v0.172.0" }]) {
+      assert.equal(parseCodexNativeLatestVersion(payload), null);
+    }
+  });
+});
+
 const fetchReturning = (response: Response) => (async () => response) as unknown as typeof fetch;
+
+describe("fetchCodexNativeLatestVersion", () => {
+  it.effect("reads the native release channel", () =>
+    Effect.gen(function* () {
+      const urls: Array<string> = [];
+      const version = yield* fetchCodexNativeLatestVersion({
+        fetch: (async (url: string) => {
+          urls.push(url);
+          return Response.json({ tag_name: "rust-v0.172.0" });
+        }) as unknown as typeof fetch,
+      });
+      assert.equal(version, "0.172.0");
+      assert.deepEqual(urls, [CODEX_NATIVE_CHANNEL_URL]);
+    }),
+  );
+});
 
 describe("fetchNpmLatestVersion", () => {
   it.effect("escapes the package scope in the registry URL", () =>
@@ -437,6 +468,32 @@ describe("makeProviderWithVersionAdvisory", () => {
       });
       assert.equal((yield* decorated.getSnapshot).versionAdvisory?.latestVersion, "2.0.0");
       assert.equal(decorated.marker, "kept");
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("compares a standalone Codex with its native release channel, not npm", () =>
+    Effect.gen(function* () {
+      const settings = yield* makeLiveSettings;
+      const { provider, publishBase } = yield* makeHarness(baseSnapshot);
+      const keys: Array<string> = [];
+      const decorated = yield* makeProviderWithVersionAdvisory(provider, CODEX_CLI_MAINTENANCE, {
+        lookupLatestVersion: (key) =>
+          Effect.sync(() => {
+            keys.push(key);
+            return key === CODEX_NATIVE_CHANNEL_URL ? "1.0.0" : "2.0.0";
+          }),
+        readCommandPaths: () =>
+          Effect.succeed({
+            commandPath: "/Users/me/.local/bin/codex",
+            realCommandPath: "/Users/me/.codex/packages/standalone/releases/1/codex",
+          }),
+      }).pipe(Effect.provide(settings.layer));
+
+      yield* publishBase(baseSnapshot);
+      yield* settle;
+      assert.isTrue(keys.length > 0);
+      assert.isTrue(keys.every((key) => key === CODEX_NATIVE_CHANNEL_URL));
+      assert.equal((yield* decorated.getSnapshot).versionAdvisory?.status, "current");
     }).pipe(Effect.scoped),
   );
 

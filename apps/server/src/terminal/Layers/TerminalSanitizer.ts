@@ -32,6 +32,18 @@ function isControlSequenceCancel(codePoint: number): boolean {
   return codePoint === 0x18 || codePoint === 0x1a;
 }
 
+// xterm executes C0 controls inside CSI and ignores DEL. Keep their effects when removing a query.
+function splitCsiBody(value: string): { body: string; controls: string } {
+  let body = "";
+  let controls = "";
+  for (const character of value) {
+    const code = character.charCodeAt(0);
+    if (code < 0x20) controls += character;
+    else if (code !== 0x7f) body += character;
+  }
+  return { body, controls };
+}
+
 function shouldStripCsiSequence(body: string, finalByte: string): boolean {
   if (finalByte === "n") {
     return true;
@@ -39,7 +51,7 @@ function shouldStripCsiSequence(body: string, finalByte: string): boolean {
   if (finalByte === "R" && /^[0-9;?]*$/.test(body)) {
     return true;
   }
-  if (finalByte === "c" && /^[>0-9;?]*$/.test(body)) {
+  if (finalByte === "c" && /^[>=0-9;?]*$/.test(body)) {
     return true;
   }
   // DECRQM queries ($p) and DECRPM replies ($y); the `$` guard keeps DECSTR (!p) and DECSCL ("p).
@@ -77,10 +89,10 @@ function stripStringTerminator(value: string): string {
   return value;
 }
 
-function findStringTerminatorIndex(input: string, start: number): number | null {
+function findStringTerminatorIndex(input: string, start: number, isOsc: boolean): number | null {
   for (let index = start; index < input.length; index += 1) {
     const codePoint = input.charCodeAt(index);
-    if (codePoint === 0x07 || codePoint === 0x9c || isControlSequenceCancel(codePoint)) {
+    if ((isOsc && codePoint === 0x07) || codePoint === 0x9c || isControlSequenceCancel(codePoint)) {
       return index + 1;
     }
     // Like xterm.js, an ESC that does not start ST ends the string and begins the next sequence.
@@ -147,6 +159,11 @@ export function sanitizeTerminalHistoryChunk(
         return { visibleText, pendingControlSequence: input.slice(index) };
       }
 
+      if (nextCodePoint === 0x5a) {
+        index += 2;
+        continue;
+      }
+
       if (nextCodePoint === 0x5b) {
         let cursor = index + 2;
         while (cursor < input.length) {
@@ -160,9 +177,11 @@ export function sanitizeTerminalHistoryChunk(
           const cancelled = isControlSequenceCancel(cursorCodePoint);
           if (cancelled || isCsiFinalByte(cursorCodePoint)) {
             const sequence = input.slice(index, cursor + 1);
-            const body = input.slice(index + 2, cursor);
+            const { body, controls } = splitCsiBody(input.slice(index + 2, cursor));
             if (cancelled || !shouldStripCsiSequence(body, input[cursor] ?? "")) {
               append(sequence);
+            } else {
+              append(controls);
             }
             index = cursor + 1;
             break;
@@ -184,6 +203,7 @@ export function sanitizeTerminalHistoryChunk(
         const terminatorIndex = findStringTerminatorIndex(
           input,
           Math.max(index + 2, pendingScanStart),
+          nextCodePoint === 0x5d,
         );
         if (terminatorIndex === null) {
           return { visibleText, pendingControlSequence: input.slice(index) };
@@ -222,9 +242,11 @@ export function sanitizeTerminalHistoryChunk(
         const cancelled = isControlSequenceCancel(cursorCodePoint);
         if (cancelled || isCsiFinalByte(cursorCodePoint)) {
           const sequence = input.slice(index, cursor + 1);
-          const body = input.slice(index + 1, cursor);
+          const { body, controls } = splitCsiBody(input.slice(index + 1, cursor));
           if (cancelled || !shouldStripCsiSequence(body, input[cursor] ?? "")) {
             append(sequence);
+          } else {
+            append(controls);
           }
           index = cursor + 1;
           break;
@@ -241,6 +263,7 @@ export function sanitizeTerminalHistoryChunk(
       const terminatorIndex = findStringTerminatorIndex(
         input,
         Math.max(index + 1, pendingScanStart),
+        codePoint === 0x9d,
       );
       if (terminatorIndex === null) {
         return { visibleText, pendingControlSequence: input.slice(index) };

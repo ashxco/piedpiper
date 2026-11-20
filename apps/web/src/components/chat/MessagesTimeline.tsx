@@ -1531,10 +1531,11 @@ function MessageImageAttachments({
                 alt={image.name}
                 decoding="async"
                 className={cn(
-                  "transform-gpu object-cover",
+                  "transform-gpu",
+                  // A lone image keeps a fixed height, so very wide or tall ones are letterboxed, not cropped.
                   singleImage
-                    ? "block h-48 w-auto min-w-24 max-w-full"
-                    : "h-full max-h-[220px] w-full",
+                    ? "block h-48 w-auto min-w-24 max-w-full object-contain"
+                    : "h-full max-h-[220px] w-full object-cover",
                 )}
                 onLoad={onTimelineImageLoad}
                 onError={onTimelineImageLoad}

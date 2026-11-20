@@ -313,6 +313,48 @@ describe("codexStderrExcerpt", () => {
     expect(tail.endsWith("b".repeat(500))).toBe(true);
     expect(codexStderrExcerpt(`Error: ${"x".repeat(1_000)}`)).toHaveLength(512);
   });
+
+  it.each([
+    {
+      name: "launcher exit summary after a DNS failure",
+      stderr: [
+        "Starting provider",
+        'check LLM token: Get "https://llm-gateway.example/api/models": dial tcp: lookup llm-gateway.example: no such host',
+        "could not send metrics: no such host",
+        "launcher: plugin start failed: exit status 1",
+      ].join("\n"),
+      excerpt:
+        'check LLM token: Get "https://llm-gateway.example/api/models": dial tcp: lookup llm-gateway.example: no such host | could not send metrics: no such host | launcher: plugin start failed: exit status 1',
+    },
+    {
+      name: "labelled launcher exit summary after an authentication failure",
+      stderr: [
+        'oauth2: "invalid_request" "Errors.OIDCSession.RefreshTokenInvalid"',
+        "Error: provider launcher exited with code 1.",
+      ].join("\n"),
+      excerpt:
+        'oauth2: "invalid_request" "Errors.OIDCSession.RefreshTokenInvalid" | Error: provider launcher exited with code 1.',
+    },
+    {
+      name: "final launcher summary takes precedence over an earlier error label",
+      stderr: ["Error: starting provider", "lookup failed: no such host", "exit status 1"].join(
+        "\n",
+      ),
+      excerpt: "Error: starting provider | lookup failed: no such host | exit status 1",
+    },
+    {
+      name: "launcher summary alone",
+      stderr: "Error: command failed with exit code 1\n",
+      excerpt: "Error: command failed with exit code 1",
+    },
+    {
+      name: "launcher diagnostics remain bounded",
+      stderr: `${"x".repeat(1_000)}\noauth2: invalid_request\nError: launcher exited with code 1\n`,
+      excerpt: `…${`${"x".repeat(1_000)} | oauth2: invalid_request | Error: launcher exited with code 1`.slice(-511)}`,
+    },
+  ])("keeps the failure before a launcher exit summary: $name", ({ stderr, excerpt }) => {
+    expect(codexStderrExcerpt(stderr)).toBe(excerpt);
+  });
 });
 
 describe("process stderr events", () => {
@@ -887,6 +929,70 @@ describe("startSession", () => {
     }
   });
 
+  it.each([
+    [
+      "the configured reasoning summary",
+      { config: { model_reasoning_summary: "concise" } },
+      "concise",
+    ],
+    ["auto when none is configured", { config: {} }, "auto"],
+    ["auto when config/read fails", null, "auto"],
+  ])("starts turns with %s", async (_label, configReadResult, expected) => {
+    const manager = new CodexAppServerManager();
+    const versionCheck = vi
+      .spyOn(protocolHelpers, "assertSupportedCodexCliVersion")
+      .mockResolvedValue(undefined);
+    const configReads: Array<Record<string, unknown>> = [];
+    const turnStarts: Array<Record<string, unknown>> = [];
+    spawnMock.mockImplementationOnce(() => {
+      const child = createFakeChild();
+      readline.createInterface({ input: child.stdin }).on("line", (line) => {
+        const message = JSON.parse(line) as {
+          id?: number;
+          method?: string;
+          params?: Record<string, unknown>;
+        };
+        if (message.id === undefined || !message.method) return;
+        if (message.method === "config/read") {
+          configReads.push(message.params ?? {});
+          child.stdout.write(
+            `${JSON.stringify(
+              configReadResult === null
+                ? { id: message.id, error: { code: -32601, message: "unknown method" } }
+                : { id: message.id, result: configReadResult },
+            )}\n`,
+          );
+          return;
+        }
+        if (message.method === "turn/start") turnStarts.push(message.params ?? {});
+        const result = message.method.startsWith("thread/")
+          ? { thread: { id: "provider-thread" } }
+          : message.method === "turn/start"
+            ? { turn: { id: "turn-1" } }
+            : {};
+        child.stdout.write(`${JSON.stringify({ id: message.id, result })}\n`);
+      });
+      return child;
+    });
+
+    try {
+      const session = await manager.startSession({
+        threadId: asThreadId("thread-1"),
+        provider: "codex",
+        binaryPath: "codex",
+        runtimeMode: "full-access",
+        cwd: os.tmpdir(),
+      });
+      await manager.sendTurn({ threadId: session.threadId, input: "hi" });
+
+      expect(configReads).toEqual([{ cwd: os.tmpdir(), includeLayers: false }]);
+      expect(turnStarts.map((params) => params.summary)).toEqual([expected]);
+    } finally {
+      versionCheck.mockRestore();
+      manager.stopAll();
+    }
+  });
+
   it("sends approvalsReviewer on thread open only when the Codex CLI supports it", async () => {
     const manager = new CodexAppServerManager();
     const versionCheck = vi.spyOn(protocolHelpers, "assertSupportedCodexCliVersion");
@@ -1349,12 +1455,13 @@ describe("session disposal and process exit", () => {
   it("rejects new requests immediately once the session is stopping", async () => {
     vi.useFakeTimers();
     try {
-      const { manager, internals, context } = createProcessHarness();
+      const { manager, internals, context, child } = createProcessHarness();
       manager.stopSession(asThreadId("thread_1"));
 
       await expect(internals.sendRequest(context, "thread/start", {})).rejects.toThrow(
         "thread/start failed: Session stopped before request completed.",
       );
+      child.emit("exit", 0, null);
       expect(vi.getTimerCount()).toBe(0);
     } finally {
       vi.useRealTimers();
@@ -1374,7 +1481,7 @@ describe("sendTurn", () => {
 
     expect(sendRequest).toHaveBeenCalledWith(context, "turn/start", {
       threadId: "thread_1",
-      summary: "detailed",
+      summary: "auto",
       input: [
         { type: "text", text: "Inspect this image", text_elements: [] },
         { type: "localImage", path: "/tmp/attachments/img.png" },
@@ -1409,7 +1516,7 @@ describe("sendTurn", () => {
     expect(requireSession).toHaveBeenCalledWith("thread_1");
     expect(sendRequest).toHaveBeenCalledWith(context, "turn/start", {
       threadId: "thread_1",
-      summary: "detailed",
+      summary: "auto",
       input: [
         {
           type: "text",
@@ -1476,7 +1583,7 @@ describe("sendTurn", () => {
 
     expect(sendRequest).toHaveBeenCalledWith(context, "turn/start", {
       threadId: "thread_1",
-      summary: "detailed",
+      summary: "auto",
       input: [
         {
           type: "image",
@@ -1498,7 +1605,7 @@ describe("sendTurn", () => {
 
     expect(sendRequest).toHaveBeenCalledWith(context, "turn/start", {
       threadId: "thread_1",
-      summary: "detailed",
+      summary: "auto",
       input: [
         {
           type: "text",
@@ -1527,7 +1634,7 @@ describe("sendTurn", () => {
 
     expect(sendRequest).toHaveBeenCalledWith(context, "turn/start", {
       threadId: "thread_1",
-      summary: "detailed",
+      summary: "auto",
       input: [
         {
           type: "text",
@@ -1557,7 +1664,7 @@ describe("sendTurn", () => {
 
     expect(sendRequest).toHaveBeenCalledWith(context, "turn/start", {
       threadId: "thread_1",
-      summary: "detailed",
+      summary: "auto",
       input: [
         {
           type: "text",
@@ -1588,7 +1695,7 @@ describe("sendTurn", () => {
 
     expect(sendRequest).toHaveBeenNthCalledWith(1, context, "turn/start", {
       threadId: "thread_1",
-      summary: "detailed",
+      summary: "auto",
       input: [{ type: "text", text: "Think hard", text_elements: [] }],
       model: "gpt-5.3-codex",
       effort: "high",
@@ -1599,7 +1706,7 @@ describe("sendTurn", () => {
     });
     expect(sendRequest).toHaveBeenNthCalledWith(2, context, "turn/start", {
       threadId: "thread_1",
-      summary: "detailed",
+      summary: "auto",
       input: [{ type: "text", text: "No mode", text_elements: [] }],
       model: "gpt-5.3-codex",
     });
@@ -3039,7 +3146,7 @@ describe("capacity retries", () => {
         threadId: "provider_1",
         input: [],
         model: "gpt-5.3-codex",
-        summary: "detailed",
+        summary: "auto",
       });
 
       const startsBefore = h.emitted.filter((event) => event.method === "turn/started").length;

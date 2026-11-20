@@ -312,6 +312,40 @@ describe("GitActionsControl live thread branch sync", () => {
   });
 });
 
+describe("GitActionsControl per checkout", () => {
+  afterEach(() => {
+    resetStoreThreads();
+    vi.clearAllMocks();
+    document.body.innerHTML = "";
+  });
+
+  it("starts fresh in another checkout, but keeps its state across threads in one", async () => {
+    storeState.threads = [];
+    const host = document.createElement("div");
+    document.body.append(host);
+    const screen = await render(<GitActionsControl gitCwd={GIT_CWD} activeThreadId={THREAD_A} />, {
+      container: host,
+    });
+
+    try {
+      await vi.waitFor(() => expect(host.querySelector("button")).not.toBeNull());
+      const first = host.querySelector("button");
+      await screen.rerender(<GitActionsControl gitCwd={GIT_CWD} activeThreadId={THREAD_B} />);
+      expect(host.querySelector("button")).toBe(first);
+
+      // Dialog state such as a restored commit message must not follow into another repository.
+      await screen.rerender(
+        <GitActionsControl gitCwd="/repo/other-project" activeThreadId={THREAD_B} />,
+      );
+      await vi.waitFor(() => expect(host.querySelector("button")).not.toBeNull());
+      expect(host.querySelector("button")).not.toBe(first);
+    } finally {
+      await screen.unmount();
+      host.remove();
+    }
+  });
+});
+
 let rejectInit: (error: Error) => void = () => undefined;
 
 describe("GitActionsControl failure toasts", () => {

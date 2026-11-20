@@ -1,7 +1,7 @@
 import { Schema } from "effect";
 import { describe, expect, it } from "vitest";
 
-import { ProjectConfigFile } from "./project";
+import { ProjectConfigFile, ProjectWriteFileInput, ProjectWriteFileResult } from "./project";
 
 const decode = Schema.decodeUnknownExit(ProjectConfigFile);
 
@@ -24,5 +24,32 @@ describe("ProjectConfigFile", () => {
     expect(decode({ scripts: [{ name: "Dev", command: "x", icon: "rocket" }] })._tag).toBe(
       "Failure",
     );
+  });
+});
+
+describe("ProjectWriteFileInput", () => {
+  it("keeps whitespace at the ends of a file name", () => {
+    const result = Schema.decodeUnknownExit(ProjectWriteFileInput)({
+      cwd: " /repo ",
+      relativePath: " notes .md ",
+      contents: "",
+    });
+    expect(result._tag).toBe("Success");
+    if (result._tag === "Success") {
+      expect(result.value.cwd).toBe("/repo");
+      expect(result.value.relativePath).toBe(" notes .md ");
+    }
+    const written = Schema.decodeUnknownExit(ProjectWriteFileResult)({ relativePath: " a.md" });
+    expect(written._tag === "Success" && written.value.relativePath).toBe(" a.md");
+  });
+
+  it("rejects an empty file name", () => {
+    expect(
+      Schema.decodeUnknownExit(ProjectWriteFileInput)({
+        cwd: "/repo",
+        relativePath: "",
+        contents: "",
+      })._tag,
+    ).toBe("Failure");
   });
 });

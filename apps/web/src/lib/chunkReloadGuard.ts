@@ -1,21 +1,26 @@
 // A server upgrade under an open tab removes the old hashed chunks, so one reload picks up the
-// fresh index.html. A sessionStorage flag stops a persistent failure from looping, and a clean
-// boot clears it so the next stale deploy gets its own single reload.
+// fresh index.html. The sessionStorage guard is keyed by build and kept across boots: a chunk
+// loaded after boot (a lazy route or panel) can fail on every visit, and clearing the guard after
+// a clean boot turned that into a reload each time. A new build gets its own single reload.
 const CHUNK_RELOAD_GUARD_KEY = "piedpiper:chunk-load-reloaded";
 
+// The entry chunk's hashed URL changes with every production build, even when the version doesn't.
+const CURRENT_BUILD = `${import.meta.env.APP_VERSION}:${import.meta.url}`;
+
 /**
- * Called from the `vite:preloadError` listener. Reloads at most once per failure streak and
- * returns whether it did, so the caller knows whether to swallow the event.
+ * Called from the `vite:preloadError` listener. Reloads at most once per build and returns
+ * whether it did, so the caller knows whether to swallow the event.
  */
 export function reloadOnceForChunkLoadError(
   getStorage: () => Storage = () => window.sessionStorage,
   reload: () => void = () => window.location.reload(),
+  build: string = CURRENT_BUILD,
 ): boolean {
   let alreadyReloaded: boolean;
   try {
     const storage = getStorage();
-    alreadyReloaded = storage.getItem(CHUNK_RELOAD_GUARD_KEY) === "1";
-    if (!alreadyReloaded) storage.setItem(CHUNK_RELOAD_GUARD_KEY, "1");
+    alreadyReloaded = storage.getItem(CHUNK_RELOAD_GUARD_KEY) === build;
+    if (!alreadyReloaded) storage.setItem(CHUNK_RELOAD_GUARD_KEY, build);
   } catch {
     // Without storage the guard cannot survive a reload, so let the error surface instead of looping.
     return false;
@@ -23,17 +28,6 @@ export function reloadOnceForChunkLoadError(
   if (alreadyReloaded) return false;
   reload();
   return true;
-}
-
-/** Clears the guard after a clean boot so a later stale deploy can reload again. */
-export function clearChunkReloadGuard(
-  getStorage: () => Storage = () => window.sessionStorage,
-): void {
-  try {
-    getStorage().removeItem(CHUNK_RELOAD_GUARD_KEY);
-  } catch {
-    // Blocked storage never held the flag.
-  }
 }
 
 // Shared between main.tsx (which installs the listener before any split chunk loads) and appStartup.
@@ -66,30 +60,26 @@ export function installChunkLoadErrorReload(
   return () => target.removeEventListener("vite:preloadError", onPreloadError);
 }
 
-/** How long after the first resolved route a chunk failure still counts as part of the boot. */
-const CHUNK_RELOAD_GUARD_REARM_DELAY_MS = 10_000;
+// Browsers cache a failed dynamic import per document, so only a reload can retry it.
+const CHUNK_LOAD_ERROR_PREFIXES = [
+  "Failed to fetch dynamically imported module", // Chromium
+  "error loading dynamically imported module", // Firefox
+  "Importing a module script failed", // Safari
+];
+
+export function isChunkLoadError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : undefined;
+  return (
+    message !== undefined && CHUNK_LOAD_ERROR_PREFIXES.some((prefix) => message.startsWith(prefix))
+  );
+}
 
 /**
- * Clears the guard a while after the first resolved route, so React.lazy chunks requested while
- * that route renders still count as the same failure streak instead of re-arming a reload loop.
+ * Whether an error view's "Try again" needs a full reload: a failed chunk stays failed for this
+ * document, and a lazy chunk that failed surfaces as an unrelated render error.
  */
-export function scheduleChunkReloadGuardRearm(
-  options: {
-    delayMs?: number;
-    hasFailed?: () => boolean;
-    clear?: () => void;
-    setTimer?: (callback: () => void, delayMs: number) => unknown;
-  } = {},
-): void {
-  const {
-    delayMs = CHUNK_RELOAD_GUARD_REARM_DELAY_MS,
-    hasFailed = hasChunkLoadFailed,
-    clear = () => clearChunkReloadGuard(),
-    setTimer = (callback, delay) => setTimeout(callback, delay),
-  } = options;
-  setTimer(() => {
-    if (!hasFailed()) clear();
-  }, delayMs);
+export function shouldRetryByReloading(error: unknown): boolean {
+  return isChunkLoadError(error) || hasChunkLoadFailed();
 }
 
 /** Test-only reset of the module state. */

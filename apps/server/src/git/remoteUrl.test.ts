@@ -68,6 +68,16 @@ describe("parseRemoteUrl", () => {
     expect(parseRemoteUrl("https://host.example:8443/a/b")?.port).toBe("8443");
   });
 
+  it("reads a userless scp remote with a single path component", () => {
+    expect(parseRemoteUrl("gitserver:repo.git")).toEqual({
+      host: "gitserver",
+      path: "repo.git",
+      isSsh: true,
+      port: null,
+    });
+    expect(parseRemoteUrl("C:repo.git")).toBeNull();
+  });
+
   it("rejects local paths", () => {
     expect(parseRemoteUrl("/tmp/repo.git")).toBeNull();
     expect(parseRemoteUrl("./repo")).toBeNull();

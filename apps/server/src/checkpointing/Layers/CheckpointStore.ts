@@ -11,7 +11,7 @@
  */
 import { randomUUID } from "node:crypto";
 
-import { Effect, Layer, FileSystem, Option, Path, Schedule } from "effect";
+import { Effect, Exit, Fiber, Layer, FileSystem, Option, Path, Schedule } from "effect";
 
 import {
   CheckpointInvariantError,
@@ -19,7 +19,11 @@ import {
   CheckpointUnsupportedError,
 } from "../Errors.ts";
 import { GitCommandError } from "@piedpiper/contracts";
-import { GitCore, type ExecuteGitInput } from "../../git/Services/GitCore.ts";
+import {
+  GitCore,
+  type ExecuteGitInput,
+  type ExecuteGitResult,
+} from "../../git/Services/GitCore.ts";
 import {
   GIT_PLAIN_DIFF_ARGS,
   quoteGitCommand,
@@ -31,7 +35,7 @@ import {
   type CheckpointStoreShape,
   type DiffCheckpointsInput,
 } from "../Services/CheckpointStore.ts";
-import { CheckpointRef } from "@piedpiper/contracts";
+import { CHECKPOINT_DIFF_TRUNCATED_MARKER, CheckpointRef } from "@piedpiper/contracts";
 
 // core.splitIndex governs every index Git writes, so the scratch index could expire the
 // sharedindex.* file the real .git/index still references.
@@ -105,8 +109,20 @@ const CHECKPOINT_DIFF_RENDER_ARGS = [
 const CHECKPOINT_NUMSTAT_MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
 // Patches above this are cut and marked so a lockfile-sized turn still renders in the diff panel.
 export const CHECKPOINT_PATCH_MAX_OUTPUT_BYTES = 10_000_000;
-export const CHECKPOINT_PATCH_TRUNCATED_MARKER = "\n\n[truncated]";
+export const CHECKPOINT_PATCH_TRUNCATED_MARKER = CHECKPOINT_DIFF_TRUNCATED_MARKER;
 const CHECKPOINT_STAGING_LIST_MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
+// Reflog subjects that only point a ref at an existing commit. Anything else counts as creating
+// one, so an unknown subject keeps its commit attributed.
+const REF_MOVE_REFLOG_SUBJECT =
+  /^(?:$|(?:checkout|reset|branch|clone|fetch)\b|[^:]*\((?:start|finish|abort|reset)\): |(?:merge|pull|rebase|cherry-pick)\b[^()]*: fast-forward$)/i;
+
+/** Whether `git version` output names a Git with `--diff-merges=remerge` (2.36 and later). */
+export function gitSupportsRemergeDiff(versionOutput: string): boolean {
+  const match = /^git version (\d+)\.(\d+)/.exec(versionOutput);
+  if (match === null) return false;
+  const major = Number(match[1]);
+  return major > 2 || (major === 2 && Number(match[2]) >= 36);
+}
 const CHECKPOINT_RECOVERY_MAX_CANDIDATES = 64;
 const CHECKPOINT_TRANSIENT_RETRY_TIMES = 2;
 const CHECKPOINT_TRANSIENT_RETRY_DELAY = "75 millis";
@@ -254,38 +270,9 @@ const makeCheckpointStore = Effect.gen(function* () {
       }),
     );
 
-  const executeDurableWrite = Effect.fn("executeDurableCheckpointWrite")(function* (
-    input: ExecuteGitInput,
-  ) {
-    const writeoutOnlyInput = {
-      ...input,
-      args: checkpointWriteArgsWithoutFullFsync(input.args),
-    };
-    if (writeoutOnlyCwds.has(input.cwd)) {
-      return yield* executeCaptureGit(writeoutOnlyInput);
-    }
-    const run = git.execute({ ...input, allowNonZeroExit: true });
-    let result = yield* run;
-    for (
-      let attempt = 0;
-      attempt < CHECKPOINT_TRANSIENT_RETRY_TIMES &&
-      result.code !== 0 &&
-      isTransientCheckpointGitFailure(result.stderr);
-      attempt++
-    ) {
-      yield* Effect.sleep(CHECKPOINT_TRANSIENT_RETRY_DELAY);
-      result = yield* run;
-    }
-    if (result.code === 0) {
-      return result;
-    }
-    if (shouldRetryCheckpointWriteWithoutFullFsync(process.platform, result.stderr)) {
-      const fallback = yield* executeCaptureGit(writeoutOnlyInput);
-      writeoutOnlyCwds.add(input.cwd);
-      return fallback;
-    }
+  const durableWriteError = (input: ExecuteGitInput, result: ExecuteGitResult) => {
     const stderr = result.stderr.trim();
-    return yield* new GitCommandError({
+    return new GitCommandError({
       operation: input.operation,
       command: quoteGitCommand(input.args),
       cwd: input.cwd,
@@ -294,6 +281,53 @@ const makeCheckpointStore = Effect.gen(function* () {
           ? `${quoteGitCommand(input.args)} failed: ${stderr}`
           : `${quoteGitCommand(input.args)} failed with code ${result.code}.`,
     });
+  };
+
+  // `acceptedExitCode` is a non-zero exit that still means success, like `add --ignore-errors`
+  // reporting the files it skipped.
+  const executeDurableWrite = Effect.fn("executeDurableCheckpointWrite")(function* (
+    input: ExecuteGitInput,
+    acceptedExitCode?: number,
+  ) {
+    const succeeded = (code: number) => code === 0 || code === acceptedExitCode;
+    const writeoutOnlyInput = {
+      ...input,
+      args: checkpointWriteArgsWithoutFullFsync(input.args),
+    };
+    const runWriteoutOnly =
+      acceptedExitCode === undefined
+        ? executeCaptureGit(writeoutOnlyInput)
+        : executeCaptureGit({ ...writeoutOnlyInput, allowNonZeroExit: true }).pipe(
+            Effect.flatMap((result) =>
+              succeeded(result.code)
+                ? Effect.succeed(result)
+                : Effect.fail(durableWriteError(writeoutOnlyInput, result)),
+            ),
+          );
+    if (writeoutOnlyCwds.has(input.cwd)) {
+      return yield* runWriteoutOnly;
+    }
+    const run = git.execute({ ...input, allowNonZeroExit: true });
+    let result = yield* run;
+    for (
+      let attempt = 0;
+      attempt < CHECKPOINT_TRANSIENT_RETRY_TIMES &&
+      !succeeded(result.code) &&
+      isTransientCheckpointGitFailure(result.stderr);
+      attempt++
+    ) {
+      yield* Effect.sleep(CHECKPOINT_TRANSIENT_RETRY_DELAY);
+      result = yield* run;
+    }
+    if (succeeded(result.code)) {
+      return result;
+    }
+    if (shouldRetryCheckpointWriteWithoutFullFsync(process.platform, result.stderr)) {
+      const fallback = yield* runWriteoutOnly;
+      writeoutOnlyCwds.add(input.cwd);
+      return fallback;
+    }
+    return yield* durableWriteError(input, result);
   });
 
   const isGitRepository: CheckpointStoreShape["isGitRepository"] = (cwd) =>
@@ -399,24 +433,34 @@ const makeCheckpointStore = Effect.gen(function* () {
         });
         yield* seedScratchIndex;
 
-        const stageFiles = (mode: "-A" | "-u", exclusions: ReadonlyArray<string>) =>
-          executeDurableWrite({
-            operation,
-            cwd: input.cwd,
-            args: [
-              ...WORKSPACE_GIT_HARDENED_CONFIG_ARGS,
-              ...CHECKPOINT_SCRATCH_INDEX_CONFIG_ARGS,
-              ...CHECKPOINT_DURABLE_WRITE_ARGS,
-              ...CHECKPOINT_STAGE_CONFIG_ARGS,
-              ...CHECKPOINT_LONG_PATHS_ARGS,
-              "add",
-              mode,
-              "--",
-              ".",
-              ...exclusions,
-            ],
-            env: commitEnv,
-          });
+        const stageFiles = (
+          mode: "-A" | "-u",
+          exclusions: ReadonlyArray<string>,
+          ignoreErrors = false,
+        ) =>
+          executeDurableWrite(
+            {
+              operation,
+              cwd: input.cwd,
+              args: [
+                ...WORKSPACE_GIT_HARDENED_CONFIG_ARGS,
+                ...CHECKPOINT_SCRATCH_INDEX_CONFIG_ARGS,
+                ...CHECKPOINT_DURABLE_WRITE_ARGS,
+                ...CHECKPOINT_STAGE_CONFIG_ARGS,
+                ...CHECKPOINT_LONG_PATHS_ARGS,
+                "add",
+                // Unreadable files keep their indexed version and unreadable new files are left out.
+                ...(ignoreErrors ? ["--ignore-errors"] : []),
+                mode,
+                "--",
+                ".",
+                ...exclusions,
+              ],
+              env: commitEnv,
+            },
+            // With --ignore-errors, exit 1 only reports the files it skipped.
+            ignoreErrors ? 1 : undefined,
+          );
 
         // add -A rejects a workspace its repository ignores, even when it holds tracked files.
         const stageIgnoredWorkspace = Effect.gen(function* () {
@@ -521,8 +565,7 @@ const makeCheckpointStore = Effect.gen(function* () {
                 exclusions.push(`:(exclude,literal)${entry}`);
               }
             }
-            if (exclusions.length === 0) return yield* error;
-            return yield* stageFiles("-A", exclusions);
+            return yield* stageFiles("-A", exclusions, true);
           }).pipe(
             Effect.timeoutOrElse({
               duration: CHECKPOINT_RECOVERY_TIMEOUT,
@@ -645,21 +688,6 @@ const makeCheckpointStore = Effect.gen(function* () {
       return false;
     }
 
-    yield* git.execute({
-      operation,
-      cwd: input.cwd,
-      args: [
-        ...WORKSPACE_GIT_HARDENED_CONFIG_ARGS,
-        ...CHECKPOINT_LONG_PATHS_ARGS,
-        "restore",
-        "--source",
-        commitOid,
-        "--worktree",
-        "--staged",
-        "--",
-        ".",
-      ],
-    });
     // Restoring or cleaning away the last file can remove a nested workspace directory.
     const recreateWorkspace = fs.makeDirectory(input.cwd, { recursive: true }).pipe(
       Effect.mapError(
@@ -687,6 +715,95 @@ const makeCheckpointStore = Effect.gen(function* () {
         ],
       });
     });
+    // Once a mutating command may have run, an interrupt must not leave restored files staged.
+    // Interrupting the command stops its child before this finalizer resets the index. The reset
+    // runs on its own fiber: the interrupted one would abort git's interruptible process wait.
+    let mutationStarted = false;
+    yield* Effect.addFinalizer((exit) =>
+      mutationStarted && Exit.hasInterrupts(exit)
+        ? resetIndex.pipe(Effect.ignore, Effect.forkDetach, Effect.flatMap(Fiber.await))
+        : Effect.void,
+    );
+    const sparseConfig = yield* git.execute({
+      operation,
+      cwd: input.cwd,
+      args: ["config", "--bool", "core.sparseCheckout"],
+      allowNonZeroExit: true,
+    });
+    const sparseCheckout = sparseConfig.stdout.trim() === "true";
+    const restore = [
+      ...WORKSPACE_GIT_HARDENED_CONFIG_ARGS,
+      ...CHECKPOINT_LONG_PATHS_ARGS,
+      "restore",
+      "--source",
+      commitOid,
+      "--worktree",
+      "--staged",
+    ];
+    // restore leaves skip-worktree paths alone. Outside a sparse checkout every such bit was set
+    // by hand and capture recorded the file, so override them all.
+    mutationStarted = true;
+    yield* git.execute({
+      operation,
+      cwd: input.cwd,
+      args: [...restore, ...(sparseCheckout ? [] : ["--ignore-skip-worktree-bits"]), "--", "."],
+    });
+    if (sparseCheckout) {
+      // Sparse exclusions stay excluded; only skip-worktree paths the rules select are manual.
+      const manual = yield* Effect.gen(function* () {
+        const listing = yield* git.execute({
+          operation,
+          cwd: input.cwd,
+          args: [
+            ...WORKSPACE_GIT_HARDENED_CONFIG_ARGS,
+            "ls-files",
+            "--full-name",
+            "--sparse",
+            "-v",
+            "-z",
+            "--",
+            ".",
+          ],
+          maxOutputBytes: CHECKPOINT_STAGING_LIST_MAX_OUTPUT_BYTES,
+          truncateOutputAtMaxBytes: true,
+        });
+        // A listing too large to read whole keeps the plain restore's result.
+        if (listing.stdoutTruncated) return [];
+        const skipped = listing.stdout
+          .split("\0")
+          .filter((record) => record.startsWith("S ") || record.startsWith("s "))
+          .map((record) => record.slice(2))
+          // Sparse directory entries are exclusions; stdin cannot carry non-UTF-8 names.
+          .filter((entry) => !entry.endsWith("/") && !entry.includes("\uFFFD"));
+        if (skipped.length === 0) return [];
+        const stdin = skipped.join("\0") + "\0";
+        // check-rules echoes a subset of its input, so the input size bounds its output.
+        const rules = yield* git.execute({
+          operation,
+          cwd: input.cwd,
+          args: ["sparse-checkout", "check-rules", "-z"],
+          stdin,
+          maxOutputBytes: Buffer.byteLength(stdin),
+        });
+        return rules.stdout.split("\0").filter((entry) => entry.length > 0);
+      }).pipe(
+        // A Git without ls-files --sparse or check-rules keeps the plain restore's result.
+        Effect.orElseSucceed((): string[] => []),
+      );
+      if (manual.length > 0) {
+        yield* git.execute({
+          operation,
+          cwd: input.cwd,
+          args: [
+            ...restore,
+            "--ignore-skip-worktree-bits",
+            "--pathspec-from-file=-",
+            "--pathspec-file-nul",
+          ],
+          stdin: manual.map((entry) => `:(top,literal)${entry}\0`).join(""),
+        });
+      }
+    }
     const clean = git.execute({
       operation,
       cwd: input.cwd,
@@ -759,7 +876,7 @@ const makeCheckpointStore = Effect.gen(function* () {
     yield* resetIndex;
 
     return true;
-  });
+  }, Effect.scoped);
 
   const runCheckpointDiff = Effect.fn("runCheckpointDiff")(function* (input: DiffCheckpointsInput) {
     const operation = "CheckpointStore.diffCheckpoints";
@@ -860,6 +977,21 @@ const makeCheckpointStore = Effect.gen(function* () {
     return { patch: truncated ? stdout.replace(/\uFFFD+$/, "") : stdout, truncated };
   });
 
+  // --diff-merges=remerge needs Git 2.36; the answer is cached once a probe succeeds.
+  let remergeDiffSupported: boolean | undefined;
+  const supportsRemergeDiff = Effect.fn("CheckpointStore.supportsRemergeDiff")(function* (
+    cwd: string,
+  ) {
+    if (remergeDiffSupported === undefined) {
+      const version = yield* git
+        .execute({ operation: "CheckpointStore.gitVersion", cwd, args: ["version"] })
+        .pipe(Effect.option);
+      if (Option.isNone(version)) return false;
+      remergeDiffSupported = gitSupportsRemergeDiff(version.value.stdout);
+    }
+    return remergeDiffSupported;
+  });
+
   const listAuthoredPaths: CheckpointStoreShape["listAuthoredPaths"] = Effect.fn(
     "listAuthoredPaths",
   )(function* (input) {
@@ -892,7 +1024,18 @@ const makeCheckpointStore = Effect.gen(function* () {
     const startBranch = checkpointHeadBranch(fromFields);
     const endBranch = checkpointHeadBranch(toFields);
 
-    const listPaths = (args: ReadonlyArray<string>) =>
+    const listLines = (args: ReadonlyArray<string>, stdin?: string) =>
+      git
+        .execute({
+          operation,
+          cwd: input.cwd,
+          // log.showSignature prints verification text into the output.
+          args: ["-c", "log.showSignature=false", ...args],
+          ...(stdin === undefined ? {} : { stdin }),
+          maxOutputBytes: CHECKPOINT_NUMSTAT_MAX_OUTPUT_BYTES,
+        })
+        .pipe(Effect.map((result) => result.stdout.split("\n").filter((line) => line !== "")));
+    const listPaths = (args: ReadonlyArray<string>, stdin?: string) =>
       git
         .execute({
           operation,
@@ -912,9 +1055,93 @@ const makeCheckpointStore = Effect.gen(function* () {
             ...GIT_PLAIN_DIFF_ARGS,
             "--",
           ],
+          ...(stdin === undefined ? {} : { stdin }),
           maxOutputBytes: CHECKPOINT_NUMSTAT_MAX_OUTPUT_BYTES,
         })
         .pipe(Effect.map((result) => result.stdout.split("\0")));
+
+    // Remerge diffs keep merge conflict fixes while leaving out clean upstream changes. Older Git
+    // gets dense combined diffs, which miss a conflict resolved to one side's version, so it also
+    // keeps every path more than one parent changed since the merge base.
+    const remerge = yield* supportsRemergeDiff(input.cwd);
+    const listMergeSharedPaths = (args: ReadonlyArray<string>, stdin?: string) =>
+      listLines(["rev-list", "--merges", "--parents", ...args], stdin).pipe(
+        Effect.flatMap((merges) =>
+          Effect.forEach(
+            merges,
+            Effect.fnUntraced(function* (merge) {
+              const parents = merge.split(" ").slice(1);
+              const [base] = yield* listLines(["merge-base", "--octopus", ...parents]).pipe(
+                // Unrelated histories have no merge base; the combined diff still applies.
+                Effect.orElseSucceed((): ReadonlyArray<string> => []),
+              );
+              if (base === undefined) return [];
+              const changed = yield* Effect.forEach(
+                parents,
+                (parent) => listPaths(["diff", base, parent]),
+                { concurrency: "unbounded" },
+              );
+              const counts = new Map<string, number>();
+              for (const filePath of changed.flatMap((paths) => [...new Set(paths)])) {
+                if (filePath === "") continue;
+                counts.set(filePath, (counts.get(filePath) ?? 0) + 1);
+              }
+              return [...counts].flatMap(([filePath, count]) => (count > 1 ? [filePath] : []));
+            }),
+            { concurrency: 4 },
+          ),
+        ),
+        Effect.map((lists) => lists.flat()),
+      );
+    const listCommitPaths = (args: ReadonlyArray<string>, stdin?: string) =>
+      remerge
+        ? listPaths(["log", ...args, "--format=", "--diff-merges=remerge"], stdin)
+        : Effect.all(
+            [
+              listPaths(["log", ...args, "--format=", "--cc"], stdin),
+              listMergeSharedPaths(args, stdin),
+            ],
+            { concurrency: "unbounded" },
+          ).pipe(Effect.map((lists) => lists.flat()));
+
+    // A commit is an import when a fetch delivered it since the previous checkpoint and no reflog
+    // in any worktree shows this repository creating it. --all covers every worktree's HEAD, and
+    // with --walk-reflogs --since compares each entry's own time.
+    const listImportedCommits = Effect.gen(function* () {
+      const entries = (yield* listLines([
+        "log",
+        "--walk-reflogs",
+        "--all",
+        `--since=@${capturedAt}`,
+        "--format=%H %gD %gs",
+      ])).map((line) => {
+        const [commit = "", selector = "", ...subject] = line.split(" ");
+        return {
+          commit,
+          fetched: selector.startsWith("refs/remotes/"),
+          subject: subject.join(" "),
+        };
+      });
+      // A push records commits this repository already had.
+      const fetchedTips = new Set(
+        entries
+          .filter((entry) => entry.fetched && entry.subject !== "update by push")
+          .map((entry) => entry.commit),
+      );
+      if (fetchedTips.size === 0) return fetchedTips;
+      // Fetching another branch can deliver a commit that was made here and pushed.
+      const createdHere = new Set(
+        entries
+          .filter((entry) => !entry.fetched && !REF_MOVE_REFLOG_SUBJECT.test(entry.subject))
+          .map((entry) => entry.commit),
+      );
+      const fetched = yield* listLines(
+        ["rev-list", `--since=@${capturedAt}`, "--stdin"],
+        `${[...fetchedTips, `^${startHead}`].join("\n")}\n`,
+      );
+      return new Set(fetched.filter((commit) => !createdHere.has(commit)));
+    });
+
     // Commits HEAD left behind count as discarded work (reset, amend, rebase) unless the
     // turn switched branches and the branch it left still holds them.
     const switchedBranch =
@@ -927,26 +1154,29 @@ const makeCheckpointStore = Effect.gen(function* () {
         args: ["merge-base", "--is-ancestor", startHead, startBranch],
         allowNonZeroExit: true,
       })).code === 0;
-    // Remerge diffs keep merge conflict fixes while leaving out clean upstream changes.
-    const pathLists = yield* Effect.all(
+    const [recentCommits, ...pathLists] = yield* Effect.all(
       [
+        // Commits dated before the starting checkpoint were brought in, not made during the turn.
+        listLines(["rev-list", `--since=@${capturedAt}`, `${startHead}..${endHead}`]),
         listPaths(["diff", startHead, fromRevision]),
         listPaths(["diff", endHead, toRevision]),
-        switchedBranch
-          ? Effect.succeed([])
-          : listPaths(["log", "--format=", "--diff-merges=remerge", `${endHead}..${startHead}`]),
-        // Commits dated before the starting checkpoint were brought in, not made during the turn.
-        listPaths([
-          "log",
-          "--format=",
-          "--diff-merges=remerge",
-          `--since=@${capturedAt}`,
-          `${startHead}..${endHead}`,
-        ]),
+        switchedBranch ? Effect.succeed([]) : listCommitPaths([`${endHead}..${startHead}`]),
       ],
       { concurrency: "unbounded" },
     );
-    return new Set(pathLists.flat().filter((filePath) => filePath.length > 0));
+    // Without readable reflogs every recent commit stays attributed, as before.
+    const importedCommits =
+      recentCommits.length === 0
+        ? new Set<string>()
+        : yield* listImportedCommits.pipe(Effect.orElseSucceed(() => new Set<string>()));
+    const ownCommits = recentCommits.filter((commit) => !importedCommits.has(commit));
+    const ownCommitPaths =
+      ownCommits.length === 0
+        ? []
+        : yield* listCommitPaths(["--no-walk=unsorted", "--stdin"], `${ownCommits.join("\n")}\n`);
+    return new Set(
+      [...pathLists.flat(), ...ownCommitPaths].filter((filePath) => filePath.length > 0),
+    );
   });
 
   const deleteCheckpointRefs: CheckpointStoreShape["deleteCheckpointRefs"] = Effect.fn(

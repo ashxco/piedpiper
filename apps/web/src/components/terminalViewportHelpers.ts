@@ -8,6 +8,7 @@ import type { Terminal, ITheme } from "@xterm/xterm";
 import {
   isTerminalAppShortcut,
   isTerminalClearShortcut,
+  isThreadNavigationShortcut,
   isTerminalCopyShortcut,
   isRepeatedTerminalCloseShortcut,
   shouldClearSelectionAfterTerminalCopy,
@@ -282,6 +283,17 @@ export function handleTerminalCustomKeyEvent(
 
   // Let app-level shortcuts bubble to ChatView's listener instead of xterm consuming them.
   if (isTerminalAppShortcut(event, keybindings, { platform })) {
+    return false;
+  }
+
+  // Thread navigation is handled by the sidebar's window listener, with the same context it uses
+  // while the terminal has focus, so a key the sidebar rejects still reaches the shell.
+  if (
+    isThreadNavigationShortcut(event, keybindings, {
+      platform,
+      context: { terminalFocus: true, terminalOpen: true },
+    })
+  ) {
     return false;
   }
 

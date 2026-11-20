@@ -45,6 +45,17 @@ describe("resolveClaudeSdkExecutablePath", () => {
     ).toBe(NPM_PACKAGE_EXE);
   });
 
+  it("follows the WinGet launcher to the package's native binary", () => {
+    const wingetDir = "C:\\Users\\dev\\AppData\\Local\\Microsoft\\WinGet";
+    const wingetExe = `${wingetDir}\\Packages\\Anthropic.ClaudeCode_Microsoft.Winget.Source_8wekyb3d8bbwe\\claude.exe`;
+    expect(
+      resolveOnWindows(`${wingetDir}\\Links\\claude.cmd`, [
+        `${wingetDir}\\Links\\claude.cmd`,
+        wingetExe,
+      ]),
+    ).toBe(wingetExe);
+  });
+
   it("follows an explicit mixed-case shim path", () => {
     expect(
       resolveOnWindows(`${NPM_DIR}\\claude.CMD`, [`${NPM_DIR}\\claude.CMD`, NPM_PACKAGE_EXE]),

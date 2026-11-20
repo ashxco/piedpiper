@@ -82,15 +82,19 @@ export interface ThemedTitleBarWindow {
   setTitleBarOverlay(options: TitleBarOverlayOptions): void;
 }
 
-/** Native controls and the opaque background do not follow the theme by themselves. */
+/**
+ * Native controls and the opaque background do not follow the theme by themselves. Only a
+ * window created with a title bar overlay may update it: Electron throws for any other.
+ */
 export function syncWindowTitleBarTheme(
   window: ThemedTitleBarWindow,
   platform: NodeJS.Platform,
   isDark: boolean,
+  hasTitleBarOverlay: boolean,
 ): void {
   if (platform === "darwin" || window.isDestroyed()) return;
   window.setBackgroundColor(windowBackground(isDark));
-  window.setTitleBarOverlay(titleBarOverlay(isDark));
+  if (hasTitleBarOverlay) window.setTitleBarOverlay(titleBarOverlay(isDark));
 }
 
 export interface WindowButtonsWindow {

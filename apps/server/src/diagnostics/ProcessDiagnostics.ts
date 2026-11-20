@@ -7,6 +7,7 @@ import type {
 import { DateTime, Effect } from "effect";
 
 import { runProcess } from "../processRunner.ts";
+import { POWERSHELL_UTF8_OUTPUT_PREFIX } from "../terminal/Layers/TerminalProcessTable.ts";
 
 export interface ProcessRow {
   readonly pid: number;
@@ -30,8 +31,8 @@ const QUERY_MAX_OUTPUT_BYTES = 4 * 1024 * 1024;
 const MAX_LISTED_PROCESSES = 500;
 const MAX_COMMAND_LENGTH = 2_000;
 const POSIX_QUERY_FORMAT = "pid=,ppid=,stat=,pcpu=,rss=,etime=,command=";
-const WINDOWS_QUERY =
-  "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,CommandLine,WorkingSetSize | ConvertTo-Json -Compress";
+// The UTF-8 prefix keeps non-ASCII names and command lines intact instead of the OEM code page.
+const WINDOWS_QUERY = `${POWERSHELL_UTF8_OUTPUT_PREFIX}Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,CommandLine,WorkingSetSize | ConvertTo-Json -Compress`;
 
 const POSIX_ROW_PATTERN =
   /^\s*(\d+)\s+(\d+)\s+(\S+)\s+([+-]?(?:\d+[.,]?\d*|[.,]\d+))\s+(\d+)\s+(\S+)\s+(.+)$/;

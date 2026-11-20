@@ -42,17 +42,25 @@ it.layer(TestLayer)("telemetry anonymous id", (it) => {
       yield* fs.remove(anonymousIdPath, { force: true });
       const tornWrites = FileSystem.FileSystem.of({
         ...fs,
-        writeFileString: (filePath, data, options) =>
-          fs.writeFileString(filePath, data.slice(0, Math.floor(data.length / 2)), options).pipe(
-            Effect.andThen(
-              Effect.fail(
-                PlatformError.systemError({
-                  _tag: "WriteZero",
-                  module: "FileSystem",
-                  method: "writeFileString",
-                  pathOrDescriptor: filePath,
+        open: (filePath, options) =>
+          fs.open(filePath, options).pipe(
+            Effect.map(
+              (file): FileSystem.File =>
+                Object.assign(Object.create(file), {
+                  writeAll: (buffer: Uint8Array) =>
+                    file.writeAll(buffer.subarray(0, Math.floor(buffer.length / 2))).pipe(
+                      Effect.andThen(
+                        Effect.fail(
+                          PlatformError.systemError({
+                            _tag: "WriteZero",
+                            module: "FileSystem",
+                            method: "writeAll",
+                            pathOrDescriptor: filePath,
+                          }),
+                        ),
+                      ),
+                    ),
                 }),
-              ),
             ),
           ),
       });

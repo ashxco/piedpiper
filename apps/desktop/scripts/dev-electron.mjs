@@ -25,6 +25,9 @@ const watchedDirectories = [
 const forcedShutdownTimeoutMs = 7_500;
 const restartDebounceMs = 120;
 const childTreeGracePeriodMs = 1_200;
+// Sampled before anything async, so a parent that dies during startup is still noticed.
+const parentPid = process.ppid;
+const parentWatchIntervalMs = 1_000;
 
 await waitForResources({
   baseDir: desktopDir,
@@ -222,3 +225,14 @@ process.once("SIGTERM", () => {
 process.once("SIGHUP", () => {
   void shutdown(129);
 });
+// A parent killed without forwarding a signal leaves us reparented (to a subreaper on Linux, not
+// necessarily PID 1), and nothing else would ever stop the restart loop. This only notices the
+// death of our direct parent, which `bun run --parallel` is (no shell in between). Windows never
+// reparents, and reading process.ppid there snapshots the process table.
+if (process.platform !== "win32") {
+  setInterval(() => {
+    if (process.ppid !== parentPid) {
+      void shutdown(129);
+    }
+  }, parentWatchIntervalMs).unref();
+}

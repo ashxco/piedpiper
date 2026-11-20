@@ -610,6 +610,12 @@ export const projectFaviconRouteLayer = HttpRouter.add(
   }),
 );
 
+// The app can approve agents and start threads in one click, so no other site may frame it.
+const SPA_FRAME_HEADERS = {
+  "Content-Security-Policy": "frame-ancestors 'none'",
+  "X-Frame-Options": "DENY",
+} as const;
+
 export const staticAndDevRouteLayer = HttpRouter.add(
   "GET",
   "*",
@@ -689,6 +695,7 @@ export const staticAndDevRouteLayer = HttpRouter.add(
       return HttpServerResponse.uint8Array(indexData, {
         status: 200,
         contentType: "text/html; charset=utf-8",
+        headers: SPA_FRAME_HEADERS,
       });
     }
 
@@ -707,6 +714,7 @@ export const staticAndDevRouteLayer = HttpRouter.add(
     return HttpServerResponse.uint8Array(data, {
       status: 200,
       contentType,
+      ...(contentType === "text/html" ? { headers: SPA_FRAME_HEADERS } : {}),
     });
   }),
 );

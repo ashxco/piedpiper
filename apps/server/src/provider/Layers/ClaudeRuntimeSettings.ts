@@ -41,6 +41,11 @@ function compactWindow(settings: Record<string, unknown>, model: string): string
   return validCompactWindow(modelWindow) ?? validCompactWindow(settings.autoCompactWindow);
 }
 
+// Claude Code's isEnvTruthy.
+function isClaudeEnvTruthy(value: string | undefined): boolean {
+  return value !== undefined && ["1", "true", "yes", "on"].includes(value.trim().toLowerCase());
+}
+
 /** Files are ordered highest priority first; an explicit model `auto` stops fallback. */
 export function resolveClaudeRuntimeSettings(input: {
   readonly settings: ReadonlyArray<Record<string, unknown>>;
@@ -48,19 +53,34 @@ export function resolveClaudeRuntimeSettings(input: {
   readonly autoCompactWindow: string;
   readonly environment: NodeJS.ProcessEnv;
 }) {
-  let autoCompactWindow: string | undefined = input.autoCompactWindow || undefined;
-  let toolSearch: string | undefined;
+  const envValue = (name: string) => {
+    for (const settings of input.settings) {
+      const value = record(settings.env)?.[name];
+      if (typeof value === "string") return value;
+    }
+    return input.environment[name];
+  };
+  const toolSearchOverride = claudeToolSearchOverride(envValue("ENABLE_TOOL_SEARCH"));
+  // With auto-compaction off Claude never compacts, so there is no threshold to report.
+  const autoCompactEnabled = input.settings
+    .map((settings) => settings.autoCompactEnabled)
+    .find((value) => typeof value === "boolean");
+  if (
+    autoCompactEnabled === false ||
+    isClaudeEnvTruthy(envValue("DISABLE_COMPACT")) ||
+    isClaudeEnvTruthy(envValue("DISABLE_AUTO_COMPACT"))
+  ) {
+    return { autoCompactWindow: "", toolSearchOverride };
+  }
+  // Claude Code ranks CLAUDE_CODE_AUTO_COMPACT_WINDOW above the autoCompactWindow keys.
+  const compactEnv = envValue("CLAUDE_CODE_AUTO_COMPACT_WINDOW");
+  let autoCompactWindow: string | undefined =
+    input.autoCompactWindow ||
+    (compactEnv === undefined ? undefined : validCompactWindow(Number(compactEnv)));
   for (const settings of input.settings) {
     autoCompactWindow ??= compactWindow(settings, (input.model ?? "").replace(/\[1m\]$/i, ""));
-    const value = record(settings.env)?.ENABLE_TOOL_SEARCH;
-    if (toolSearch === undefined && typeof value === "string") toolSearch = value;
   }
-  return {
-    autoCompactWindow: autoCompactWindow ?? "",
-    toolSearchOverride: claudeToolSearchOverride(
-      toolSearch ?? input.environment.ENABLE_TOOL_SEARCH,
-    ),
-  };
+  return { autoCompactWindow: autoCompactWindow ?? "", toolSearchOverride };
 }
 
 export const readClaudeRuntimeSettings = Effect.fn("readClaudeRuntimeSettings")(function* (input: {

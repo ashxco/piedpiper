@@ -3,8 +3,10 @@ import "../index.css";
 import { ThreadId, TurnId, type ProjectId } from "@piedpiper/contracts";
 import {
   RouterProvider,
+  Outlet,
   createMemoryHistory,
   createRootRoute,
+  createRoute,
   createRouter,
 } from "@tanstack/react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -67,9 +69,21 @@ function setThread(id: ThreadId, overrides: Partial<SidebarThreadSummary>) {
 }
 
 async function mountCoordinator() {
-  const rootRoute = createRootRoute({ component: () => <ThreadNotificationCoordinator /> });
+  const rootRoute = createRootRoute({
+    component: () => (
+      <>
+        <ThreadNotificationCoordinator />
+        <Outlet />
+      </>
+    ),
+  });
+  const threadRoute = createRoute({
+    getParentRoute: () => rootRoute,
+    path: "/$threadId",
+    component: () => null,
+  });
   const router = createRouter({
-    routeTree: rootRoute,
+    routeTree: rootRoute.addChildren([threadRoute]),
     history: createMemoryHistory({ initialEntries: ["/"] }),
   });
   const screen = await render(
@@ -78,7 +92,7 @@ async function mountCoordinator() {
     </AppAtomRegistryProvider>,
   );
   await router.load();
-  return screen;
+  return Object.assign(screen, { router });
 }
 
 describe("ThreadNotificationCoordinator with a snoozed thread", () => {
@@ -120,6 +134,18 @@ describe("ThreadNotificationCoordinator with a snoozed thread", () => {
 
     setThread(AWAKE, { latestTurn: settledTurn("completed") });
     expect(toastTitles()).toEqual([[AWAKE, "Thread completed"]]);
+    await screen.unmount();
+  });
+
+  it("closes a thread's toasts once that thread is opened", async () => {
+    const toastClose = vi.spyOn(toastManager, "close").mockImplementation(() => undefined);
+    const screen = await mountCoordinator();
+    setThread(AWAKE, { latestTurn: settledTurn("completed") });
+    expect(toastTitles()).toEqual([[AWAKE, "Thread completed"]]);
+    expect(toastClose).not.toHaveBeenCalled();
+
+    await screen.router.navigate({ to: "/$threadId", params: { threadId: AWAKE } });
+    await expect.poll(() => toastClose.mock.calls).toEqual([["toast-id"]]);
     await screen.unmount();
   });
 

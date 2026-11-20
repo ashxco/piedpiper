@@ -39,7 +39,10 @@ import { ServerSettingsService } from "../../serverSettings.ts";
 import { canReplaceThreadTitle } from "../threadTitles.ts";
 import {
   settleOpenTasksCommands,
-  splitBufferedAssistantText,
+  advanceAssistantTextScan,
+  type AssistantTextScan,
+  assistantTextReadyBoundary,
+  EMPTY_ASSISTANT_TEXT_SCAN,
 } from "./ProviderRuntimeIngestionHelpers.ts";
 import {
   appendReasoningDelta,
@@ -134,6 +137,12 @@ const make = Effect.fn("make")(function* () {
     capacity: BUFFERED_MESSAGE_TEXT_BY_MESSAGE_ID_CACHE_CAPACITY,
     timeToLive: BUFFERED_MESSAGE_TEXT_BY_MESSAGE_ID_TTL,
     lookup: () => Effect.succeed(""),
+  });
+  // Scan of the buffered text, so each delta resumes where the last one stopped.
+  const bufferedAssistantScanByMessageId = yield* Cache.make<MessageId, AssistantTextScan>({
+    capacity: BUFFERED_MESSAGE_TEXT_BY_MESSAGE_ID_CACHE_CAPACITY,
+    timeToLive: BUFFERED_MESSAGE_TEXT_BY_MESSAGE_ID_TTL,
+    lookup: () => Effect.succeed(EMPTY_ASSISTANT_TEXT_SCAN),
   });
   // Epoch millis of the last early delivery per message, for pacing.
   const lastAssistantDeliveryAtByMessageId = yield* Cache.make<MessageId, number>({
@@ -239,7 +248,16 @@ const make = Effect.fn("make")(function* () {
 
           // Deliver finished paragraphs, closed code blocks and list items early
           // so the user sees progress without token-by-token repaints.
-          const { ready, rest } = splitBufferedAssistantText(nextText);
+          const scan = advanceAssistantTextScan(
+            Option.getOrElse(
+              yield* Cache.getOption(bufferedAssistantScanByMessageId, messageId),
+              () => EMPTY_ASSISTANT_TEXT_SCAN,
+            ),
+            nextText,
+          );
+          const boundary = assistantTextReadyBoundary(scan);
+          const ready = boundary === -1 ? "" : nextText.slice(0, boundary);
+          const rest = boundary === -1 ? nextText : nextText.slice(boundary);
           const lastDeliveredAt = Option.getOrUndefined(
             yield* Cache.getOption(lastAssistantDeliveryAtByMessageId, messageId),
           );
@@ -247,6 +265,8 @@ const make = Effect.fn("make")(function* () {
             lastDeliveredAt === undefined ||
             atMillis - lastDeliveredAt >= MIN_ASSISTANT_DELIVERY_INTERVAL_MS;
           if (paced && ready.trim().length > 0 && rest.length <= MAX_BUFFERED_ASSISTANT_CHARS) {
+            // The rest starts a new scan; its text no longer extends the old one.
+            yield* Cache.invalidate(bufferedAssistantScanByMessageId, messageId);
             if (rest.length > 0) {
               yield* Cache.set(bufferedAssistantTextByMessageId, messageId, rest);
             } else {
@@ -258,10 +278,12 @@ const make = Effect.fn("make")(function* () {
 
           if (nextText.length <= MAX_BUFFERED_ASSISTANT_CHARS) {
             yield* Cache.set(bufferedAssistantTextByMessageId, messageId, nextText);
+            yield* Cache.set(bufferedAssistantScanByMessageId, messageId, scan);
             return "";
           }
 
           // Safety valve: flush full buffered text as an assistant delta to cap memory.
+          yield* Cache.invalidate(bufferedAssistantScanByMessageId, messageId);
           yield* Cache.invalidate(bufferedAssistantTextByMessageId, messageId);
           return nextText;
         }),
@@ -269,7 +291,8 @@ const make = Effect.fn("make")(function* () {
     );
 
   const takeBufferedAssistantText = (messageId: MessageId) =>
-    Cache.getOption(bufferedAssistantTextByMessageId, messageId).pipe(
+    Cache.invalidate(bufferedAssistantScanByMessageId, messageId).pipe(
+      Effect.andThen(Cache.getOption(bufferedAssistantTextByMessageId, messageId)),
       Effect.flatMap((existingText) =>
         Cache.invalidate(bufferedAssistantTextByMessageId, messageId).pipe(
           Effect.as(Option.getOrElse(existingText, () => "")),
@@ -280,6 +303,7 @@ const make = Effect.fn("make")(function* () {
   const clearBufferedAssistantText = (messageId: MessageId) =>
     Effect.sync(() => pendingAssistantFlushes.delete(messageId)).pipe(
       Effect.andThen(Cache.invalidate(bufferedAssistantTextByMessageId, messageId)),
+      Effect.andThen(Cache.invalidate(bufferedAssistantScanByMessageId, messageId)),
       Effect.andThen(Cache.invalidate(lastAssistantDeliveryAtByMessageId, messageId)),
     );
 

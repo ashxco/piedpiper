@@ -89,6 +89,28 @@ it.layer(TestLayer)("WorkspaceFileSystemLive", (it) => {
       }),
     );
 
+    it.effect("keeps whitespace at the ends of a file name", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem;
+        const cwd = yield* makeTempDir;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const result = yield* workspaceFileSystem.writeFile({
+          cwd,
+          relativePath: " notes .md ",
+          contents: "spaced\n",
+        });
+
+        expect(result).toEqual({ relativePath: " notes .md " });
+        expect(
+          yield* fileSystem.readFileString(path.join(cwd, " notes .md ")).pipe(Effect.orDie),
+        ).toBe("spaced\n");
+        expect(yield* fileSystem.exists(path.join(cwd, "notes .md")).pipe(Effect.orDie)).toBe(
+          false,
+        );
+      }),
+    );
+
     it.effect("invalidates workspace entry search cache after writes", () =>
       Effect.gen(function* () {
         const workspaceEntries = yield* WorkspaceEntries;

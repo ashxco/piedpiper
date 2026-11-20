@@ -143,11 +143,14 @@ export function resolveSnoozeMenuPick(
 export function snoozeWakeLabel(snoozedUntil: string, nowMs: number): string {
   const wake = parseTimestampDate(snoozedUntil);
   if (wake === null) return "now";
-  const remainingMs = wake.getTime() - nowMs;
-  if (remainingMs <= 0) return "now";
-  if (remainingMs < HOUR_MS) return `${Math.max(1, Math.ceil(remainingMs / 60_000))}m`;
-  if (remainingMs < DAY_MS) return `${Math.ceil(remainingMs / HOUR_MS)}h`;
-  return `${Math.ceil(remainingMs / DAY_MS)}d`;
+  const wakeMs = wake.getTime();
+  if (wakeMs <= nowMs) return "now";
+  // Count clock minutes: the row reads a live clock, and snooze durations keep their seconds, so
+  // raw milliseconds read a one-hour snooze as "2h" (or "60m") a few seconds in.
+  const minutes = Math.max(1, Math.floor(wakeMs / 60_000) - Math.floor(nowMs / 60_000));
+  if (minutes < 60) return `${minutes}m`;
+  if (minutes < 24 * 60) return `${Math.ceil(minutes / 60)}h`;
+  return `${Math.ceil(minutes / (24 * 60))}d`;
 }
 
 // Counts local calendar days, so a 23-hour or 25-hour DST day still reads as one day.

@@ -19,7 +19,7 @@ import {
 import { Effect, Stream } from "effect";
 
 import { type WsRpcProtocolClient } from "./rpc/protocol";
-import { WsTransport } from "./wsTransport";
+import { MESSAGE_DISPATCH_TIMEOUT_MS, WsTransport } from "./wsTransport";
 
 type RpcTag = keyof WsRpcProtocolClient & string;
 type RpcMethod<TTag extends RpcTag> = WsRpcProtocolClient[TTag];
@@ -82,6 +82,7 @@ export interface WsRpcClient {
       readonly cwd: Parameters<NativeApi["shell"]["openInEditor"]>[0];
       readonly editor: Parameters<NativeApi["shell"]["openInEditor"]>[1];
       readonly reveal?: boolean;
+      readonly projectRoot?: string;
     }) => ReturnType<NativeApi["shell"]["openInEditor"]>;
   };
   readonly git: {
@@ -342,7 +343,15 @@ export function createWsRpcClient(transport = new WsTransport()): WsRpcClient {
       getSnapshot: () =>
         transport.request((client) => client[ORCHESTRATION_WS_METHODS.getSnapshot]({})),
       dispatchCommand: (input) =>
-        transport.request((client) => client[ORCHESTRATION_WS_METHODS.dispatchCommand](input)),
+        transport.request((client) => client[ORCHESTRATION_WS_METHODS.dispatchCommand](input), {
+          resendAfterSocketLoss: input.type === "thread.turn.start",
+          ...(input.type === "thread.turn.start"
+            ? {
+                timeout: MESSAGE_DISPATCH_TIMEOUT_MS,
+                timeoutMessage: "The server did not confirm the message within 60 seconds.",
+              }
+            : {}),
+        }),
       getTurnDiff: (input) =>
         transport.request((client) => client[ORCHESTRATION_WS_METHODS.getTurnDiff](input)),
       getFullThreadDiff: (input) =>

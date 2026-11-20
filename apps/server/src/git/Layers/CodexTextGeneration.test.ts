@@ -790,7 +790,7 @@ it.layer(CodexTextGenerationTestLayer)("CodexTextGenerationLive", (it) => {
           { name: "already-off", enabled: false },
         ],
         requireArgs:
-          'exec --config features.plugins=false --config features.apps=false --config mcp_servers={"augmenter"={enabled=false},"my.server"={enabled=false}} --ephemeral',
+          'exec --config mcp_servers={"augmenter"={enabled=false},"my.server"={enabled=false}} --config features.connectors=false --config features.plugins=false --config features.apps=false --config mcp_servers.augmenter.enabled=false --config features.codex_hooks=false --config features.hooks=false --ephemeral',
       },
       Effect.gen(function* () {
         const textGeneration = yield* TextGeneration;
@@ -809,7 +809,7 @@ it.layer(CodexTextGenerationTestLayer)("CodexTextGenerationLive", (it) => {
       {
         output: JSON.stringify({ branch: "launch-args" }),
         launchArgs: '--enable foo --listen off --config model="gpt 5"',
-        requireArgs: "exec --enable foo --config model=gpt 5 --config features.plugins=false",
+        requireArgs: "exec --enable foo --config model=gpt 5 --config features.connectors=false",
         forbidArgs: "--listen",
       },
       Effect.gen(function* () {
@@ -831,10 +831,10 @@ it.layer(CodexTextGenerationTestLayer)("CodexTextGenerationLive", (it) => {
         launchArgs: "--strict-config --config mcp_servers.extra.enabled=true",
         mcpServers: [{ name: "extra", enabled: true }],
         mcpListRequireArgs:
-          "--config mcp_servers.extra.enabled=true --config features.plugins=false --config features.apps=false mcp list --json",
+          "--config mcp_servers.extra.enabled=true --config features.connectors=false --config features.plugins=false --config features.apps=false mcp list --json",
         mcpListForbidArgs: "--strict-config",
         requireArgs:
-          'exec --strict-config --config mcp_servers.extra.enabled=true --config features.plugins=false --config features.apps=false --config mcp_servers={"extra"={enabled=false}} --ephemeral',
+          'exec --config mcp_servers={"extra"={enabled=false}} --strict-config --config mcp_servers.extra.enabled=true --config features.connectors=false --config features.plugins=false --config features.apps=false --config mcp_servers.extra.enabled=false --config features.codex_hooks=false --config features.hooks=false --ephemeral',
       },
       Effect.gen(function* () {
         const textGeneration = yield* TextGeneration;
@@ -854,7 +854,7 @@ it.layer(CodexTextGenerationTestLayer)("CodexTextGenerationLive", (it) => {
         output: JSON.stringify({ branch: "plugins-off" }),
         launchArgs: "--config features.plugins=true --config features.apps=true",
         requireArgs:
-          "exec --config features.plugins=true --config features.apps=true --config features.plugins=false --config features.apps=false --ephemeral",
+          "exec --config features.plugins=true --config features.apps=true --config features.connectors=false --config features.plugins=false --config features.apps=false --config features.codex_hooks=false --config features.hooks=false --ephemeral",
       },
       Effect.gen(function* () {
         const textGeneration = yield* TextGeneration;
@@ -868,12 +868,57 @@ it.layer(CodexTextGenerationTestLayer)("CodexTextGenerationLive", (it) => {
     ),
   );
 
+  it.effect("keeps MCP servers off when launch args set their own mcp_servers table", () =>
+    withFakeCodexEnv(
+      {
+        output: JSON.stringify({ branch: "mcp-table" }),
+        launchArgs: `-c 'mcp_servers={"my.server"={command="echo",enabled=true}}'`,
+        mcpServers: [
+          { name: "my.server", enabled: true },
+          { name: "plain", enabled: true },
+        ],
+        requireArgs:
+          '--config features.connectors=false --config features.plugins=false --config features.apps=false --config mcp_servers={"my.server"={enabled=false},"plain"={enabled=false}} --config mcp_servers.plain.enabled=false --config features.codex_hooks=false --config features.hooks=false --ephemeral',
+      },
+      Effect.gen(function* () {
+        const textGeneration = yield* TextGeneration;
+        const result = yield* textGeneration.generateBranchName({
+          cwd: process.cwd(),
+          message: "Launch args define an MCP table",
+          modelSelection: DEFAULT_TEST_MODEL_SELECTION,
+        });
+        expect(result.branch).toBe("mcp-table");
+      }),
+    ),
+  );
+
+  it.effect("drops launch-arg feature enables that would bring plugins, apps or hooks back", () =>
+    withFakeCodexEnv(
+      {
+        output: JSON.stringify({ branch: "no-hooks" }),
+        launchArgs: "--enable hooks --enable=apps --enable foo -cmodel=gpt",
+        requireArgs:
+          "exec --enable foo -c=model=gpt --config features.connectors=false --config features.plugins=false --config features.apps=false --config features.codex_hooks=false --config features.hooks=false --ephemeral",
+      },
+      Effect.gen(function* () {
+        const textGeneration = yield* TextGeneration;
+        const result = yield* textGeneration.generateBranchName({
+          cwd: process.cwd(),
+          message: "Skip user hooks",
+          modelSelection: DEFAULT_TEST_MODEL_SELECTION,
+        });
+        expect(result.branch).toBe("no-hooks");
+      }),
+    ),
+  );
+
   it.effect("still generates when codex cannot list its MCP servers", () =>
     withFakeCodexEnv(
       {
         output: JSON.stringify({ branch: "remove-default-shapes" }),
         mcpServers: 2,
-        requireArgs: "--config features.plugins=false --config features.apps=false --ephemeral",
+        requireArgs:
+          "--config features.connectors=false --config features.plugins=false --config features.apps=false --config features.codex_hooks=false --config features.hooks=false --ephemeral",
         forbidArgs: "mcp_servers=",
       },
       Effect.gen(function* () {

@@ -264,11 +264,22 @@ it.live("runs a single turn end-to-end and persists checkpoint state in sqlite +
         assert.equal(runs[0]?.payload.nativeTurnRef, thread.latestTurn?.turnId);
         assert.equal(native.filter((event) => event.type === "message.updated").length, 2);
         assert.equal(native.filter((event) => event.type === "checkpoint.updated").length, 1);
-        const effects = database
-          .prepare(
-            "SELECT effect_type, status FROM orchestration_v2_effect_outbox WHERE thread_id = ? ORDER BY effect_type",
-          )
-          .all(THREAD_ID);
+        const readEffects = () =>
+          database
+            .prepare(
+              "SELECT effect_type, status FROM orchestration_v2_effect_outbox WHERE thread_id = ? ORDER BY effect_type",
+            )
+            .all(THREAD_ID);
+        // The checkpoint becomes visible before its capture effect row is marked succeeded.
+        let effects = readEffects();
+        for (
+          let attempt = 0;
+          attempt < 100 && effects.some((row) => row.status === "running");
+          attempt += 1
+        ) {
+          yield* Effect.sleep("50 millis");
+          effects = readEffects();
+        }
         assert.deepEqual(
           effects.map((row) => [row.effect_type, row.status]),
           [

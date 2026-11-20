@@ -7,13 +7,15 @@ const XTERM_INPUT_SELECTOR = ".xterm-helper-textarea";
 const PREFERRED_SELECTOR = `[data-sidebar-row][aria-current="page"], ${XTERM_INPUT_SELECTOR}, [contenteditable="true"]`;
 const CONVERSATION_AREA = "conversation";
 
-/** Props that make an element one stop in the F6 cycle; `order` sets its place in the cycle. */
-export function workspaceAreaProps(name: string, order: number, label: string) {
+/**
+ * Props that make an element one stop in the F6 cycle; `order` sets its place in the cycle.
+ * Without a label the area is no landmark, for areas whose focus target already names it.
+ */
+export function workspaceAreaProps(name: string, order: number, label?: string) {
   return {
     "data-workspace-area": name,
     "data-workspace-order": order,
-    "aria-label": label,
-    role: "region",
+    ...(label ? { "aria-label": label, role: "region" } : {}),
     tabIndex: -1,
   } as const;
 }

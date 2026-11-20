@@ -200,6 +200,18 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
     };
   };
 
+  // Git fetches from a remote's first URL; `config --get` returns the last of several, such as a
+  // second push URL added with `git remote set-url --add`.
+  const readRemoteUrl = (cwd: string, remoteName: string) =>
+    gitCore
+      .execute({
+        operation: "GitManager.readRemoteUrl",
+        cwd,
+        args: ["config", "--get-all", `remote.${remoteName}.url`],
+        allowNonZeroExit: true,
+      })
+      .pipe(Effect.map((result) => result.stdout.split("\n", 1)[0]?.trim() || null));
+
   const configurePullRequestHeadUpstreamBase = Effect.fn("configurePullRequestHeadUpstream")(
     function* (
       cwd: string,
@@ -216,7 +228,7 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
         repository: repositoryNameWithOwner,
         host: pullRequestHost(pullRequest.url),
       });
-      const originRemoteUrl = yield* gitCore.readConfigValue(cwd, "remote.origin.url");
+      const originRemoteUrl = yield* readRemoteUrl(cwd, "origin");
       const remoteUrl = shouldPreferSshRemote(originRemoteUrl) ? cloneUrls.sshUrl : cloneUrls.url;
       const preferredRemoteName =
         pullRequest.headRepositoryOwnerLogin?.trim() ||
@@ -272,7 +284,7 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
         repository: repositoryNameWithOwner,
         host: pullRequestHost(pullRequest.url),
       });
-      const originRemoteUrl = yield* gitCore.readConfigValue(cwd, "remote.origin.url");
+      const originRemoteUrl = yield* readRemoteUrl(cwd, "origin");
       const remoteUrl = shouldPreferSshRemote(originRemoteUrl) ? cloneUrls.sshUrl : cloneUrls.url;
       const preferredRemoteName =
         pullRequest.headRepositoryOwnerLogin?.trim() ||
@@ -408,7 +420,9 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
       };
     }
 
-    const remoteUrl = yield* readConfigValueNullable(cwd, `remote.${remoteName}.url`);
+    const remoteUrl = yield* readRemoteUrl(cwd, remoteName).pipe(
+      Effect.catch(() => Effect.succeed(null)),
+    );
     const gitHubRemote = parseGitHubRemoteUrl(remoteUrl);
     const repositoryNameWithOwner = gitHubRemote?.nameWithOwner ?? null;
     return {
@@ -841,16 +855,18 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
       hasUpstream: boolean;
     } | null = null;
 
-    if (result.action !== "commit") {
-      const finalStatus = yield* gitCore.statusDetails(cwd);
-      if (finalStatus.branch) {
-        finalBranchContext = {
-          branch: finalStatus.branch,
-          upstreamRef: finalStatus.upstreamRef,
-          hasUpstream: finalStatus.hasUpstream,
-        };
-        currentBranchIsDefault = finalStatus.isDefaultBranch;
-      }
+    // Best-effort: the action already succeeded, so a failed status read only drops the PR CTA.
+    const finalStatus =
+      result.action === "commit"
+        ? null
+        : yield* gitCore.statusDetails(cwd).pipe(Effect.orElseSucceed(() => null));
+    if (finalStatus?.branch) {
+      finalBranchContext = {
+        branch: finalStatus.branch,
+        upstreamRef: finalStatus.upstreamRef,
+        hasUpstream: finalStatus.hasUpstream,
+      };
+      currentBranchIsDefault = finalStatus.isDefaultBranch;
     }
 
     const explicitResultPr =
@@ -943,7 +959,7 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
       Effect.option,
     );
     if (Option.isNone(style)) {
-      return undefined;
+      return { instructions: undefined, conventionalCommits: false };
     }
     const subjects =
       style.value.mode === "repo_conventions" ? yield* readRecentCommitSubjects(cwd) : [];
@@ -953,7 +969,10 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
             Effect.orElseSucceed(() => undefined),
           )
         : undefined;
-    return commitMessageStyleInstructions(style.value, subjects, repositoryInstructions);
+    return {
+      instructions: commitMessageStyleInstructions(style.value, subjects, repositoryInstructions),
+      conventionalCommits: style.value.mode === "conventional_commits",
+    };
   });
 
   const resolveCommitAndBranchSuggestion = Effect.fn("resolveCommitAndBranchSuggestion")(
@@ -985,10 +1004,8 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
         };
       }
 
-      const additionalInstructions = yield* resolveCommitStyleInstructions(
-        input.cwd,
-        input.modelSelection,
-      );
+      const { instructions: additionalInstructions, conventionalCommits } =
+        yield* resolveCommitStyleInstructions(input.cwd, input.modelSelection);
       const generated = yield* textGeneration
         .generateCommitMessage({
           cwd: input.cwd,
@@ -999,7 +1016,7 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
           ...(additionalInstructions ? { additionalInstructions } : {}),
           modelSelection: input.modelSelection,
         })
-        .pipe(Effect.map((result) => sanitizeCommitMessage(result)));
+        .pipe(Effect.map((result) => sanitizeCommitMessage(result, conventionalCommits)));
 
       return {
         subject: generated.subject,
@@ -1277,8 +1294,22 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
         ...pullRequest,
         ...toPullRequestHeadRemoteInfo(pullRequestSummary),
       } as const;
-      const localPullRequestBranch =
-        resolvePullRequestWorktreeLocalBranchName(pullRequestWithRemoteInfo);
+      const localBranches = pullRequestWithRemoteInfo.isCrossRepository
+        ? new Set(
+            (yield* gitCore.execute({
+              operation: "GitManager.preparePullRequestThread.localBranches",
+              cwd: input.cwd,
+              args: ["for-each-ref", "--format=%(refname:lstrip=2)", "refs/heads"],
+              timeoutMs: 5_000,
+            })).stdout
+              .split("\n")
+              .filter((name) => name.length > 0),
+          )
+        : new Set<string>();
+      const localPullRequestBranch = resolvePullRequestWorktreeLocalBranchName(
+        pullRequestWithRemoteInfo,
+        localBranches,
+      );
 
       // Null unless the checkout's upstream is this PR's head branch.
       const readPullRequestHeadUpstream = Effect.fn("readPullRequestHeadUpstream")(function* (
@@ -1454,6 +1485,21 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
           "preparePullRequestThread",
           "This PR branch is already checked out in the main repo. Use Local, or switch the main repo off that branch before creating a worktree thread.",
         );
+      }
+
+      // Materializing would force an existing branch onto the head, dropping unpublished commits.
+      // Check it out as is, then move it only as far as the reused-worktree refresh allows.
+      if (existingBranchBeforeFetch !== null) {
+        const worktree = yield* gitCore.createWorktree({
+          cwd: input.cwd,
+          branch: existingBranchBeforeFetch.name,
+          path: null,
+        });
+        const reused = yield* reuseExistingWorktree(
+          worktree.worktree.path,
+          worktree.worktree.branch,
+        );
+        return { ...reused, checkoutChanged: true };
       }
 
       yield* materializePullRequestHeadBranch(

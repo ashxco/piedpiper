@@ -77,16 +77,24 @@ export function parseWindowsProcessTable(stdout: string): Array<TerminalProcessT
   return entries;
 }
 
+/**
+ * PowerShell writes piped output in the console code page (often OEM 437), mangling non-ASCII
+ * process names; Node reads it as UTF-8.
+ */
+export const POWERSHELL_UTF8_OUTPUT_PREFIX =
+  "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); ";
+
 /** Builds the PowerShell command listing the direct children of the given terminal pids. */
 export function windowsChildProcessQuery(terminalPids: ReadonlyArray<number>): string {
   const filter = terminalPids
     .filter((pid) => Number.isInteger(pid) && pid > 0)
     .map((pid) => `ParentProcessId = ${pid}`)
     .join(" OR ");
-  return [
+  const query = [
     `Get-CimInstance Win32_Process -Filter "${filter}" -Property ProcessId,ParentProcessId,Name -ErrorAction Stop`,
     'ForEach-Object { Write-Output "$($_.ProcessId)|$($_.ParentProcessId)|$($_.Name)" }',
   ].join(" | ");
+  return `${POWERSHELL_UTF8_OUTPUT_PREFIX}${query}`;
 }
 
 /** Reduces a raw process name to the command name: no path, login-shell dash or `.exe`. */

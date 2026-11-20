@@ -8,6 +8,14 @@ export function shouldAttachPastedText(text: string, bypass: boolean): boolean {
   );
 }
 
+/**
+ * Paste as Text keeps the text even when the source also put an image of it on the clipboard
+ * (Word, Excel and browsers copy a rendered picture next to the text).
+ */
+export function shouldPasteClipboardFilesAsText(text: string, bypass: boolean): boolean {
+  return bypass && text.length > 0;
+}
+
 export function nextPastedTextFileName(names: ReadonlyArray<string>): string {
   const used = new Set(names);
   let name = "pasted-text.txt";

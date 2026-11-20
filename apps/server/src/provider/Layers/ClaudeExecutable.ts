@@ -12,13 +12,15 @@ import { expandCodexHomePath } from "../../codex/homePath";
 const WINDOWS_SHIM_EXTENSIONS: ReadonlySet<string> = new Set([".cmd", ".bat", ".ps1"]);
 
 /**
- * Entry points of the npm `@anthropic-ai/claude-code` package relative to the
- * global npm directory holding the launcher shim. Newer versions ship a native
- * `bin/claude.exe`; older ones only `cli.js`, which the SDK runs with node.
+ * Package entry points relative to the directory holding the launcher shim.
+ * npm `@anthropic-ai/claude-code`: newer versions ship a native `bin/claude.exe`;
+ * older ones only `cli.js`, which the SDK runs with node.
+ * WinGet: `Links\claude.cmd` forwards to the package's native executable under `..\Packages`.
  */
-const NPM_PACKAGE_ENTRY_CANDIDATES = [
+const PACKAGE_ENTRY_CANDIDATES = [
   ["node_modules", "@anthropic-ai", "claude-code", "bin", "claude.exe"],
   ["node_modules", "@anthropic-ai", "claude-code", "cli.js"],
+  ["..", "Packages", "Anthropic.ClaudeCode_Microsoft.Winget.Source_8wekyb3d8bbwe", "claude.exe"],
 ] as const;
 
 export interface ResolveClaudeSdkExecutableOptions {
@@ -44,7 +46,7 @@ function defaultIsFile(filePath: string): boolean {
  *
  * The SDK spawns without a shell and without PATH/PATHEXT lookup, so on
  * Windows a bare `claude` is "not found" and an npm `claude.cmd` shim fails
- * with `spawn EINVAL`. This walks PATH/PATHEXT and follows an npm shim to the
+ * with `spawn EINVAL`. This walks PATH/PATHEXT and follows an npm or WinGet shim to the
  * packaged entry point. Elsewhere, or when nothing better is found, the
  * configured value is returned unchanged.
  */
@@ -63,7 +65,7 @@ export function resolveClaudeSdkExecutablePath(
   if (!WINDOWS_SHIM_EXTENSIONS.has(extension)) return resolved;
 
   const shimDirectory = Path.win32.dirname(resolved);
-  for (const segments of NPM_PACKAGE_ENTRY_CANDIDATES) {
+  for (const segments of PACKAGE_ENTRY_CANDIDATES) {
     const candidate = Path.win32.join(shimDirectory, ...segments);
     if (isFile(candidate)) return candidate;
   }

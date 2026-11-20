@@ -12,6 +12,18 @@ describe("sanitizeBranchFragment", () => {
     expect(sanitizeBranchFragment("Réparer le café")).toBe("reparer-le-cafe");
     expect(sanitizeBranchFragment("Ünïcödé naïve")).toBe("unicode-naive");
   });
+
+  it("keeps words with letters that have no Unicode decomposition whole", () => {
+    expect(sanitizeBranchFragment("Größe der Straße korrigieren")).toBe(
+      "grosse-der-strasse-korrigieren",
+    );
+    expect(sanitizeBranchFragment("GROẞ")).toBe("gross");
+    expect(sanitizeBranchFragment("fix/Đặt tên")).toBe("fix/dat-ten");
+    expect(sanitizeBranchFragment("Napraw błąd w żółtym przycisku")).toBe(
+      "napraw-blad-w-zoltym-przycisku",
+    );
+    expect(sanitizeBranchFragment("Øl på Þingvellir ı")).toBe("ol-pa-thingvellir-i");
+  });
 });
 
 describe("resolveAutoFeatureBranchName", () => {

@@ -52,8 +52,6 @@ const AUTO_PULL_NON_INTERACTIVE_ENV = Object.freeze({
   SSH_ASKPASS: "",
   SSH_ASKPASS_REQUIRE: "never",
 } satisfies NodeJS.ProcessEnv);
-const AUTO_PULL_NETWORK_TIMEOUT_MS = 30_000;
-const AUTO_PULL_LOCAL_TIMEOUT_MS = 15_000;
 
 export interface AutoPullOptions {
   /** Status the caller just read; it is re-read before pulling so later edits are not pulled over. */
@@ -105,7 +103,8 @@ export const fastForwardCleanDefaultBranch = Effect.fn("fastForwardCleanDefaultB
       env: AUTO_PULL_NON_INTERACTIVE_ENV,
       allowNonZeroExit: true,
       truncateOutputAtMaxBytes: true,
-      timeoutMs: mode === "local" ? AUTO_PULL_LOCAL_TIMEOUT_MS : AUTO_PULL_NETWORK_TIMEOUT_MS,
+      // A deadline would kill git mid-checkout (e.g. a slow LFS smudge) and strand a half-updated tree.
+      timeoutMs: null,
     });
     const after = yield* readHead("DefaultBranchAutoPull.afterSha");
     if (after !== before) {

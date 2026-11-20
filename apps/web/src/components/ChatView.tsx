@@ -2,7 +2,13 @@ import { takeThreadFiles, usePendingThreadFiles } from "../pendingThreadFiles";
 import { useOpenToolDiff } from "../hooks/useOpenToolDiff";
 import { usePromptStashStore, type PromptStashEntry } from "../promptStashStore";
 import { hydrateImagesFromPersisted } from "../lib/composerAttachmentNormalization";
-import { shouldAttachPastedText, nextPastedTextFileName } from "../lib/pastedText";
+import { readComposerImageBytes } from "../lib/composerImageFingerprint";
+import { preventMiddleClickPasteOutsideEditable } from "../lib/editableFocus";
+import {
+  nextPastedTextFileName,
+  shouldAttachPastedText,
+  shouldPasteClipboardFilesAsText,
+} from "../lib/pastedText";
 import { useComposerContextStore } from "../composerContextStore";
 import {
   type ApprovalRequestId,
@@ -79,6 +85,7 @@ import {
   derivePendingUserInputProgress,
   selectPendingUserInputOption,
   setPendingUserInputCustomAnswer,
+  withdrawDisplacedCustomAnswerFromPrompt,
   type PendingUserInputDraftAnswer,
 } from "../pendingUserInput";
 import { useStore } from "../store";
@@ -99,7 +106,10 @@ import {
 
 import { basenameOfPath } from "../vscode-icons";
 import { useLocalDispatchState } from "../hooks/useLocalDispatchState";
+import { useLiveClaudeSelection } from "../hooks/useLiveClaudeSelection";
 import { useComposerSession } from "../hooks/useComposerSession";
+import { useFocusComposerOnThreadOpen } from "../hooks/useFocusComposerOnThreadOpen";
+import { useMediaQuery } from "../hooks/useMediaQuery";
 import { useComposerPromptHistory } from "../hooks/useComposerPromptHistory";
 import { useTheme } from "../hooks/useTheme";
 import { useThreadPlanCatalog } from "../hooks/useThreadPlanCatalog";
@@ -281,6 +291,7 @@ import {
   isPathSuggestionCurrent,
   resolveCompactDisabledReason,
   shouldRestoreComposerAfterFailedSend,
+  failedSendTextToOffer,
   visiblePathSearchEntries,
   buildComposerOutgoingMessageText,
   findReusableProjectScriptTerminal,
@@ -1810,6 +1821,8 @@ export default function ChatView({ threadId }: ChatViewProps) {
   const focusComposer = useCallback(() => {
     composerEditorRef.current?.focusAtEnd();
   }, []);
+  // Focusing the composer without a tap raises the on-screen keyboard on touch devices.
+  const isCoarsePointer = useMediaQuery({ pointer: "coarse" });
   const scheduleComposerFocus = useCallback(() => {
     window.requestAnimationFrame(() => {
       focusComposer();
@@ -1817,6 +1830,18 @@ export default function ChatView({ threadId }: ChatViewProps) {
   }, [focusComposer]);
   const addTerminalContextToDraft = useStableCallback((selection: TerminalContextSelection) => {
     if (!activeThread) {
+      return;
+    }
+    // Answers are plain text, so a terminal excerpt cannot ride along with one. Writing it to the
+    // thread draft instead would overwrite that draft with the answer and hide it until the
+    // question closes.
+    if (activePendingProgress) {
+      toastManager.add({
+        type: "info",
+        title: "Terminal output can't be added to a question answer.",
+        description: "Answer or dismiss the question first, then add it to chat.",
+        data: { threadId: activeThread.id },
+      });
       return;
     }
     const snapshot = composerEditorRef.current?.readSnapshot() ?? {
@@ -2142,6 +2167,28 @@ export default function ChatView({ threadId }: ChatViewProps) {
   });
   const togglePlanSidebar = useStableCallback(() => {
     planPanelRef.current?.toggle(activePlan?.turnId ?? null, sidebarProposedPlan?.turnId ?? null);
+  });
+
+  useLiveClaudeSelection({
+    threadId: serverThread?.id,
+    running: phase === "running",
+    selection: selectedModelSelection,
+    savedSelection: serverThread?.modelSelection,
+    apply: async (targetThreadId, modelSelection) => {
+      const api = readNativeApi();
+      if (!api) return;
+      await api.orchestration.dispatchCommand({
+        type: "thread.meta.update",
+        commandId: newCommandId(),
+        threadId: targetThreadId,
+        modelSelection,
+      });
+    },
+    onError: (targetThreadId, error) =>
+      setThreadError(
+        targetThreadId,
+        error instanceof Error ? error.message : "Could not apply effort change.",
+      ),
   });
 
   const currentGitBranch = gitStatusQuery.data?.branch ?? null;
@@ -2566,19 +2613,15 @@ export default function ChatView({ threadId }: ChatViewProps) {
     };
   }, [isWorkspaceFileDragActive]);
 
-  useEffect(() => {
-    if (!activeThread?.id || terminalState.terminalOpen) return;
-    const frame = window.requestAnimationFrame(() => {
-      focusComposer();
-    });
-    return () => {
-      window.cancelAnimationFrame(frame);
-    };
-  }, [activeThread?.id, focusComposer, terminalState.terminalOpen]);
+  useFocusComposerOnThreadOpen(
+    activeThread?.id,
+    !terminalState.terminalOpen && !isCoarsePointer,
+    focusComposer,
+  );
 
   // Returning to the window restores focus to wherever it last was; put it in the composer instead.
   useEffect(() => {
-    if (!activeThread?.id || terminalState.terminalOpen) return;
+    if (!activeThread?.id || terminalState.terminalOpen || isCoarsePointer) return;
     let frame: number | null = null;
     const onWindowFocus = () => {
       if (frame !== null) window.cancelAnimationFrame(frame);
@@ -2586,7 +2629,9 @@ export default function ChatView({ threadId }: ChatViewProps) {
       frame = window.requestAnimationFrame(() => {
         frame = window.requestAnimationFrame(() => {
           frame = null;
-          if (shouldRefocusComposerOnWindowFocus(document.activeElement)) focusComposer();
+          if (shouldRefocusComposerOnWindowFocus(document.activeElement, document.getSelection())) {
+            focusComposer();
+          }
         });
       });
     };
@@ -2595,7 +2640,7 @@ export default function ChatView({ threadId }: ChatViewProps) {
       window.removeEventListener("focus", onWindowFocus);
       if (frame !== null) window.cancelAnimationFrame(frame);
     };
-  }, [activeThread?.id, focusComposer, terminalState.terminalOpen]);
+  }, [activeThread?.id, focusComposer, isCoarsePointer, terminalState.terminalOpen]);
 
   useEffect(() => {
     composerImagesRef.current = composerImages;
@@ -2848,7 +2893,11 @@ export default function ChatView({ threadId }: ChatViewProps) {
       preparingBatch.map((entry) =>
         prepareComposerImageAttachment(entry.file, PROVIDER_SEND_TURN_MAX_IMAGE_BYTES)
           .catch(() => ({ ok: false, reason: "unreadable" }) as const)
-          .then((result) => ({ ...entry, result })),
+          .then(async (result) => {
+            // Pastes are all named image.png, so the draft tells two apart by their bytes.
+            if (result.ok) await readComposerImageBytes(result.file);
+            return { ...entry, result };
+          }),
       ),
     )
       .then((results) => {
@@ -2934,10 +2983,10 @@ export default function ChatView({ threadId }: ChatViewProps) {
   const onComposerPaste = useCallback(
     (event: React.ClipboardEvent<HTMLElement>) => {
       const files = Array.from(event.clipboardData.files);
+      const text = event.clipboardData.getData("text/plain");
+      const bypass = Date.now() < pasteAsTextUntilRef.current;
+      pasteAsTextUntilRef.current = 0;
       if (files.length === 0) {
-        const text = event.clipboardData.getData("text/plain");
-        const bypass = Date.now() < pasteAsTextUntilRef.current;
-        pasteAsTextUntilRef.current = 0;
         const images = composerImagesRef.current;
         const bytes = shouldAttachPastedText(text, bypass)
           ? new TextEncoder().encode(text).byteLength
@@ -2963,6 +3012,7 @@ export default function ChatView({ threadId }: ChatViewProps) {
         }
         return;
       }
+      if (shouldPasteClipboardFilesAsText(text, bypass)) return;
       const imageFiles = files.filter(
         (file) => isComposerImageFile(file) || isComposerPdfFile(file) || isComposerTextFile(file),
       );
@@ -3179,6 +3229,35 @@ export default function ChatView({ threadId }: ChatViewProps) {
     [activePendingDraftKey, setPendingUserInputQuestionIndexByKey],
   );
 
+  // In the order the text went into a thread draft, which is how a copy is found again.
+  const displacedPendingAnswersRef = useRef<
+    Array<{ readonly draft: string; readonly key: string; readonly text: string }>
+  >([]);
+  // Undo can put set-aside text back into the answer; left in the draft too, it is sent twice.
+  const withdrawRestoredPendingAnswer = useStableCallback((questionId: string, value: string) => {
+    if (!activePendingDraftKey) return;
+    const key = `${activePendingDraftKey}:${questionId}`;
+    const entries = displacedPendingAnswersRef.current;
+    const index = entries.findLastIndex(
+      (entry) =>
+        entry.draft === threadId && entry.key === key && entry.text.trim() === value.trim(),
+    );
+    const displaced = entries[index];
+    if (displaced === undefined) return;
+    const later = entries
+      .slice(index + 1)
+      .filter((entry) => entry.draft === displaced.draft)
+      .map((entry) => entry.text);
+    displacedPendingAnswersRef.current = entries.filter((entry) => entry !== displaced);
+    const currentDraftPrompt = readComposerThreadPrompt(threadId);
+    const nextDraftPrompt = withdrawDisplacedCustomAnswerFromPrompt(
+      currentDraftPrompt,
+      displaced.text,
+      later,
+    );
+    if (nextDraftPrompt !== currentDraftPrompt) setPrompt(nextDraftPrompt);
+  });
+
   const onSelectActivePendingUserInputOption = useStableCallback(
     (questionId: string, optionLabel: string) => {
       if (!activePendingDraftKey) {
@@ -3186,12 +3265,18 @@ export default function ChatView({ threadId }: ChatViewProps) {
       }
       // A custom answer outranks options, so typed text moves into the thread draft instead.
       const currentDraftPrompt = readComposerThreadPrompt(threadId);
+      const displacedAnswer = activePendingDraftAnswers[questionId]?.customAnswer;
       const nextDraftPrompt = carryDisplacedCustomAnswerIntoPrompt(
         currentDraftPrompt,
-        activePendingDraftAnswers[questionId]?.customAnswer,
+        displacedAnswer,
       );
       if (nextDraftPrompt !== currentDraftPrompt) {
         setPrompt(nextDraftPrompt);
+        displacedPendingAnswersRef.current.push({
+          draft: threadId,
+          key: `${activePendingDraftKey}:${questionId}`,
+          text: displacedAnswer ?? "",
+        });
         toastManager.add({
           type: "info",
           title: "Your typed text was set aside",
@@ -3231,6 +3316,7 @@ export default function ChatView({ threadId }: ChatViewProps) {
         return;
       }
       promptRef.current = value;
+      withdrawRestoredPendingAnswer(questionId, value);
       setPendingUserInputAnswersByKey((existing) => ({
         ...existing,
         [activePendingDraftKey]: {
@@ -3247,7 +3333,12 @@ export default function ChatView({ threadId }: ChatViewProps) {
         : detectComposerTrigger(value, expandedCursor);
       setDetectedComposerTrigger(nextTrigger);
     },
-    [activePendingDraftKey, setDetectedComposerTrigger, setPendingUserInputAnswersByKey],
+    [
+      activePendingDraftKey,
+      setDetectedComposerTrigger,
+      setPendingUserInputAnswersByKey,
+      withdrawRestoredPendingAnswer,
+    ],
   );
 
   const onAdvanceActivePendingUserInput = useStableCallback(() => {
@@ -4101,17 +4192,36 @@ export default function ChatView({ threadId }: ChatViewProps) {
           composerImagesRef.current.length === 0 &&
           composerTerminalContextsRef.current.length === 0,
       });
-      // A cancel was the user's own choice, so no bubble may stay behind looking sent, even when
-      // the composer took new text meanwhile.
       const isCancelled = err instanceof ComposerSendCancelledError;
-      if (shouldRestoreComposer || isCancelled) {
-        setOptimisticUserMessages((existing) => {
-          const removed = existing.filter((message) => message.id === messageIdForSend);
-          for (const message of removed) {
-            revokeUserMessagePreviewUrls(message);
-          }
-          const next = existing.filter((message) => message.id !== messageIdForSend);
-          return next.length === existing.length ? existing : next;
+      // Only an acknowledged send replaces its optimistic row, so a failed one always leaves the
+      // timeline, even when the composer took new text meanwhile; it must not look sent.
+      setOptimisticUserMessages((existing) => {
+        const removed = existing.filter((message) => message.id === messageIdForSend);
+        for (const message of removed) {
+          revokeUserMessagePreviewUrls(message);
+        }
+        const next = existing.filter((message) => message.id !== messageIdForSend);
+        return next.length === existing.length ? existing : next;
+      });
+      const failedTextToOffer = failedSendTextToOffer({
+        restoredComposer: shouldRestoreComposer,
+        cancelled: isCancelled,
+        failedText: promptForSend,
+      });
+      if (failedTextToOffer !== null) {
+        toastManager.add({
+          type: "error",
+          title: "Message not sent",
+          description: "Your new draft was kept. Copy the failed message to send it again.",
+          // The toast holds the only copy of the failed text, so it stays until dismissed.
+          timeout: 0,
+          data: { threadId: threadIdForSend, hideCopyButton: true },
+          actionProps: {
+            children: "Copy message",
+            onClick: () => {
+              void writeTextToClipboard(failedTextToOffer).catch(() => undefined);
+            },
+          },
         });
       }
       if (createdServerThreadForLocalDraft) {
@@ -5282,7 +5392,11 @@ export default function ChatView({ threadId }: ChatViewProps) {
   }
 
   return (
-    <div data-chat-column className="flex min-h-0 min-w-0 flex-1 flex-col overflow-x-hidden">
+    <div
+      data-chat-column
+      className="flex min-h-0 min-w-0 flex-1 flex-col overflow-x-hidden"
+      onMouseUp={preventMiddleClickPasteOutsideEditable}
+    >
       {/* Top bar */}
       <header
         data-chat-header
@@ -5442,7 +5556,9 @@ export default function ChatView({ threadId }: ChatViewProps) {
             </div>
             {/* Input bar — replaced by missing cwd banner when folder is gone */}
             <ComposerMenuFocusContext value={composerEditorRef}>
-              <div {...workspaceAreaProps("composer", 2, "Message input")} className="shrink-0">
+              {/* No landmark label: the composer is named "Message", and a "Message input" region
+                  around it made screen readers say "Message" twice on the way in. */}
+              <div {...workspaceAreaProps("composer", 2)} className="shrink-0">
                 <ChatComposer
                   ref={composerControlsRef}
                   threadId={activeThread.id}

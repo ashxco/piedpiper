@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   githubHeadingSlugs,
@@ -115,6 +115,17 @@ describe("rewriteMarkdownFileUriHref", () => {
     expect(rewriteMarkdownFileUriHref("file://localhost/home/me/notes.md")).toBe(
       "/home/me/notes.md",
     );
+  });
+
+  it("rejects one-letter schemes that Chromium on Windows reads as drive letters", () => {
+    const NativeURL = URL;
+    using _url = vi.spyOn(globalThis, "URL").mockImplementation(function (input: string | URL) {
+      const drive = /^([a-z]):/i.exec(String(input));
+      return drive
+        ? new NativeURL(`file:///${drive[1]!.toUpperCase()}:/${String(input).slice(2)}`)
+        : new NativeURL(input);
+    });
+    expect(rewriteMarkdownFileUriHref("d:x")).toBeNull();
   });
 
   it("ignores non-file hrefs", () => {
@@ -365,6 +376,9 @@ describe("inlineCodeFilePathCandidate", () => {
     ["Makefile:12", "Makefile:12"],
     ["conf.d/nginx.conf", "conf.d/nginx.conf"],
     ["share/man/ls.1", "share/man/ls.1"],
+    ["docker/Dockerfile", "docker/Dockerfile"],
+    ["docker/Dockerfiles", null],
+    ["Dockerfile", null],
     ["usr/lib/libfoo.so.1", "usr/lib/libfoo.so.1"],
     ["vendor/jquery-3.6.0.min.js", "vendor/jquery-3.6.0.min.js"],
     ["./models/glm-5.3", "./models/glm-5.3"],

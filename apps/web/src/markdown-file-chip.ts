@@ -85,16 +85,19 @@ export function buildFileChipParentSuffixByPath(filePaths: Iterable<string>): Ma
   for (const group of groups.values()) {
     if (group.size < 2) continue;
     const segmentsByPath = new Map([...group].map((path) => [path, parentSegments(path)]));
+    // Counting every parent suffix once keeps a large group linear instead of quadratic.
+    const suffixCounts = new Map<string, number>();
+    for (const segments of segmentsByPath.values()) {
+      for (let depth = 1; depth <= segments.length; depth += 1) {
+        const suffix = segments.slice(-depth).join("/");
+        suffixCounts.set(suffix, (suffixCounts.get(suffix) ?? 0) + 1);
+      }
+    }
     for (const [filePath, segments] of segmentsByPath) {
       if (segments.length === 0) continue;
       let depth = 1;
       for (; depth < segments.length; depth += 1) {
-        const candidate = segments.slice(-depth).join("/");
-        const collides = [...segmentsByPath].some(
-          ([otherPath, otherSegments]) =>
-            otherPath !== filePath && otherSegments.slice(-depth).join("/") === candidate,
-        );
-        if (!collides) break;
+        if (suffixCounts.get(segments.slice(-depth).join("/")) === 1) break;
       }
       const suffixDepth = Math.min(segments.length, Math.max(depth, 2));
       suffixByPath.set(filePath, segments.slice(-suffixDepth).join("/"));

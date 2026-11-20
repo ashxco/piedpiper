@@ -57,7 +57,7 @@ describe("getWindowTitleBarOptions", () => {
 describe("syncWindowTitleBarTheme", () => {
   it("updates the overlay and background when the theme changes", () => {
     const window = makeWindow();
-    syncWindowTitleBarTheme(window, "linux", true);
+    syncWindowTitleBarTheme(window, "linux", true, true);
     expect(window.setBackgroundColor).toHaveBeenCalledWith("#161616");
     expect(window.setTitleBarOverlay).toHaveBeenCalledWith({
       color: "#01000000",
@@ -68,14 +68,24 @@ describe("syncWindowTitleBarTheme", () => {
 
   it("never touches a macOS window", () => {
     const window = makeWindow();
-    syncWindowTitleBarTheme(window, "darwin", true);
+    syncWindowTitleBarTheme(window, "darwin", true, true);
     expect(window.setBackgroundColor).not.toHaveBeenCalled();
+    expect(window.setTitleBarOverlay).not.toHaveBeenCalled();
+  });
+
+  it("updates only the background of a window created without an overlay", () => {
+    const window = makeWindow();
+    window.setTitleBarOverlay.mockImplementation(() => {
+      throw new TypeError("Titlebar overlay is not enabled");
+    });
+    syncWindowTitleBarTheme(window, "win32", false, false);
+    expect(window.setBackgroundColor).toHaveBeenCalledWith("#ffffff");
     expect(window.setTitleBarOverlay).not.toHaveBeenCalled();
   });
 
   it("skips a destroyed window", () => {
     const window = makeWindow(true);
-    syncWindowTitleBarTheme(window, "win32", false);
+    syncWindowTitleBarTheme(window, "win32", false, true);
     expect(window.setBackgroundColor).not.toHaveBeenCalled();
     expect(window.setTitleBarOverlay).not.toHaveBeenCalled();
   });

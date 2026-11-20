@@ -5,7 +5,17 @@ import path from "node:path";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
-import { Effect, FileSystem, Layer, PlatformError, Scope } from "effect";
+import {
+  Cause,
+  Deferred,
+  Effect,
+  Exit,
+  Fiber,
+  FileSystem,
+  Layer,
+  PlatformError,
+  Scope,
+} from "effect";
 import { describe, expect } from "vitest";
 
 import { checkpointRefForThreadTurn } from "../Utils.ts";
@@ -16,6 +26,7 @@ import {
   checkpointLongPathsArgs,
   CheckpointStoreLive,
   checkpointWriteArgsWithoutFullFsync,
+  gitSupportsRemergeDiff,
   isTransientCheckpointGitFailure,
   rawAdditionsToIndexInfo,
   shouldRetryCheckpointWriteWithoutFullFsync,
@@ -403,7 +414,10 @@ describe("CheckpointStoreLive durable writes", () => {
           }),
       );
       expect(exit._tag).toBe("Success");
-      const adds = calls.filter((args) => args.includes("add"));
+      // A failed add is staged once more with --ignore-errors; count only the first attempts.
+      const adds = calls.filter(
+        (args) => args.includes("add") && !args.includes("--ignore-errors"),
+      );
       // broken: both captures retry because the fallback never succeeded; repo: 2; other: 1.
       expect(adds).toHaveLength(7);
       expect(adds[6]).toContain("core.fsyncMethod=batch");
@@ -415,7 +429,10 @@ describe("CheckpointStoreLive durable writes", () => {
       input.args.includes("add") ? { code: 128, stderr: "fatal: disk full" } : okResponse(input),
     );
     expect(exit._tag).toBe("Failure");
-    expect(calls.filter((args) => args.includes("add"))).toHaveLength(1);
+    // The only other add is the single --ignore-errors recovery attempt, which fails the same way.
+    const adds = calls.filter((args) => args.includes("add"));
+    expect(adds).toHaveLength(2);
+    expect(adds[1]).toContain("--ignore-errors");
   });
 
   it("only falls back for unsupported fsync errors on macOS", () => {
@@ -876,6 +893,45 @@ it.layer(TestLayer)("CheckpointStoreLive", (it) => {
       }),
     );
 
+    // Root reads mode-000 files, so the permission failure only exists for other users.
+    it.effect.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+      "keeps the indexed version of files it cannot read",
+      () =>
+        Effect.gen(function* () {
+          const tmp = yield* makeTmpDir();
+          yield* initRepoWithCommit(tmp);
+          const fileSystem = yield* FileSystem.FileSystem;
+          yield* writeTextFile(path.join(tmp, "locked.txt"), "committed\n");
+          yield* git(tmp, ["add", "locked.txt"]);
+          yield* git(tmp, ["commit", "-m", "locked"]);
+          yield* writeTextFile(path.join(tmp, "locked.txt"), "changed\n");
+          yield* writeTextFile(path.join(tmp, "secret.txt"), "untracked\n");
+          yield* writeTextFile(path.join(tmp, "untracked.txt"), "new\n");
+          yield* Effect.acquireRelease(
+            Effect.all([
+              fileSystem.chmod(path.join(tmp, "locked.txt"), 0),
+              fileSystem.chmod(path.join(tmp, "secret.txt"), 0),
+            ]),
+            () =>
+              Effect.all([
+                fileSystem.chmod(path.join(tmp, "locked.txt"), 0o644),
+                fileSystem.chmod(path.join(tmp, "secret.txt"), 0o644),
+              ]).pipe(Effect.orDie),
+          );
+          const checkpointStore = yield* CheckpointStore;
+          const checkpointRef = checkpointRefForThreadTurn(
+            ThreadId.makeUnsafe("thread-checkpoint-unreadable"),
+            0,
+          );
+
+          yield* checkpointStore.captureCheckpoint({ cwd: tmp, checkpointRef });
+
+          expect(yield* git(tmp, ["show", `${checkpointRef}:untracked.txt`])).toBe("new");
+          expect(yield* git(tmp, ["show", `${checkpointRef}:locked.txt`])).toBe("committed");
+          expect(yield* git(tmp, ["ls-tree", checkpointRef, "--", "secret.txt"])).toBe("");
+        }),
+    );
+
     it.effect("reports a workspace its repository ignores as unsupported", () =>
       Effect.gen(function* () {
         const tmp = yield* makeTmpDir();
@@ -1037,6 +1093,141 @@ it.layer(TestLayer)("CheckpointStoreLive", (it) => {
   });
 
   describe("restoreCheckpoint", () => {
+    it.effect.each([
+      // GitCore cannot report the spawn, so a restore about to run counts as started and the
+      // index is reset as a finished restore would; the working tree is untouched.
+      { stop: "as git restore starts", gate: "restore", index: "head", file: "later\n" },
+      { stop: "before git restore", gate: "core.sparseCheckout", index: "staged", file: "later\n" },
+      { stop: "after git restore ran", gate: "clean", index: "head", file: "captured\n" },
+    ] as const)("an interrupted restore $stop leaves the $index index", ({ gate, index, file }) =>
+      Effect.gen(function* () {
+        const tmp = yield* makeTmpDir();
+        yield* initRepoWithCommit(tmp);
+        yield* writeTextFile(path.join(tmp, "a.txt"), "a\n");
+        yield* git(tmp, ["add", "a.txt"]);
+        yield* git(tmp, ["commit", "-m", "add a"]);
+        // The checkpoint differs from HEAD, so a restore left staged is visible in the index.
+        yield* writeTextFile(path.join(tmp, "a.txt"), "captured\n");
+        const checkpointStore = yield* CheckpointStore;
+        const checkpointRef = checkpointRefForThreadTurn(
+          ThreadId.makeUnsafe("thread-checkpoint-interrupted-restore"),
+          0,
+        );
+        yield* checkpointStore.captureCheckpoint({ cwd: tmp, checkpointRef });
+        yield* writeTextFile(path.join(tmp, "a.txt"), "later\n");
+        yield* git(tmp, ["add", "a.txt"]);
+        const stagedTree = yield* git(tmp, ["write-tree"]);
+        const core = yield* GitCore;
+        const entered = yield* Deferred.make<void>();
+        // Fresh, so the shared test layer's memoized store is not reused.
+        const result = yield* Effect.gen(function* () {
+          const gatedStore = yield* CheckpointStore;
+          const fiber = yield* gatedStore
+            .restoreCheckpoint({ cwd: tmp, checkpointRef })
+            .pipe(Effect.exit, Effect.forkScoped);
+          yield* Deferred.await(entered);
+          yield* Fiber.interrupt(fiber);
+          return yield* Fiber.await(fiber);
+        }).pipe(
+          Effect.scoped,
+          Effect.provide(
+            Layer.fresh(CheckpointStoreLive).pipe(
+              Layer.provide(
+                Layer.succeed(GitCore, {
+                  ...core,
+                  execute: (input) =>
+                    input.operation === "CheckpointStore.restoreCheckpoint" &&
+                    input.args.includes(gate)
+                      ? Deferred.succeed(entered, undefined).pipe(Effect.andThen(Effect.never))
+                      : core.execute(input),
+                }),
+              ),
+              Layer.provide(NodeServices.layer),
+            ),
+          ),
+        );
+        expect(Exit.isFailure(result) && Cause.hasInterruptsOnly(result.cause)).toBe(true);
+
+        expect(yield* git(tmp, ["write-tree"])).toBe(
+          index === "head" ? yield* git(tmp, ["rev-parse", "HEAD^{tree}"]) : stagedTree,
+        );
+        const fileSystem = yield* FileSystem.FileSystem;
+        expect(yield* fileSystem.readFileString(path.join(tmp, "a.txt"))).toBe(file);
+      }),
+    );
+
+    it.effect("restores edits to skip-worktree files whose checkpoint content matches HEAD", () =>
+      Effect.gen(function* () {
+        const tmp = yield* makeTmpDir();
+        yield* initRepoWithCommit(tmp);
+        const fileSystem = yield* FileSystem.FileSystem;
+        const skippedPath = path.join(tmp, "skipped.txt");
+        yield* writeTextFile(skippedPath, "original\n");
+        yield* git(tmp, ["add", "skipped.txt"]);
+        yield* git(tmp, ["commit", "-m", "add skipped file"]);
+        yield* git(tmp, ["update-index", "--skip-worktree", "skipped.txt"]);
+        const checkpointStore = yield* CheckpointStore;
+        const checkpointRef = checkpointRefForThreadTurn(
+          ThreadId.makeUnsafe("thread-checkpoint-skip-worktree"),
+          0,
+        );
+        yield* checkpointStore.captureCheckpoint({ cwd: tmp, checkpointRef });
+        yield* writeTextFile(skippedPath, "later\n");
+
+        expect(yield* checkpointStore.restoreCheckpoint({ cwd: tmp, checkpointRef })).toBe(true);
+
+        expect(yield* fileSystem.readFileString(skippedPath)).toBe("original\n");
+      }),
+    );
+
+    it.effect(
+      "sparse restore rewrites manual skip-worktree files and keeps exclusions absent",
+      () =>
+        Effect.gen(function* () {
+          const tmp = yield* makeTmpDir();
+          yield* initRepoWithCommit(tmp);
+          const fileSystem = yield* FileSystem.FileSystem;
+          for (const name of [
+            "in/normal",
+            "in/skipped",
+            "in/s space",
+            "out/deep/absent",
+            "out/stray",
+          ]) {
+            yield* fileSystem.makeDirectory(path.dirname(path.join(tmp, name)), {
+              recursive: true,
+            });
+            yield* writeTextFile(path.join(tmp, name), "original\n");
+          }
+          yield* git(tmp, ["add", "."]);
+          yield* git(tmp, ["commit", "-m", "sparse fixture"]);
+          yield* git(tmp, ["sparse-checkout", "set", "--cone", "--sparse-index", "in"]);
+          // Keeps Git from clearing the bit on files that are present.
+          yield* git(tmp, ["config", "sparse.expectFilesOutsideOfPatterns", "true"]);
+          yield* git(tmp, ["update-index", "--skip-worktree", "in/skipped", "in/s space"]);
+          const captureCwd = path.join(tmp, "in");
+          const checkpointStore = yield* CheckpointStore;
+          const checkpointRef = checkpointRefForThreadTurn(
+            ThreadId.makeUnsafe("thread-checkpoint-sparse-restore"),
+            0,
+          );
+          yield* checkpointStore.captureCheckpoint({ cwd: captureCwd, checkpointRef });
+
+          for (const restoreCwd of [captureCwd, tmp]) {
+            for (const name of ["in/skipped", "in/s space", "in/normal"]) {
+              yield* writeTextFile(path.join(tmp, name), "later\n");
+            }
+            expect(
+              yield* checkpointStore.restoreCheckpoint({ cwd: restoreCwd, checkpointRef }),
+            ).toBe(true);
+            for (const name of ["in/skipped", "in/s space", "in/normal"]) {
+              expect(yield* fileSystem.readFileString(path.join(tmp, name))).toBe("original\n");
+            }
+            expect(yield* fileSystem.exists(path.join(tmp, "out"))).toBe(false);
+          }
+        }),
+    );
+
     it.effect("leaves restored files unstaged before the first commit", () =>
       Effect.gen(function* () {
         const tmp = yield* makeTmpDir();
@@ -1366,6 +1557,124 @@ it.layer(TestLayer)("CheckpointStoreLive", (it) => {
         ]);
         expect(yield* checkpointStore.listAuthoredPaths(refs)).toEqual(
           new Set(["README.md", "shared.txt"]),
+        );
+      }),
+    );
+
+    it.effect("keeps a conflict resolved to upstream's side on Git before 2.36", () =>
+      Effect.gen(function* () {
+        const tmp = yield* makeTmpDir();
+        yield* initRepoWithCommit(tmp);
+        const checkpointStore = yield* CheckpointStore;
+        const refs = refsFor(tmp, "thread-authored-old-git", 0);
+        const commitBeforeTurn = (file: string, contents: string) =>
+          Effect.gen(function* () {
+            yield* writeTextFile(path.join(tmp, file), contents);
+            yield* git(tmp, ["add", "."]);
+            yield* git(tmp, ["commit", "-m", file], { committedAt: "2020-01-01T00:00:00Z" });
+          });
+        yield* git(tmp, ["checkout", "-b", "upstream"]);
+        yield* commitBeforeTurn("upstream.txt", "upstream\n");
+        yield* commitBeforeTurn("shared.txt", "upstream\n");
+        yield* git(tmp, ["checkout", "-"]);
+        yield* commitBeforeTurn("shared.txt", "ours\n");
+        yield* checkpointStore.captureCheckpoint({
+          cwd: tmp,
+          checkpointRef: refs.fromCheckpointRef,
+        });
+        yield* git(tmp, ["merge", "upstream", "--no-edit"], { allowNonZeroExit: true });
+        yield* writeTextFile(path.join(tmp, "shared.txt"), "upstream\n");
+        yield* git(tmp, ["commit", "-am", "merge upstream"]);
+        yield* writeTextFile(path.join(tmp, "README.md"), "# edited\n");
+        yield* checkpointStore.captureCheckpoint({ cwd: tmp, checkpointRef: refs.toCheckpointRef });
+
+        // Git before 2.36 (Ubuntu 22.04 ships 2.34.1) has no remerge diff mode.
+        const core = yield* GitCore;
+        const authored = yield* CheckpointStore.asEffect().pipe(
+          Effect.flatMap((store) => store.listAuthoredPaths(refs)),
+          Effect.provide(
+            Layer.fresh(CheckpointStoreLive).pipe(
+              Layer.provide(
+                Layer.succeed(GitCore, {
+                  ...core,
+                  execute: (input) =>
+                    input.args.at(-1) === "version"
+                      ? core
+                          .execute(input)
+                          .pipe(
+                            Effect.map((result) => ({ ...result, stdout: "git version 2.34.1\n" })),
+                          )
+                      : input.args.includes("--diff-merges=remerge")
+                        ? Effect.fail(
+                            new GitCommandError({
+                              operation: input.operation,
+                              command: "git log",
+                              cwd: input.cwd,
+                              detail: "fatal: unknown value for --diff-merges: remerge",
+                            }),
+                          )
+                        : core.execute(input),
+                }),
+              ),
+              Layer.provide(NodeServices.layer),
+            ),
+          ),
+        );
+        expect(authored).toEqual(new Set(["README.md", "shared.txt"]));
+      }),
+    );
+
+    it("reads the Git version that first has remerge diffs", () => {
+      expect(gitSupportsRemergeDiff("git version 2.34.1\n")).toBe(false);
+      expect(gitSupportsRemergeDiff("git version 2.36.0\n")).toBe(true);
+      expect(gitSupportsRemergeDiff("git version 2.45.1.windows.1\n")).toBe(true);
+      expect(gitSupportsRemergeDiff("git version 3.0.0\n")).toBe(true);
+      expect(gitSupportsRemergeDiff("unexpected")).toBe(false);
+    });
+
+    it.effect("leaves out fetched commits newer than the checkpoint, keeping local ones", () =>
+      Effect.gen(function* () {
+        const root = yield* makeTmpDir();
+        const fileSystem = yield* FileSystem.FileSystem;
+        const upstream = path.join(root, "upstream");
+        const primary = path.join(root, "primary");
+        const cwd = path.join(root, "turn");
+        yield* fileSystem.makeDirectory(upstream);
+        yield* initRepoWithCommit(upstream);
+        yield* git(root, ["clone", upstream, primary]);
+        yield* git(primary, ["config", "user.email", "test@test.com"]);
+        yield* git(primary, ["config", "user.name", "Test"]);
+        yield* git(primary, ["worktree", "add", cwd, "-b", "turn"]);
+        const checkpointStore = yield* CheckpointStore;
+        const refs = refsFor(cwd, "thread-authored-fetched", 0);
+        yield* checkpointStore.captureCheckpoint({ cwd, checkpointRef: refs.fromCheckpointRef });
+
+        const commitFile = (repo: string, file: string) =>
+          Effect.gen(function* () {
+            yield* writeTextFile(path.join(repo, file), `${file}\n`);
+            yield* git(repo, ["add", "."]);
+            yield* git(repo, ["commit", "-m", file]);
+          });
+
+        yield* git(upstream, ["checkout", "-b", "release"]);
+        yield* commitFile(upstream, "first.txt");
+        yield* git(cwd, ["fetch", "origin"]);
+        yield* commitFile(upstream, "second.txt");
+        // The primary worktree's HEAD reflog is the only record that this commit was made here.
+        yield* git(primary, ["checkout", "--detach"]);
+        yield* commitFile(primary, "own.txt");
+        yield* git(primary, ["push", "origin", "HEAD:refs/heads/pushed"]);
+        yield* git(upstream, ["merge", "pushed", "--no-edit"]);
+
+        yield* git(cwd, ["fetch", "origin"]);
+        yield* git(cwd, ["merge", "--ff-only", "origin/release"]);
+        yield* commitFile(cwd, "local.txt");
+        // Pushing imported commits to another branch must not make them look local.
+        yield* git(cwd, ["push", "origin", "HEAD:refs/heads/mirror"]);
+        yield* checkpointStore.captureCheckpoint({ cwd, checkpointRef: refs.toCheckpointRef });
+
+        expect(yield* checkpointStore.listAuthoredPaths(refs)).toEqual(
+          new Set(["local.txt", "own.txt"]),
         );
       }),
     );

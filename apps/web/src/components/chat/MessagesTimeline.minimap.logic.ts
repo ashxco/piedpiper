@@ -173,21 +173,27 @@ export function resolveTimelineMinimapHasPersistentGutter(input: {
   return Number.isFinite(gutter) && gutter >= TIMELINE_MINIMAP_PERSISTENT_GUTTER;
 }
 
-/** Items whose user message intersects the viewport. */
+/**
+ * Items whose turn intersects the viewport. A turn spans its user message up to the next one, so
+ * the strip stays lit while only a long reply is on screen.
+ */
 export function resolveTimelineMinimapHighlightedIndices(input: {
   readonly viewportTop: number;
   readonly viewportBottom: number;
   readonly itemBounds: ReadonlyArray<TimelineMinimapItemBounds | null>;
 }): number[] {
   const visible: number[] = [];
-  for (const [index, bounds] of input.itemBounds.entries()) {
+  // Walked bottom-up so each turn knows where the next one starts; the last runs to the end.
+  let nextTop = Number.POSITIVE_INFINITY;
+  for (let index = input.itemBounds.length - 1; index >= 0; index--) {
+    const bounds = input.itemBounds[index];
     if (!bounds || !Number.isFinite(bounds.top)) continue;
     const height = Number.isFinite(bounds.height) ? Math.max(1, bounds.height) : 1;
-    if (bounds.top < input.viewportBottom && bounds.top + height > input.viewportTop) {
-      visible.push(index);
-    }
+    const bottom = Math.max(bounds.top + height, nextTop);
+    if (bounds.top < input.viewportBottom && bottom > input.viewportTop) visible.push(index);
+    nextTop = bounds.top;
   }
-  return visible;
+  return visible.reverse();
 }
 
 /** The reader's turn: the first item in view, else the last one above the viewport. */

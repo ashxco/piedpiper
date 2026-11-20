@@ -1,13 +1,14 @@
 import {
   Cause,
   Clock,
+  Data,
   Duration,
   Effect,
   Exit,
   Layer,
   ManagedRuntime,
-  Option,
   Scope,
+  Schema,
   Stream,
 } from "effect";
 
@@ -18,15 +19,27 @@ import {
   type WsRpcProtocolClient,
 } from "./rpc/protocol";
 import { createWsFirstOpenGate } from "./rpc/wsFirstOpenGate";
-import { RpcClient } from "effect/unstable/rpc";
+import { RpcClient, RpcClientError } from "effect/unstable/rpc";
 
 interface SubscribeOptions {
   readonly retryDelay?: Duration.Input;
 }
 
 interface RequestOptions {
-  readonly timeout?: Option.Option<Duration.Input>;
+  readonly resendAfterSocketLoss?: boolean;
+  // Bounds each attempt: a live socket can still carry a request the server never answers.
+  readonly timeout?: Duration.Input;
+  readonly timeoutMessage?: string;
 }
+
+/** A request the server never answered within its timeout, though the socket stayed up. */
+export class WsRequestTimeoutError extends Data.TaggedError("WsRequestTimeoutError")<{
+  readonly message: string;
+}> {}
+
+// A live socket can still carry a message the server never answers; the heartbeat
+// alone would leave the send pending forever.
+export const MESSAGE_DISPATCH_TIMEOUT_MS = 60_000;
 
 const DEFAULT_SUBSCRIPTION_RETRY_DELAY_MS = Duration.millis(250);
 // Kept low so a subscription still resumes quickly once the socket is back after a long outage.
@@ -67,7 +80,7 @@ export class WsTransport {
 
   async request<TSuccess>(
     execute: (client: WsRpcProtocolClient) => Effect.Effect<TSuccess, Error, never>,
-    _options?: RequestOptions,
+    options?: RequestOptions,
   ): Promise<TSuccess> {
     if (this.disposed) {
       throw new Error("Transport disposed");
@@ -75,7 +88,38 @@ export class WsTransport {
 
     await this.firstOpen.wait();
     const client = await this.clientPromise;
-    return await this.runtime.runPromise(Effect.suspend(() => execute(client)));
+    const timeout = options?.timeout;
+    const attempt =
+      timeout === undefined
+        ? Effect.suspend(() => execute(client))
+        : Effect.suspend(() => execute(client)).pipe(
+            Effect.timeoutOrElse({
+              duration: timeout,
+              orElse: () =>
+                Effect.fail(
+                  new WsRequestTimeoutError({
+                    message: options?.timeoutMessage ?? "The server did not answer in time.",
+                  }),
+                ),
+            }),
+          );
+    for (let resends = 0; ; resends += 1) {
+      const generation = this.firstOpen.generation();
+      const result = await this.runtime.runPromiseExit(attempt);
+      if (Exit.isSuccess(result)) return result.value;
+      const lostSocket = result.cause.reasons.some(
+        (reason) =>
+          reason._tag === "Fail" &&
+          Schema.is(RpcClientError.RpcClientError)(reason.error) &&
+          ["SocketCloseError", "SocketOpenError", "SocketReadError", "SocketWriteError"].includes(
+            reason.error.reason._tag,
+          ),
+      );
+      if (!options?.resendAfterSocketLoss || !lostSocket || resends >= 2 || this.disposed) {
+        return await this.runtime.runPromise(Effect.failCause(result.cause));
+      }
+      await this.firstOpen.waitForNextOpen(generation);
+    }
   }
 
   async requestStream<TValue>(

@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { codexAppServerArgs, codexExecLaunchArgs, resolveCodexLaunchArgs } from "./codexLaunchArgs";
+import {
+  codexAppServerArgs,
+  codexExecLaunchArgs,
+  codexMcpListLaunchArgs,
+  resolveCodexLaunchArgs,
+} from "./codexLaunchArgs";
 
 describe("resolveCodexLaunchArgs", () => {
   it("uses PIEDPIPER_CODEX_LAUNCH_ARGS before configured settings", () => {
@@ -14,6 +19,14 @@ describe("resolveCodexLaunchArgs", () => {
       resolveCodexLaunchArgs(" --strict-config ", { PIEDPIPER_CODEX_LAUNCH_ARGS: "   " }),
     ).toBe("--strict-config");
     expect(resolveCodexLaunchArgs("", { PIEDPIPER_CODEX_LAUNCH_ARGS: "   " })).toBe("");
+  });
+
+  it("keeps a trailing escaped space in the env override", () => {
+    const override = String.raw`--config model=gpt\ `;
+    expect(resolveCodexLaunchArgs("", { PIEDPIPER_CODEX_LAUNCH_ARGS: override })).toBe(override);
+    expect(
+      codexExecLaunchArgs(resolveCodexLaunchArgs("", { PIEDPIPER_CODEX_LAUNCH_ARGS: override })),
+    ).toEqual(["--config", "model=gpt "]);
   });
 });
 
@@ -54,9 +67,59 @@ describe("codexExecLaunchArgs", () => {
     ).toEqual(["--strict-config", "--enable", "foo", "--config", "model=gpt 5"]);
   });
 
+  it("keeps compact -cKEY=VALUE and -pPROFILE options", () => {
+    expect(codexExecLaunchArgs("-cmodel=gpt -pwork -c=a=b")).toEqual([
+      "-c=model=gpt",
+      "-p=work",
+      "-c=a=b",
+    ]);
+    expect(codexMcpListLaunchArgs("-cmodel=gpt -pwork")).toEqual(["-c=model=gpt", "-p=work"]);
+  });
+
+  it("drops launch-arg enables for features text generation turns off", () => {
+    expect(
+      codexExecLaunchArgs(
+        "--enable hooks --enable=codex_hooks --enable apps --enable=connectors --enable plugins --enable foo",
+      ),
+    ).toEqual(["--enable", "foo"]);
+    expect(codexMcpListLaunchArgs("--enable hooks --enable=apps --enable plugins")).toEqual([
+      "--enable",
+      "hooks",
+    ]);
+  });
+
   it("does not pair value-taking flags with adjacent flags", () => {
     expect(codexExecLaunchArgs("--config --strict-config --enable --disable")).toEqual([
       "--strict-config",
+    ]);
+  });
+});
+
+describe("codex exec and mcp list launch args", () => {
+  const launchArgs =
+    "--strict-config --oss --local-provider ollama --profile local -p=work --listen off --enable foo";
+
+  it("keeps the local model provider flags for codex exec", () => {
+    expect(codexExecLaunchArgs(launchArgs)).toEqual([
+      "--strict-config",
+      "--oss",
+      "--local-provider",
+      "ollama",
+      "--profile",
+      "local",
+      "-p=work",
+      "--enable",
+      "foo",
+    ]);
+  });
+
+  it("keeps the selected profile and drops exec-only flags for codex mcp list", () => {
+    expect(codexMcpListLaunchArgs(launchArgs)).toEqual([
+      "--profile",
+      "local",
+      "-p=work",
+      "--enable",
+      "foo",
     ]);
   });
 });

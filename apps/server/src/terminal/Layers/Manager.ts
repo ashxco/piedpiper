@@ -49,6 +49,7 @@ import {
   type PtyAdapterShape,
   type PtyExitEvent,
   type PtyProcess,
+  ptyInput,
 } from "../Services/PTY";
 import {
   type ShellCandidate,
@@ -57,7 +58,11 @@ import {
   isRetryableShellSpawnError,
   resolveShellCandidates,
 } from "./ShellResolver";
-import { BoundedTerminalHistory, DEFAULT_HISTORY_BYTE_LIMIT } from "./BoundedTerminalHistory";
+import {
+  BoundedTerminalHistory,
+  DEFAULT_HISTORY_BYTE_LIMIT,
+  type TerminalHistoryPersistenceCursor,
+} from "./BoundedTerminalHistory";
 import { takePendingProcessEvent } from "./PendingProcessEventQueue";
 import {
   type TerminalProcessTableEntry,
@@ -72,6 +77,11 @@ import {
 } from "./TerminalProcessTable";
 import { neutralizeInheritedHistory, sanitizeTerminalHistoryChunk } from "./TerminalSanitizer";
 import {
+  TERMINAL_SEQUENCE_GROUND,
+  terminalSequenceEnd,
+  terminalSequenceStateAfter,
+} from "./TerminalSequenceState";
+import {
   legacySafeThreadId,
   encodedHistoryName,
   hashedHistoryThreadPart,
@@ -83,6 +93,8 @@ import {
 
 const DEFAULT_HISTORY_LINE_LIMIT = 5_000;
 const DEFAULT_PERSIST_DEBOUNCE_MS = 250;
+// Window size for scanning backward from a history tail for the last ESC before it.
+const HISTORY_TAIL_SCAN_BYTES = 4 * 1024;
 const DEFAULT_SUBPROCESS_POLL_INTERVAL_MS = 1_000;
 // Discover children started without terminal input or output.
 const QUIET_SUBPROCESS_SNAPSHOT_EVERY_TICKS = 30;
@@ -729,6 +741,18 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
         Deferred.doneUnsafe(exited, Effect.void);
       });
       yield* Effect.gen(function* () {
+        // Interactive shells ignore SIGTERM but pass SIGHUP to their background jobs, skipping
+        // nohup'd and disowned ones. Windows ignores the signal and node-pty kills the whole
+        // tree there.
+        if (platform !== "win32") {
+          yield* Effect.sync(() => {
+            try {
+              process.kill("SIGHUP");
+            } catch {
+              // The SIGTERM below reports a shell that can no longer be signalled.
+            }
+          });
+        }
         const terminated = yield* Effect.try({
           try: () => process.kill("SIGTERM"),
           catch: (cause) =>
@@ -810,6 +834,12 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
     // The worker runs keys serially, so a flush skips the debounce of other keys queued ahead of it.
     const pendingPersistFlushes = new Map<string, number>();
     let wakePersistDebounce: Deferred.Deferred<void> | null = null;
+    // Where each history's file stands after its last successful write, so later flushes
+    // append only new output instead of rewriting up to the whole byte cap every time.
+    const persistedHistory = new WeakMap<
+      BoundedTerminalHistory,
+      TerminalHistoryPersistenceCursor
+    >();
     const persistWorker = yield* makeKeyedCoalescingWorker<
       string,
       PersistHistoryRequest,
@@ -844,9 +874,22 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
           return;
         }
 
+        // An immediate persist (clear, restart, close) always rewrites the whole file.
+        const update = request.history.persistenceUpdate(
+          request.immediate ? undefined : persistedHistory.get(request.history),
+        );
+        if (update.append && update.data.length === 0) return;
+        // An append may partially succeed before failing. Retry from a full snapshot,
+        // never from an uncertain file offset.
+        persistedHistory.delete(request.history);
         yield* fileSystem
-          .writeFileString(historyPath(threadId, terminalId), request.history.value())
+          .writeFileString(historyPath(threadId, terminalId), update.data, {
+            flag: update.append ? "a" : "w",
+          })
           .pipe(
+            Effect.tap(() =>
+              Effect.sync(() => persistedHistory.set(request.history, update.cursor)),
+            ),
             Effect.catch((error) =>
               Effect.logWarning("failed to persist terminal history", {
                 threadId,
@@ -907,6 +950,43 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
       const info = yield* file.stat;
       const limit = BigInt(historyByteLimit);
       const offset = info.size > limit ? info.size - limit : 0n;
+      // The tail can start inside a control sequence; only the bytes before it say which. ESC
+      // enters the escape state from every state, so only bytes after the last ESC matter, and
+      // without one the terminal never left ground.
+      const decoder = new TextDecoder("utf-8", { ignoreBOM: true });
+      let sequenceState = TERMINAL_SEQUENCE_GROUND;
+      const readInto = Effect.fn("terminal.readHistoryTail.readInto")(function* (
+        buffer: Uint8Array,
+      ) {
+        let filled = 0;
+        while (filled < buffer.length) {
+          const read = Number(yield* file.read(buffer.subarray(filled)));
+          if (read === 0) break;
+          filled += read;
+        }
+        return buffer.subarray(0, filled);
+      });
+      let escapeAt: bigint | null = null;
+      const window = new Uint8Array(HISTORY_TAIL_SCAN_BYTES);
+      for (let end = offset; end > 0n && escapeAt === null; ) {
+        const begin = end > BigInt(window.length) ? end - BigInt(window.length) : 0n;
+        yield* file.seek(begin, "start");
+        const index = (yield* readInto(window.subarray(0, Number(end - begin)))).lastIndexOf(0x1b);
+        if (index !== -1) escapeAt = begin + BigInt(index);
+        end = begin;
+      }
+      if (escapeAt !== null) {
+        yield* file.seek(escapeAt, "start");
+        for (let remaining = Number(offset - escapeAt); remaining > 0; ) {
+          const read = yield* readInto(window.subarray(0, Math.min(remaining, window.length)));
+          if (read.length === 0) break;
+          remaining -= read.length;
+          sequenceState = terminalSequenceStateAfter(
+            sequenceState,
+            decoder.decode(read, { stream: true }),
+          );
+        }
+      }
       yield* file.seek(offset, "start");
       const bytes = new Uint8Array(Number(info.size - offset));
       let length = 0;
@@ -920,10 +1000,15 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
         // A tail read can start inside a UTF-8 code point; skip its continuation bytes.
         while (start < length && ((bytes[start] ?? 0) & 0xc0) === 0x80) start += 1;
       }
+      sequenceState = terminalSequenceStateAfter(
+        sequenceState,
+        decoder.decode(bytes.subarray(0, start)),
+      );
+      const history = new TextDecoder("utf-8", { ignoreBOM: true }).decode(
+        bytes.subarray(start, length),
+      );
       return {
-        history: new TextDecoder("utf-8", { ignoreBOM: true }).decode(
-          bytes.subarray(start, length),
-        ),
+        history: history.slice(terminalSequenceEnd(sequenceState, history)),
         truncated: offset > 0n,
       };
     });
@@ -951,21 +1036,32 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
         );
         const capped = capStoredHistory(raw);
         if (migrating || truncated || capped !== raw) {
-          const write = migrating
-            ? Effect.gen(function* () {
-                const temporaryPath = yield* fileSystem.makeTempFileScoped({
-                  directory: logsDir,
-                  prefix: ".history-",
-                });
-                yield* fileSystem.writeFileString(temporaryPath, capped);
-                yield* fileSystem.rename(temporaryPath, nextPath);
-              }).pipe(Effect.scoped)
-            : fileSystem.writeFileString(nextPath, capped);
-          yield* write.pipe(
+          // Appended history files outgrow the caps until compacted here. Write a temporary file
+          // and rename it so a failed compaction never loses the history already on disk.
+          const write = Effect.gen(function* () {
+            const temporaryPath = yield* fileSystem.makeTempFileScoped({
+              directory: logsDir,
+              prefix: ".history-",
+            });
+            yield* fileSystem.writeFileString(temporaryPath, capped);
+            yield* fileSystem.rename(temporaryPath, nextPath);
+          }).pipe(
+            Effect.scoped,
             Effect.mapError(
               toTerminalHistoryError(migrating ? "migrate" : "truncate", threadId, terminalId),
             ),
           );
+          yield* migrating
+            ? write
+            : write.pipe(
+                Effect.catch((error) =>
+                  Effect.logWarning("failed to compact terminal history", {
+                    threadId,
+                    terminalId,
+                    error,
+                  }),
+                ),
+              );
         }
         if (migrating)
           yield* fileSystem.remove(sourcePath, { force: true }).pipe(
@@ -1694,10 +1790,10 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
 
     yield* Effect.addFinalizer(() =>
       Effect.gen(function* () {
-        const sessions = yield* modifyManagerState(
+        const [sessions, pendingKills] = yield* modifyManagerState(
           (state) =>
             [
-              [...state.sessions.values()],
+              [[...state.sessions.values()], [...state.killFibers.values()]],
               {
                 ...state,
                 sessions: new Map(),
@@ -1720,10 +1816,14 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
           yield* persistHistory(session.threadId, session.terminalId, session.history);
         });
 
-        yield* Effect.forEach(sessions, cleanupSession, {
-          concurrency: "unbounded",
-          discard: true,
-        });
+        // Closing workerScope next would interrupt escalations of already stopped terminals.
+        yield* Effect.all(
+          [
+            Effect.forEach(sessions, cleanupSession, { concurrency: "unbounded", discard: true }),
+            Fiber.awaitAll(pendingKills),
+          ],
+          { concurrency: "unbounded", discard: true },
+        );
       }).pipe(Effect.ignoreCause({ log: true })),
     );
 
@@ -1925,7 +2025,7 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
       }
       session.activityCount += 1;
       yield* Effect.try({
-        try: () => process.write(input.data),
+        try: () => process.write(ptyInput(input.data, input.binary)),
         catch: (cause) =>
           new TerminalWriteError({
             threadId: input.threadId,
@@ -1998,7 +2098,12 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
           session.updatedAt = new Date().toISOString();
           const sequence = nextEventSequence();
           session.eventSequence = sequence;
-          yield* persistHistory(input.threadId, terminalId, session.history);
+          // A drain waits for the key to go idle, which never happens while the shell keeps
+          // printing; every reader of the file flushes it first.
+          yield* persistWorker.enqueue(toSessionKey(input.threadId, terminalId), {
+            history: session.history,
+            immediate: true,
+          });
           yield* publishEvent({
             type: "cleared",
             threadId: input.threadId,

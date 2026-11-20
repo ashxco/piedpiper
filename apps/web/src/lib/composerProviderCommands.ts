@@ -5,13 +5,16 @@ export interface ComposerProviderCommand {
   readonly argumentHint?: string;
 }
 
-/** A slash word with a second slash, such as `/usr/bin`, is a path, not a command. */
+/**
+ * A slash word with a second slash or a backslash, such as `/usr/bin` or `/foo\bar`, is a
+ * path, not a command, even when the caret precedes that separator.
+ */
 export function isComposerPathWord(text: string, wordStart: number, cursor: number): boolean {
   let wordEnd = cursor;
   while (wordEnd < text.length && !/\s/.test(text[wordEnd] ?? "")) {
     wordEnd += 1;
   }
-  return text.slice(wordStart + 1, wordEnd).includes("/");
+  return /[/\\]/.test(text.slice(wordStart + 1, wordEnd));
 }
 
 /** Claude only expands a slash command at the very start of a message. */

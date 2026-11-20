@@ -155,25 +155,32 @@ describe("buildTurnDiffTree", () => {
     ]);
   });
 
-  it("normalizes file paths with windows separators", () => {
-    const tree = buildTurnDiffTree([
-      { path: "apps\\web\\src\\index.ts", additions: 2, deletions: 1 },
-    ]);
-
-    expect(tree).toEqual([
+  it("keeps a literal backslash in a POSIX file name instead of splitting it into a folder", () => {
+    expect(
+      buildTurnDiffTree([
+        { path: "back\\slash.txt", additions: 1, deletions: 0 },
+        { path: "back/slash.txt", additions: 2, deletions: 0 },
+      ]),
+    ).toEqual([
       {
         kind: "directory",
-        name: "apps/web/src",
-        path: "apps/web/src",
-        stat: { additions: 2, deletions: 1 },
+        name: "back",
+        path: "back",
+        stat: { additions: 2, deletions: 0 },
         children: [
           {
             kind: "file",
-            name: "index.ts",
-            path: "apps/web/src/index.ts",
-            stat: { additions: 2, deletions: 1 },
+            name: "slash.txt",
+            path: "back/slash.txt",
+            stat: { additions: 2, deletions: 0 },
           },
         ],
+      },
+      {
+        kind: "file",
+        name: "back\\slash.txt",
+        path: "back\\slash.txt",
+        stat: { additions: 1, deletions: 0 },
       },
     ]);
   });

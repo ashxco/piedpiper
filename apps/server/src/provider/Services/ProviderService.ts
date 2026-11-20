@@ -14,6 +14,7 @@
 import type {
   ProviderInterruptTurnInput,
   ProviderKind,
+  ModelSelection,
   ProviderRespondToRequestInput,
   ProviderRespondToUserInputInput,
   ProviderRuntimeEvent,
@@ -52,6 +53,12 @@ export interface ProviderServiceShape {
   readonly sendTurn: (
     input: ProviderSendTurnInput,
   ) => Effect.Effect<ProviderTurnStartResult, ProviderServiceError>;
+
+  /** Applies compatible selection options to an already running query. */
+  readonly applyModelSelection?: (input: {
+    readonly threadId: ThreadId;
+    readonly modelSelection: ModelSelection;
+  }) => Effect.Effect<boolean, ProviderServiceError>;
 
   /**
    * Interrupt a running provider turn.

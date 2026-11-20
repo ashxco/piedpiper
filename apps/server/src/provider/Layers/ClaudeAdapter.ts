@@ -26,6 +26,7 @@ import {
   type ProviderInteractionMode,
   ProviderItemId,
   type ProviderGoal,
+  type ModelSelection,
   type ProviderRuntimeEvent,
   type ProviderRuntimeTurnStatus,
   type ProviderSession,
@@ -42,6 +43,7 @@ import {
   Cause,
   DateTime,
   Deferred,
+  Duration,
   Effect,
   Exit,
   FileSystem,
@@ -111,8 +113,13 @@ import { ClaudeAdapter, type ClaudeAdapterShape } from "../Services/ClaudeAdapte
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 import {
   CLAUDE_PROVIDER_RETRY_DETAIL_KIND,
+  CLAUDE_SCHEDULED_WAKEUP_TASK_ID,
   CLAUDE_SETTING_SOURCES,
   PROVIDER,
+  claudeQueryEnvironment,
+  type ClaudeScheduledWakeupState,
+  makeClaudeScheduledWakeupState,
+  trackClaudeScheduledWakeup,
   claudeApiRetryingMessage,
   claudeApiRetrySettledMessage,
   claudePermissionDowngradeNotice,
@@ -123,6 +130,7 @@ import {
   claudeAppendFlagMissingValueError,
   claudeGoalDeferringWorkCount,
   claudeLaunchExtraArgs,
+  withoutClaudeCanUseToolShadowedWarning,
   claudeLiveBackgroundWorkCount,
   readClaudeLaunchAppendFile,
   readClaudeLaunchSettings,
@@ -174,6 +182,7 @@ import {
   toolInputFingerprint,
   toolInputStreamField,
   sanitizeToolResultForPersistence,
+  unwrapClaudeSubagentResult,
   toolResultBlocksFromUserMessage,
   toolResultStreamKind,
   tryParseJsonRecord,
@@ -199,6 +208,18 @@ type PromptQueueItem =
 const CLAUDE_INTERRUPT_GRACE = "3 seconds";
 /** How long interruptTurn waits for the SDK to acknowledge an interrupt before failing. */
 const CLAUDE_INTERRUPT_ACK_TIMEOUT = "10 seconds";
+/**
+ * Longest a turn may stay in one streak of API retries. Claude can announce a retry and never
+ * resume, and a hung request can take many minutes per attempt, so counting attempts never ends it.
+ */
+const CLAUDE_RETRY_BUDGET = Duration.minutes(10);
+/**
+ * Partial messages are on, so a started prompt or a sent request streams within seconds.
+ * A gateway can hold a request open this long without the CLI ever timing out and retrying.
+ */
+const CLAUDE_UNANSWERED_REQUEST_TIMEOUT = Duration.minutes(10);
+/** Bounds the process-tree read taken before a CLI is closed. */
+const CLAUDE_DESCENDANT_REFRESH_TIMEOUT = "2 seconds";
 /** Per-task and overall bounds for stopping background tasks before Stop interrupts the turn. */
 const CLAUDE_STOP_TASK_TIMEOUT = "3 seconds";
 const CLAUDE_STOP_TASKS_TOTAL_TIMEOUT = "10 seconds";
@@ -265,6 +286,8 @@ interface ClaudeTurnState {
   /** The retry row still open for this turn; the next root progress or the turn's end settles it. */
   apiRetry?: ClaudeApiRetryStatus & {
     readonly retryId: string;
+    /** Identifies this streak of retries for the retry budget; settling the row ends the streak. */
+    readonly streak: object;
     /** Opened while the root waited on a subagent, so that subagent's progress settles it too. */
     readonly whileSubagentRuns: boolean;
   };
@@ -272,6 +295,8 @@ interface ClaudeTurnState {
   rateLimitRetryId?: string;
   /** A root response is streaming; a 429 comes before a response, so it cannot be about this one. */
   rootStreamOpen?: boolean;
+  /** Set when the prompt starts or a request goes out; cleared by the turn's next root frame. */
+  unansweredRequest?: object;
   /** Model output since the goal's last failed check, which a turn needs before it can have met that goal. */
   sawGoalModelOutput?: boolean;
   /** Id of the root message being streamed; content block indexes restart with each message. */
@@ -421,12 +446,18 @@ interface ClaudeSessionContext {
   readonly taskTypes: Map<string, string>;
   /** Non-ambient tasks from Claude's last background level; undefined until the first one. */
   backgroundRoster: Set<string> | undefined;
+  /** Fails the turn when one streak of API retries outlasts the retry budget. */
+  retryBudgetFiber: Fiber.Fiber<void, never> | undefined;
+  /** Fails the turn when a request gets no answer at all; replaced by each new request. */
+  unansweredRequestFiber: Fiber.Fiber<void, never> | undefined;
+  /** Claude's pending ScheduleWakeup; kept out of liveTaskIds so it never refuses a restart. */
+  readonly scheduledWakeup: ClaudeScheduledWakeupState;
   /** The `/goal` Claude last reported for this conversation. */
   goal: ProviderGoal | null;
   /** Index of the turn that set `goal`, so a rollback can tell whether the goal survives it. */
   goalSetAtTurn: number | undefined;
   /** Filled synchronously by the process-group spawner when the CLI exits abnormally. */
-  readonly cliExit: { stderrTail?: string };
+  readonly cliExit: { stderrTail?: string; refreshDescendants?: () => Promise<void> };
   /** Per process: a relative temp dir follows the cwd this CLI was launched in. */
   readonly taskOutputRoot: string | undefined;
   /** Foreground Bash calls whose output file is being tailed, by tool_use_id. */
@@ -523,7 +554,10 @@ const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     ((input: {
       readonly prompt: AsyncIterable<SDKUserMessage>;
       readonly options: ClaudeQueryOptions;
-    }) => query({ prompt: input.prompt, options: input.options }) as ClaudeQueryRuntime);
+    }) =>
+      withoutClaudeCanUseToolShadowedWarning(() =>
+        query({ prompt: input.prompt, options: input.options }),
+      ) as ClaudeQueryRuntime);
 
   const sessions = new Map<ThreadId, ClaudeSessionContext>();
   const runtimeEventQueue = yield* Queue.unbounded<ProviderRuntimeEvent>();
@@ -1369,7 +1403,122 @@ const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     const retry = context.turnState?.apiRetry;
     if (!context.turnState || !retry) return;
     delete context.turnState.apiRetry;
+    yield* stopRetryBudgetWatch(context);
     yield* emitApiRetryRow(context, retry, outcome);
+  });
+
+  const stopRetryBudgetWatch = (context: ClaudeSessionContext) => {
+    const fiber = context.retryBudgetFiber;
+    context.retryBudgetFiber = undefined;
+    return fiber === undefined ? Effect.void : Fiber.interrupt(fiber);
+  };
+
+  const stopUnansweredRequestWatch = (context: ClaudeSessionContext) => {
+    const fiber = context.unansweredRequestFiber;
+    context.unansweredRequestFiber = undefined;
+    return fiber === undefined ? Effect.void : Fiber.interrupt(fiber);
+  };
+
+  /** Fails a turn Claude stopped answering, then asks the CLI to abandon the request. */
+  const failStalledTurn = Effect.fn("failStalledTurn")(function* (
+    context: ClaudeSessionContext,
+    detail: string,
+  ) {
+    yield* completeTurn(context, "failed", detail);
+    // The CLI may never acknowledge; the turn has already ended either way.
+    yield* Effect.tryPromise(() => context.query.interrupt()).pipe(
+      Effect.timeoutOption(CLAUDE_INTERRUPT_ACK_TIMEOUT),
+      Effect.ignore,
+    );
+  });
+
+  // Claude can announce a retry and never resume, or retry a hung request again and again;
+  // the budget spans the whole streak, so neither leaves the turn running forever.
+  const armRetryBudgetWatch = Effect.fn("armRetryBudgetWatch")(function* (
+    context: ClaudeSessionContext,
+    turn: ClaudeTurnState,
+    streak: object,
+  ) {
+    yield* stopRetryBudgetWatch(context);
+    context.retryBudgetFiber = yield* Effect.gen(function* () {
+      yield* Effect.sleep(CLAUDE_RETRY_BUDGET);
+      const retry = turn.apiRetry;
+      if (context.stopped || context.turnState !== turn || retry?.streak !== streak) return;
+      // A user Stop already in flight keeps its stopped outcome.
+      if (turn.interruptRequested) return;
+      // The turn's end settles the retry, which must not interrupt this fiber.
+      context.retryBudgetFiber = undefined;
+      yield* Effect.logWarning("claude.api_retry.budget_exhausted", {
+        threadId: context.session.threadId,
+        attempt: retry.attempt,
+      });
+      yield* failStalledTurn(
+        context,
+        `Claude stopped responding while retrying the API request: it did not recover within ${Duration.toMinutes(CLAUDE_RETRY_BUDGET)} minutes (${claudeApiRetryingMessage(retry)}). Send the message again.`,
+      );
+    }).pipe(
+      Effect.catchCause((cause) =>
+        Effect.logDebug("claude.api_retry.budget_watch_failed", { cause }),
+      ),
+      Effect.forkDetach({ startImmediately: true }),
+    );
+  });
+
+  // A gateway can hold a request open without ever letting the CLI time out and retry.
+  const armUnansweredRequestWatch = Effect.fn("armUnansweredRequestWatch")(function* (
+    context: ClaudeSessionContext,
+    turn: ClaudeTurnState,
+  ) {
+    const request = {};
+    turn.unansweredRequest = request;
+    yield* stopUnansweredRequestWatch(context);
+    context.unansweredRequestFiber = yield* Effect.gen(function* () {
+      yield* Effect.sleep(CLAUDE_UNANSWERED_REQUEST_TIMEOUT);
+      if (context.stopped || context.turnState !== turn || turn.unansweredRequest !== request) {
+        return;
+      }
+      if (turn.interruptRequested) return;
+      context.unansweredRequestFiber = undefined;
+      yield* Effect.logWarning("claude.request.unanswered", {
+        threadId: context.session.threadId,
+      });
+      yield* failStalledTurn(
+        context,
+        `Claude sent nothing for ${Duration.toMinutes(CLAUDE_UNANSWERED_REQUEST_TIMEOUT)} minutes. The API or a gateway in front of it is not responding. Send the message again.`,
+      );
+    }).pipe(
+      Effect.catchCause((cause) =>
+        Effect.logDebug("claude.request.unanswered_watch_failed", { cause }),
+      ),
+      Effect.forkDetach({ startImmediately: true }),
+    );
+  });
+
+  /** A request going out arms the no-answer watch; the turn's next root frame disarms it. */
+  const trackUnansweredRequest = Effect.fn("trackUnansweredRequest")(function* (
+    context: ClaudeSessionContext,
+    message: SDKMessage,
+  ) {
+    const turn = context.turnState;
+    if (!turn) return;
+    if (message.type === "system" && message.subtype === "status") {
+      if (message.status === "requesting") {
+        yield* armUnansweredRequestWatch(context, turn);
+        return;
+      }
+    }
+    if (turn.unansweredRequest === undefined) return;
+    if (Reflect.get(message, "parent_tool_use_id") != null) return;
+    // Background tasks from earlier turns keep reporting while the root request hangs.
+    // Only the root starts depth-1 tasks, so such a start (a forked skill) is this turn's.
+    if (message.type === "system" && message.subtype.startsWith("task_")) {
+      const spawnDepth: unknown = Reflect.get(message, "spawn_depth");
+      const startsRootTask =
+        message.subtype === "task_started" &&
+        (typeof spawnDepth === "number" ? spawnDepth : 1) <= 1;
+      if (!startsRootTask) return;
+    }
+    delete turn.unansweredRequest;
   });
 
   // Waits for the tail's last read so its output lands before the call settles.
@@ -2148,7 +2297,11 @@ const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       const toolData = {
         toolName: tool.toolName,
         input: tool.input,
-        result: sanitizeToolResultForPersistence(toolResult.block),
+        result: sanitizeToolResultForPersistence(
+          tool.itemType === "collab_agent_tool_call"
+            ? unwrapClaudeSubagentResult(toolResult.block)
+            : toolResult.block,
+        ),
       };
 
       const updatedStamp = yield* makeEventStamp();
@@ -2718,10 +2871,12 @@ const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           if (isRateLimit && turn.rootStreamOpen) return;
           // Any other failure is the root request's own, so whatever it was streaming has ended.
           if (!isRateLimit) turn.rootStreamOpen = false;
+          const previousRetry = turn.apiRetry;
           const retry = {
             retryId:
               turn.apiRetry?.retryId ??
               (isRateLimit ? (turn.rateLimitRetryId ??= message.uuid) : message.uuid),
+            streak: previousRetry?.streak ?? {},
             whileSubagentRuns:
               turn.apiRetry?.whileSubagentRuns ??
               Array.from(context.inFlightTools.values()).some(
@@ -2736,6 +2891,8 @@ const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           };
           turn.apiRetry = retry;
           yield* emitApiRetryRow(context, retry, "retrying");
+          // Only a streak's first frame starts the budget, so later frames cannot extend it.
+          if (previousRetry === undefined) yield* armRetryBudgetWatch(context, turn, retry.streak);
         }
         return;
       case "session_state_changed":
@@ -2969,15 +3126,72 @@ const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     }
   });
 
+  // A pending wakeup shows as a background task, so the thread stays in Working and the idle
+  // reaper keeps the process that holds it.
+  const publishScheduledWakeupChange = Effect.fn("publishScheduledWakeupChange")(function* (
+    context: ClaudeSessionContext,
+    wasPending: boolean,
+    endStatus: "completed" | "stopped",
+  ) {
+    const pending = context.scheduledWakeup.scheduledFor !== undefined;
+    if (pending === wasPending) return;
+    if (!pending) {
+      yield* emitTaskEnded(context, CLAUDE_SCHEDULED_WAKEUP_TASK_ID, endStatus);
+      return;
+    }
+    const stamp = yield* makeEventStamp();
+    yield* offerRuntimeEvent({
+      type: "task.started",
+      eventId: stamp.eventId,
+      provider: PROVIDER,
+      createdAt: stamp.createdAt,
+      threadId: context.session.threadId,
+      ...(context.turnState ? { turnId: asCanonicalTurnId(context.turnState.turnId) } : {}),
+      payload: {
+        taskId: RuntimeTaskId.makeUnsafe(CLAUDE_SCHEDULED_WAKEUP_TASK_ID),
+        description: "Scheduled wakeup",
+      },
+      providerRefs: nativeProviderRefs(),
+    });
+  });
+
+  const trackScheduledWakeup = Effect.fn("trackScheduledWakeup")(function* (
+    context: ClaudeSessionContext,
+    message: SDKMessage,
+  ) {
+    const wasPending = context.scheduledWakeup.scheduledFor !== undefined;
+    trackClaudeScheduledWakeup(context.scheduledWakeup, message, {
+      nowMs: DateTime.toEpochMillis(yield* DateTime.now),
+      userTurnActive: context.turnState !== undefined && context.turnState.synthetic !== true,
+    });
+    yield* publishScheduledWakeupChange(context, wasPending, "completed");
+  });
+
+  // Stop cancels Claude's wakeup and a stopped process loses it.
+  const cancelScheduledWakeup = Effect.fn("cancelScheduledWakeup")(function* (
+    context: ClaudeSessionContext,
+  ) {
+    const wasPending = context.scheduledWakeup.scheduledFor !== undefined;
+    context.scheduledWakeup.scheduledFor = undefined;
+    context.scheduledWakeup.possibleEarlyWake = false;
+    yield* publishScheduledWakeupChange(context, wasPending, "stopped");
+  });
+
   const handleSdkMessage = Effect.fn("handleSdkMessage")(function* (
     context: ClaudeSessionContext,
     message: SDKMessage,
   ) {
     yield* logNativeSdkMessage(context, message);
     yield* ensureThreadId(context, message);
+    yield* trackScheduledWakeup(context, message);
+    yield* trackUnansweredRequest(context, message);
 
-    // An assistant frame carrying an error is the failed request itself, not progress.
-    if (message.type === "stream_event" || (message.type === "assistant" && !message.error)) {
+    // An assistant frame carrying an error is the failed request itself, not progress, and
+    // the CLI's <synthetic> frames (such as an API error notice) are not the model answering.
+    if (
+      message.type === "stream_event" ||
+      (message.type === "assistant" && !message.error && message.message.model !== "<synthetic>")
+    ) {
       if (!isSubagentMessage(message) || context.turnState?.apiRetry?.whileSubagentRuns) {
         yield* settleApiRetry(context, "recovered");
       }
@@ -3007,10 +3221,34 @@ const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       case "rate_limit_event":
         yield* handleSdkTelemetryMessage(context, message);
         return;
-      case "conversation_reset":
+      case "conversation_reset": {
         // /clear and the other resets drop the CLI's goal with the conversation.
         yield* setClaudeGoal(context, null);
+        // Every trigger discards the conversation, so the meter starts over whatever the trigger is.
+        if (context.rootRequestUsage) context.rootRequestUsage.usage = null;
+        context.lastLiveContextUsage = undefined;
+        const maxTokens = context.lastKnownContextWindow;
+        const cleared: ThreadTokenUsageSnapshot = {
+          usedTokens: 0,
+          lastUsedTokens: 0,
+          ...(typeof maxTokens === "number" && Number.isFinite(maxTokens) && maxTokens > 0
+            ? { maxTokens }
+            : {}),
+        };
+        context.lastKnownTokenUsage = cleared;
+        const usageStamp = yield* makeEventStamp();
+        yield* offerRuntimeEvent({
+          type: "thread.token-usage.updated",
+          eventId: usageStamp.eventId,
+          provider: PROVIDER,
+          createdAt: usageStamp.createdAt,
+          threadId: context.session.threadId,
+          ...(context.turnState ? { turnId: asCanonicalTurnId(context.turnState.turnId) } : {}),
+          payload: { usage: cleared },
+          providerRefs: nativeProviderRefs(),
+        });
         return;
+      }
       case "prompt_suggestion":
         yield* Effect.logDebug("claude.message.ignored", {
           threadId: context.session.threadId,
@@ -3236,8 +3474,11 @@ const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     if (context.stopped) return;
 
     context.stopped = true;
+    yield* stopRetryBudgetWatch(context);
+    yield* stopUnansweredRequestWatch(context);
     yield* stopAllTaskOutputTails(context);
     yield* flushPendingTaskEnds(context);
+    yield* cancelScheduledWakeup(context);
 
     for (const taskId of Array.from(context.liveTaskIds)) {
       context.liveTaskIds.delete(taskId);
@@ -3281,6 +3522,14 @@ const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     context.streamFiber = undefined;
     if (streamFiber && streamFiber.pollUnsafe() === undefined) {
       yield* Fiber.interrupt(streamFiber);
+    }
+
+    // A job started since the last process-tree poll is recorded before the CLI is told to exit.
+    const refreshDescendants = context.cliExit.refreshDescendants;
+    if (refreshDescendants) {
+      yield* Effect.promise(refreshDescendants).pipe(
+        Effect.timeoutOption(CLAUDE_DESCENDANT_REFRESH_TIMEOUT),
+      );
     }
 
     // @effect-diagnostics-next-line tryCatchInEffectGen:off
@@ -3379,6 +3628,7 @@ const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         appendSystemPromptFile: launchAppendSystemPromptFile,
         appendFlagMissingValue,
         settingsArg: launchSettingsArg,
+        pluginDirectories: launchPluginDirectories,
       } = claudeLaunchExtraArgs(claudeSettings.launchArgs);
       if (appendFlagMissingValue) {
         return yield* claudeAppendFlagMissingValueError(appendFlagMissingValue);
@@ -3520,15 +3770,24 @@ const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         });
       const runtimeSettings = yield* readRuntimeSettings(apiModelId);
       // The user's --settings sit beneath what Pied Piper sets itself.
+      const settingsEnv = {
+        // Claude Code ranks this env var above the autoCompactWindow setting.
+        ...(claudeSettings.autoCompactWindow
+          ? { CLAUDE_CODE_AUTO_COMPACT_WINDOW: claudeSettings.autoCompactWindow }
+          : {}),
+        ...(runtimeSettings.toolSearchOverride
+          ? { ENABLE_TOOL_SEARCH: runtimeSettings.toolSearchOverride }
+          : {}),
+      };
       const settings = {
         ...launchSettings,
-        ...(runtimeSettings.toolSearchOverride
+        ...(Object.keys(settingsEnv).length > 0
           ? {
               env: {
                 ...(typeof launchSettings?.env === "object" && launchSettings.env !== null
                   ? launchSettings.env
                   : {}),
-                ENABLE_TOOL_SEARCH: runtimeSettings.toolSearchOverride,
+                ...settingsEnv,
               },
             }
           : {}),
@@ -3560,6 +3819,9 @@ const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       // Own process group so plugin MCP grandchildren stop with the CLI (not on Windows).
       const cliExit: ClaudeSessionContext["cliExit"] = {};
       const spawnClaudeCodeProcess = claudeProcessGroupSpawnerFor(process.platform, {
+        onSpawn: ({ refreshDescendants }) => {
+          cliExit.refreshDescendants = refreshDescendants;
+        },
         onAbnormalExit: ({ code, signal, stderrTail }) => {
           cliExit.stderrTail = stderrTail;
           runFork(
@@ -3606,8 +3868,13 @@ const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         onElicitation,
         supportedDialogKinds: [CLAUDE_RESUME_DIALOG_KIND],
         ...(spawnClaudeCodeProcess ? { spawnClaudeCodeProcess } : {}),
-        env: childEnv,
+        env: claudeQueryEnvironment(childEnv, Boolean(existingResumeSessionId)),
         additionalDirectories,
+        ...(launchPluginDirectories
+          ? {
+              plugins: launchPluginDirectories.map((path) => ({ type: "local" as const, path })),
+            }
+          : {}),
         ...(Object.keys(extraArgs).length > 0 ? { extraArgs } : {}),
       };
 
@@ -3702,6 +3969,9 @@ const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         pendingTaskEnds: new Map(),
         taskTypes: new Map(),
         backgroundRoster: undefined,
+        retryBudgetFiber: undefined,
+        unansweredRequestFiber: undefined,
+        scheduledWakeup: makeClaudeScheduledWakeupState(),
         goal: resumeState?.goal ?? null,
         goalSetAtTurn: resumeState?.goalSetAtTurn,
         cliExit,
@@ -3826,24 +4096,12 @@ const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     }
   });
 
-  const sendTurn: ClaudeAdapterShape["sendTurn"] = Effect.fn("sendTurn")(function* (input) {
-    const context = yield* requireSession(input.threadId);
-    const modelSelection =
-      input.modelSelection?.provider === "claudeAgent" ? input.modelSelection : undefined;
-
-    if (context.turnState) {
-      // Auto-close a stale synthetic turn (from background agent responses
-      // between user prompts) to prevent blocking the user's next turn.
-      yield* completeTurn(context, "completed");
-    }
-
-    context.autoCompactWindow = (yield* context.readRuntimeSettings(
-      modelSelection
-        ? resolveApiModelId(modelSelection)
-        : (context.currentApiModelId ?? context.initApiModelId),
-    )).autoCompactWindow;
+  const applySelectionToQuery = Effect.fn("applySelectionToQuery")(function* (
+    context: ClaudeSessionContext,
+    modelSelection: ModelSelection | undefined,
+  ) {
     let modelChanged = false;
-    if (modelSelection?.model) {
+    if (modelSelection?.provider === PROVIDER && modelSelection.model) {
       // Model, effort and fast mode apply to the live query from this turn on.
       // A thinking toggle needs a new process; the command reactor restarts for it.
       const apiModelId = resolveApiModelId(modelSelection);
@@ -3857,8 +4115,15 @@ const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       if (context.currentApiModelId !== apiModelId) {
         yield* Effect.tryPromise({
           try: () => context.query.setModel(apiModelId),
-          catch: (cause) => toRequestError(input.threadId, "turn/setModel", cause),
+          catch: (cause) => toRequestError(context.session.threadId, "turn/setModel", cause),
         });
+        if (context.stopped || sessions.get(context.session.threadId) !== context) {
+          return yield* toRequestError(
+            context.session.threadId,
+            "turn/setModel",
+            new Error("Session stopped during model update"),
+          );
+        }
         context.currentApiModelId = apiModelId;
         modelChanged = true;
         // The previous model's window would clamp the meter until the next result.
@@ -3882,7 +4147,8 @@ const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         const applyFlags = (settings: ClaudeLiveFlagSettings) =>
           Effect.tryPromise({
             try: () => context.query.applyFlagSettings(settings),
-            catch: (cause) => toRequestError(input.threadId, "turn/applyFlagSettings", cause),
+            catch: (cause) =>
+              toRequestError(context.session.threadId, "turn/applyFlagSettings", cause),
           });
         const flags = { effortLevel: effort, fastMode: fastMode ? true : null };
         // Ultracode depends on the account and CLI, and a CLI can reject the key outright, so
@@ -3892,7 +4158,7 @@ const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             Effect.as(ultracodeValue === true),
             Effect.catch((error) =>
               Effect.logWarning("Claude rejected ultracode; continuing without it", {
-                threadId: input.threadId,
+                threadId: context.session.threadId,
                 detail: error.message,
               }).pipe(
                 Effect.andThen(
@@ -3914,6 +4180,13 @@ const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           : context.currentUltracode
             ? yield* applyWithUltracode(null)
             : yield* applyFlags(flags).pipe(Effect.as(false));
+        if (context.stopped || sessions.get(context.session.threadId) !== context) {
+          return yield* toRequestError(
+            context.session.threadId,
+            "turn/applyFlagSettings",
+            new Error("Session stopped during option update"),
+          );
+        }
         context.currentEffort = effort;
         context.currentFastMode = fastMode;
         context.currentUltracode = appliedUltracode;
@@ -3924,6 +4197,47 @@ const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       };
       context.startInput = { ...context.startInput, modelSelection };
     }
+    return modelChanged;
+  });
+
+  const applyModelSelection: NonNullable<ClaudeAdapterShape["applyModelSelection"]> = Effect.fn(
+    "applyModelSelection",
+  )(function* (input) {
+    const context = sessions.get(input.threadId);
+    const selection = input.modelSelection;
+    if (
+      !context ||
+      context.stopped ||
+      !context.turnState ||
+      selection.provider !== PROVIDER ||
+      resolveApiModelId(selection) !== context.currentApiModelId ||
+      (selection.options?.thinking ?? true) !==
+        (context.startInput.modelSelection?.provider === PROVIDER
+          ? (context.startInput.modelSelection.options?.thinking ?? true)
+          : true)
+    )
+      return false;
+    yield* applySelectionToQuery(context, selection);
+    return true;
+  });
+
+  const sendTurn: ClaudeAdapterShape["sendTurn"] = Effect.fn("sendTurn")(function* (input) {
+    const context = yield* requireSession(input.threadId);
+    const modelSelection =
+      input.modelSelection?.provider === "claudeAgent" ? input.modelSelection : undefined;
+
+    if (context.turnState) {
+      // Auto-close a stale synthetic turn (from background agent responses
+      // between user prompts) to prevent blocking the user's next turn.
+      yield* completeTurn(context, "completed");
+    }
+
+    context.autoCompactWindow = (yield* context.readRuntimeSettings(
+      modelSelection
+        ? resolveApiModelId(modelSelection)
+        : (context.currentApiModelId ?? context.initApiModelId),
+    )).autoCompactWindow;
+    const modelChanged = yield* applySelectionToQuery(context, modelSelection);
 
     // Apply interaction mode by switching the SDK's permission mode and
     // pinning the live mode on the context so `canUseTool` sees the change.
@@ -3988,6 +4302,8 @@ const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     }
     context.turnState = turnState;
     context.interruptAckTimedOut = false;
+    // The prompt itself is a request; the CLI's first frame for it disarms the watch.
+    yield* armUnansweredRequestWatch(context, turnState);
     context.session = {
       ...context.session,
       status: "running",
@@ -4056,6 +4372,7 @@ const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       const context = yield* requireSession(threadId);
       if (context.turnState) context.turnState.interruptRequested = true;
       yield* stopLiveTasks(context);
+      yield* cancelScheduledWakeup(context);
       // An interrupt the SDK never acknowledges must not wedge the shared provider worker.
       const acknowledged = yield* Effect.tryPromise({
         try: () => context.query.interrupt(),
@@ -4203,7 +4520,11 @@ const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   ) =>
     Effect.sync(() => {
       const context = sessions.get(threadId);
-      return context === undefined || context.stopped ? 0 : liveBackgroundWork(context);
+      if (context === undefined || context.stopped) return 0;
+      // A wakeup can be up to an hour out, past the idle timeout, and dies with the process.
+      return (
+        liveBackgroundWork(context) + (context.scheduledWakeup.scheduledFor === undefined ? 0 : 1)
+      );
     });
 
   // Only ProviderService's finalizer calls this, so it is always a server quit.
@@ -4239,6 +4560,7 @@ const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     },
     startSession,
     sendTurn,
+    applyModelSelection,
     interruptTurn,
     readThread,
     rollbackThread,

@@ -162,7 +162,8 @@ export const refreshCheckedOutBranch = Effect.fn("GitManager.refreshCheckedOutBr
       cwd,
       // Both refuse tracked edits that race the status check above.
       args: isAncestor ? ["merge", "--ff-only", targetCommit] : ["reset", "--merge", targetCommit],
-      timeoutMs: 30_000,
+      // Killing a slow checkout partway through strands a half-updated working tree.
+      timeoutMs: null,
     });
     return { moved: true, onTarget: true } satisfies RefreshCheckedOutBranchResult;
   },

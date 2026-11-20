@@ -13,6 +13,7 @@ import { useStore } from "../store";
 import { type ChatMessage, type Thread } from "../types";
 import { recallableComposerPrompt } from "./chat/composerPromptHistory";
 import { deriveUserMessageWithReviewComments } from "./timelineHeight";
+import { readComposerImageBytes } from "../lib/composerImageFingerprint";
 
 const REVERT_IMAGE_FETCH_TIMEOUT_MS = 30_000;
 const REVERT_WAIT_TIMEOUT_MS = 120_000;
@@ -85,6 +86,7 @@ export async function fetchRevertedMessageImages(
         if (!response.ok) return { name: attachment.name, file: null };
         const blob = await response.blob();
         const file = new File([blob], attachment.name, { type: attachment.mimeType });
+        await readComposerImageBytes(file);
         return { name: attachment.name, file };
       } catch {
         return { name: attachment.name, file: null };

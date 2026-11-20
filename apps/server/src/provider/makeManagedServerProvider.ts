@@ -16,6 +16,15 @@ import { ServerSettingsError } from "@piedpiper/contracts";
 
 const pendingSnapshots = new WeakSet<ServerProvider>();
 
+/** How soon a periodic check that failed over a ready provider is repeated before it is shown. */
+const FAILED_CHECK_RECHECK_DELAY_MS = 30_000;
+
+interface ApplySnapshotOptions {
+  readonly forceRefresh?: boolean;
+  /** A periodic check: one failure over a ready provider is held for a recheck instead of shown. */
+  readonly deferFailure?: boolean;
+}
+
 /** True for a placeholder snapshot that no live provider check has replaced yet. */
 export const isPendingProviderSnapshot = (snapshot: ServerProvider): boolean =>
   pendingSnapshots.has(snapshot);
@@ -127,19 +136,36 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
   }
   const snapshotRef = yield* Ref.make(initialSnapshot);
   const settingsRef = yield* Ref.make(initialSettings);
+  const recheckPendingRef = yield* Ref.make(false);
 
   const applySnapshotBase = Effect.fn("applySnapshot")(function* (
     nextSettings: Settings,
-    options?: { readonly forceRefresh?: boolean },
+    options?: ApplySnapshotOptions,
   ) {
-    const forceRefresh = options?.forceRefresh === true;
     const previousSettings = yield* Ref.get(settingsRef);
+    // Nothing watches credential files, so any settings apply rechecks a failed sign-in.
+    const currentSnapshot = yield* Ref.get(snapshotRef);
+    const forceRefresh =
+      options?.forceRefresh === true ||
+      (currentSnapshot.enabled && currentSnapshot.auth.status === "unauthenticated");
     if (!forceRefresh && !input.haveSettingsChanged(previousSettings, nextSettings)) {
       yield* Ref.set(settingsRef, nextSettings);
       return yield* Ref.get(snapshotRef);
     }
 
     const checkedSnapshot = yield* input.checkProvider;
+    // One failed periodic check over a ready provider is often transient; recheck before showing it.
+    if (
+      options?.deferFailure === true &&
+      checkedSnapshot.status === "error" &&
+      checkedSnapshot.auth.status !== "unauthenticated"
+    ) {
+      const published = yield* Ref.get(snapshotRef);
+      if (published.enabled && published.status === "ready" && !pendingSnapshots.has(published)) {
+        yield* Ref.set(recheckPendingRef, true);
+        return published;
+      }
+    }
     const usageAccountChanged = (input.haveUsageAccountChanged ?? input.haveSettingsChanged)(
       previousSettings,
       nextSettings,
@@ -156,12 +182,12 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
     yield* PubSub.publish(changesPubSub, nextSnapshot);
     return nextSnapshot;
   });
-  const applySnapshot = (nextSettings: Settings, options?: { readonly forceRefresh?: boolean }) =>
+  const applySnapshot = (nextSettings: Settings, options?: ApplySnapshotOptions) =>
     refreshSemaphore.withPermits(1)(applySnapshotBase(nextSettings, options));
 
-  const refreshSnapshot = Effect.fn("refreshSnapshot")(function* () {
+  const refreshSnapshot = Effect.fn("refreshSnapshot")(function* (deferFailure = false) {
     const nextSettings = yield* input.getSettings;
-    return yield* applySnapshot(nextSettings, { forceRefresh: true });
+    return yield* applySnapshot(nextSettings, { forceRefresh: true, deferFailure });
   });
 
   // A failed check must not end this subscription; the next settings change retries.
@@ -170,13 +196,13 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
   ).pipe(Effect.forkScoped);
 
   // A disabled provider has nothing to probe, unless settings drifted because a re-enable check failed.
-  const refreshIfEnabled = Effect.gen(function* () {
+  const refreshIfEnabled = Effect.fn("refreshIfEnabled")(function* (deferFailure: boolean) {
     const snapshot = yield* Ref.get(snapshotRef);
     if (!snapshot.enabled) {
       const currentSettings = yield* input.getSettings;
       if (!input.haveSettingsChanged(yield* Ref.get(settingsRef), currentSettings)) return;
     }
-    yield* refreshSnapshot();
+    yield* refreshSnapshot(deferFailure);
   });
 
   const readRefreshIntervalMs =
@@ -202,17 +228,26 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
   }
 
   // A settings change only restarts the wait with the new interval; it never probes by itself.
+  // A held failure is rechecked sooner, and that recheck shows whatever it finds.
   yield* Effect.forever(
-    readRefreshIntervalMs.pipe(
-      Effect.flatMap((intervalMs) =>
-        Effect.raceFirst(
+    Effect.all([readRefreshIntervalMs, Ref.getAndSet(recheckPendingRef, false)]).pipe(
+      Effect.flatMap(([configuredMs, recheckPending]) => {
+        const intervalMs = recheckPending ? FAILED_CHECK_RECHECK_DELAY_MS : configuredMs;
+        return Effect.raceFirst(
           intervalMs > 0
             ? Effect.sleep(Duration.millis(intervalMs)).pipe(Effect.as(true))
             : Effect.never,
           Queue.take(refreshIntervalChanged).pipe(Effect.as(false)),
-        ),
-      ),
-      Effect.flatMap((intervalElapsed) => (intervalElapsed ? refreshIfEnabled : Effect.void)),
+        ).pipe(
+          Effect.flatMap((intervalElapsed) =>
+            intervalElapsed
+              ? refreshIfEnabled(!recheckPending)
+              : recheckPending
+                ? Ref.set(recheckPendingRef, true)
+                : Effect.void,
+          ),
+        );
+      }),
       Effect.ignoreCause({ log: true }),
     ),
   ).pipe(Effect.forkScoped);

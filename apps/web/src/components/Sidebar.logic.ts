@@ -365,6 +365,8 @@ export function useThreadJumpHintVisibility(): {
 
 export function hasUnseenCompletion(thread: ThreadStatusInput): boolean {
   if (!thread.latestTurn?.completedAt) return false;
+  // A run the user stopped did not finish, so it is no green "Completed".
+  if (thread.latestTurn.state === "interrupted") return false;
   const completedAt = Date.parse(thread.latestTurn.completedAt);
   if (Number.isNaN(completedAt)) return false;
   if (!thread.lastVisitedAt) return true;

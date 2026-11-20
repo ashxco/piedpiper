@@ -320,3 +320,56 @@ describe("local day boundaries", () => {
     }
   });
 });
+
+describe("timestamps after the system time zone changes", () => {
+  // Node re-resolves the default zone when TZ is assigned, like a renderer after the OS zone changes.
+  function useTimeZone(timeZone: string): Disposable {
+    const previous = process.env.TZ;
+    process.env.TZ = timeZone;
+    return {
+      [Symbol.dispose]: () => {
+        if (previous === undefined) delete process.env.TZ;
+        else process.env.TZ = previous;
+      },
+    };
+  }
+  // Built fresh with an explicit zone, so expectations follow the host locale but not a stale zone.
+  const timeIn = (iso: string, timeZone: string) =>
+    new Intl.DateTimeFormat(undefined, {
+      hour: "numeric",
+      minute: "2-digit",
+      hour12: true,
+      timeZone,
+    }).format(new Date(iso));
+  const dayIn = (iso: string, timeZone: string) =>
+    new Intl.DateTimeFormat(undefined, { month: "numeric", day: "numeric", timeZone }).format(
+      new Date(iso),
+    );
+
+  it("renders message times and dates in the new zone", () => {
+    const sameDay = "2026-11-07T04:45:43.877Z";
+    const earlierInWeek = "2026-11-04T20:00:00.000Z";
+    const now = Date.parse(sameDay);
+    using _zone = useTimeZone("America/New_York");
+    expect([
+      formatShortTimestamp(sameDay, "12-hour"),
+      formatDayAwareTimestamp(sameDay, "12-hour", now),
+      formatDayAwareTimestamp(earlierInWeek, "12-hour", now),
+    ]).toEqual([
+      timeIn(sameDay, "America/New_York"),
+      timeIn(sameDay, "America/New_York"),
+      `${dayIn(earlierInWeek, "America/New_York")} ${timeIn(earlierInWeek, "America/New_York")}`,
+    ]);
+
+    process.env.TZ = "Asia/Bangkok";
+    expect([
+      formatShortTimestamp(sameDay, "12-hour"),
+      formatDayAwareTimestamp(sameDay, "12-hour", now),
+      formatDayAwareTimestamp(earlierInWeek, "12-hour", now),
+    ]).toEqual([
+      timeIn(sameDay, "Asia/Bangkok"),
+      timeIn(sameDay, "Asia/Bangkok"),
+      `${dayIn(earlierInWeek, "Asia/Bangkok")} ${timeIn(earlierInWeek, "Asia/Bangkok")}`,
+    ]);
+  });
+});

@@ -20,6 +20,7 @@ import {
 } from "@piedpiper/contracts";
 
 import { type CodexAccountSnapshot } from "../provider/codexAccount";
+import type { CodexReasoningSummary } from "./protocolHelpers";
 
 export type PendingRequestKey = string;
 
@@ -108,6 +109,8 @@ export interface CodexAbandonedRetry {
 export interface CodexSessionContext {
   session: ProviderSession;
   account: CodexAccountSnapshot;
+  /** The user's configured `model_reasoning_summary`, read once at session start. */
+  reasoningSummary?: CodexReasoningSummary | undefined;
   child: ChildProcessWithoutNullStreams;
   output: readline.Interface;
   pending: Map<PendingRequestKey, PendingRequest>;

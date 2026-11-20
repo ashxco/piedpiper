@@ -86,6 +86,16 @@ export function removePreparingComposerImages(
   return new Set(removed.map((image) => image.id));
 }
 
+/**
+ * Drops every image still preparing for the thread, so their fitted results are discarded rather
+ * than recreating a draft the user has just thrown away.
+ */
+export function cancelPreparingComposerImages(threadId: string): void {
+  const current = readPreparingComposerImages(threadId);
+  if (current.length === 0) return;
+  removePreparingComposerImages(threadId, new Set(current.map((image) => image.id)));
+}
+
 /** Keeps a fitted batch's entries whose tile was not removed, so a cancelled image reports nothing. */
 export function keepStillPreparingImages<T extends { readonly id: string }>(
   batch: ReadonlyArray<T>,

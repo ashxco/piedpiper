@@ -663,6 +663,8 @@ function makeManager(input?: {
   statusDetailsCalls?: { count: number };
   /** Collects the options of every GitCore.statusDetails call. */
   statusDetailsOptions?: Array<GitStatusDetailsOptions | undefined>;
+  /** Makes every GitCore.statusDetails call after a successful push fail. */
+  failStatusDetailsAfterPush?: boolean;
   autoPull?: Partial<DefaultBranchAutoPullShape>;
 }) {
   const { service: gitHubCli, ghCalls } = createGitHubCliWithFakeGh(input?.ghScenario);
@@ -681,11 +683,14 @@ function makeManager(input?: {
   const prepareCommitContextCalls = input?.prepareCommitContextCalls;
   const statusDetailsCalls = input?.statusDetailsCalls;
   const statusDetailsOptions = input?.statusDetailsOptions;
+  const failStatusDetailsAfterPush = input?.failStatusDetailsAfterPush === true;
+  let pushed = false;
   const gitCoreLayer =
     configReads === undefined &&
     prepareCommitContextCalls === undefined &&
     statusDetailsCalls === undefined &&
-    statusDetailsOptions === undefined
+    statusDetailsOptions === undefined &&
+    !failStatusDetailsAfterPush
       ? baseGitCoreLayer
       : Layer.effect(
           GitCore,
@@ -697,6 +702,14 @@ function makeManager(input?: {
                 configReads?.push(key);
                 return core.readConfigValue(cwd, key);
               },
+              execute: (executeInput) => {
+                // Remote URLs are read with `config --get-all` to take the first of several.
+                const [command, flag, key] = executeInput.args;
+                if (command === "config" && flag === "--get-all" && key !== undefined) {
+                  configReads?.push(key);
+                }
+                return core.execute(executeInput);
+              },
               prepareCommitContext: (cwd, filePaths, options) => {
                 prepareCommitContextCalls?.push(options);
                 return core.prepareCommitContext(cwd, filePaths, options);
@@ -704,8 +717,25 @@ function makeManager(input?: {
               statusDetails: (cwd, options) => {
                 if (statusDetailsCalls) statusDetailsCalls.count += 1;
                 statusDetailsOptions?.push(options);
-                return core.statusDetails(cwd, options);
+                return failStatusDetailsAfterPush && pushed
+                  ? Effect.fail(
+                      new GitCommandError({
+                        operation: "GitCore.statusDetails",
+                        command: "git status",
+                        cwd,
+                        detail: "index.lock exists",
+                      }),
+                    )
+                  : core.statusDetails(cwd, options);
               },
+              pushCurrentBranch: (cwd, branch) =>
+                core.pushCurrentBranch(cwd, branch).pipe(
+                  Effect.tap(() =>
+                    Effect.sync(() => {
+                      pushed = true;
+                    }),
+                  ),
+                ),
             } satisfies typeof core;
           }),
         ).pipe(Layer.provideMerge(baseGitCoreLayer));
@@ -1537,6 +1567,50 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
     }),
   );
 
+  it.effect("status reads a remote's first URL when it has a second push URL", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("piedpiper-git-manager-");
+      yield* initRepo(repoDir);
+      yield* runGit(repoDir, ["checkout", "-b", "feature/mirrored"]);
+      const originDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["remote", "add", "origin", "https://github.com/acme/app.git"]);
+      yield* configureVisibleRemoteUrlWithLocalRewrite(
+        repoDir,
+        "origin",
+        "https://github.com/acme/app.git",
+        originDir,
+      );
+      yield* runGit(repoDir, ["config", "remote.origin.pushurl", originDir]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "feature/mirrored"]);
+      // `git remote set-url --add`: Git fetches from the first URL and also pushes to this one.
+      yield* runGit(repoDir, [
+        "config",
+        "--add",
+        "remote.origin.url",
+        "git@github.com:mirror-owner/app.git",
+      ]);
+
+      const samePr = JSON.stringify([
+        {
+          number: 16,
+          title: "Mirrored branch",
+          url: "https://github.com/acme/app/pull/16",
+          baseRefName: "main",
+          headRefName: "feature/mirrored",
+          state: "OPEN",
+          isCrossRepository: false,
+          headRepository: { nameWithOwner: "acme/app" },
+          headRepositoryOwner: { login: "acme" },
+        },
+      ]);
+      const { manager } = yield* makeManager({
+        ghScenario: { prListByHeadSelector: { "feature/mirrored": samePr } },
+      });
+
+      expect((yield* manager.status({ cwd: repoDir })).pr?.number).toBe(16);
+    }),
+  );
+
   it.effect("status treats the only remote as the PR repository when there is no origin", () =>
     Effect.gen(function* () {
       const repoDir = yield* makeTempDir("piedpiper-git-manager-");
@@ -2237,6 +2311,30 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
     }),
   );
 
+  it.effect("lowercases a capitalized Conventional Commits description", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("piedpiper-git-manager-");
+      yield* initRepo(repoDir);
+      const subjects = ["ci: Run E2E on pull requests", "feat(web)!: A new layout"];
+      const queued = [...subjects];
+      const { manager } = yield* makeManager({
+        settings: { commitMessageStyle: { mode: "conventional_commits", customInstructions: "" } },
+        textGeneration: {
+          generateCommitMessage: () => Effect.succeed({ subject: queued.shift() ?? "", body: "" }),
+        },
+      });
+
+      const committed: Array<string> = [];
+      for (const [index] of subjects.entries()) {
+        fs.writeFileSync(path.join(repoDir, "README.md"), `change ${index}\n`);
+        yield* runStackedAction(manager, { cwd: repoDir, action: "commit" });
+        committed.push((yield* runGit(repoDir, ["log", "-1", "--pretty=%s"])).stdout.trim());
+      }
+
+      expect(committed).toEqual(["ci: run E2E on pull requests", "feat(web)!: a new layout"]);
+    }),
+  );
+
   it.effect("uses custom commit message when provided", () =>
     Effect.gen(function* () {
       const repoDir = yield* makeTempDir("piedpiper-git-manager-");
@@ -2500,6 +2598,36 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
           Effect.map((result) => result.stdout.trim()),
         ),
       ).toBe("origin/feature/stacked-flow");
+    }),
+  );
+
+  it.effect("finishes a pushed commit when the final status read fails", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("piedpiper-git-manager-");
+      yield* initRepo(repoDir);
+      yield* runGit(repoDir, ["checkout", "-b", "feature/status-after-push"]);
+      const remoteDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+      fs.writeFileSync(path.join(repoDir, "change.txt"), "change\n");
+
+      const { manager } = yield* makeManager({ failStatusDetailsAfterPush: true });
+      const result = yield* runStackedAction(manager, {
+        cwd: repoDir,
+        action: "commit_push",
+        commitMessage: "Status after push",
+      });
+
+      expect(result.push.status).toBe("pushed");
+      expect(result.toast.cta).toEqual({ kind: "none" });
+      expect(
+        (yield* runGit(remoteDir, [
+          "--git-dir=.",
+          "log",
+          "-1",
+          "--pretty=%s",
+          "feature/status-after-push",
+        ])).stdout.trim(),
+      ).toBe("Status after push");
     }),
   );
 
@@ -3446,6 +3574,82 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
       });
       return { repoDir, worktreePath, staleCommit, latestCommit, manager };
     });
+
+  it.effect.each([
+    { localBranch: "ahead", expectedHead: "local", isOnPullRequestHead: false },
+    { localBranch: "behind", expectedHead: "pull request", isOnPullRequestHead: true },
+    { localBranch: "rewritten", expectedHead: "pull request", isOnPullRequestHead: true },
+  ] as const)(
+    "moves an existing PR branch into a new worktree only when nothing is lost ($localBranch)",
+    ({ localBranch, expectedHead, isOnPullRequestHead }) =>
+      Effect.gen(function* () {
+        const number = 130;
+        const branch = "feature/pr-existing";
+        const repoDir = yield* makeTempDir("piedpiper-git-manager-");
+        yield* initRepo(repoDir);
+        const remoteDir = yield* createBareRemote();
+        yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+        yield* runGit(repoDir, ["push", "-u", "origin", "main"]);
+        yield* runGit(repoDir, ["checkout", "-b", branch]);
+        fs.writeFileSync(path.join(repoDir, "existing.txt"), "pushed\n");
+        yield* runGit(repoDir, ["add", "existing.txt"]);
+        yield* runGit(repoDir, ["commit", "-m", "Pushed PR commit"]);
+        yield* runGit(repoDir, ["push", "-u", "origin", branch]);
+        if (localBranch === "ahead") {
+          fs.writeFileSync(path.join(repoDir, "mine.txt"), "mine\n");
+          yield* runGit(repoDir, ["add", "mine.txt"]);
+          yield* runGit(repoDir, ["commit", "-m", "My unpublished commit"]);
+          yield* runGit(repoDir, ["push", "origin", `origin/${branch}:refs/pull/${number}/head`]);
+        } else if (localBranch === "behind") {
+          yield* runGit(repoDir, ["checkout", "-b", "author-push"]);
+          fs.writeFileSync(path.join(repoDir, "authored.txt"), "authored\n");
+          yield* runGit(repoDir, ["add", "authored.txt"]);
+          yield* runGit(repoDir, ["commit", "-m", "New PR head commit"]);
+          yield* runGit(repoDir, ["push", "origin", `author-push:${branch}`]);
+          yield* runGit(repoDir, ["push", "origin", `author-push:refs/pull/${number}/head`]);
+        } else {
+          yield* runGit(repoDir, ["checkout", "-b", "author-rewrite"]);
+          fs.writeFileSync(path.join(repoDir, "existing.txt"), "rewritten\n");
+          yield* runGit(repoDir, ["add", "existing.txt"]);
+          yield* runGit(repoDir, ["commit", "--amend", "-m", "Rewritten PR head"]);
+          yield* runGit(repoDir, ["push", "--force", "origin", `author-rewrite:${branch}`]);
+          yield* runGit(repoDir, ["push", "origin", `author-rewrite:refs/pull/${number}/head`]);
+        }
+        const localHead = (yield* runGit(repoDir, ["rev-parse", branch])).stdout.trim();
+        const pullHead = (yield* runGit(repoDir, [
+          "ls-remote",
+          "origin",
+          `refs/heads/${branch}`,
+        ])).stdout.split("\t")[0];
+        yield* runGit(repoDir, ["checkout", "main"]);
+
+        const { manager } = yield* makeManager({
+          ghScenario: {
+            pullRequest: {
+              number,
+              title: "Existing branch PR",
+              url: `https://github.com/user/repo/pull/${number}`,
+              baseRefName: "main",
+              headRefName: branch,
+              state: "open",
+            },
+          },
+        });
+
+        const result = yield* preparePullRequestThread(manager, {
+          cwd: repoDir,
+          reference: String(number),
+          mode: "worktree",
+        });
+
+        const head = expectedHead === "local" ? localHead : pullHead;
+        expect((yield* runGit(repoDir, ["rev-parse", branch])).stdout.trim()).toBe(head);
+        expect(
+          (yield* runGit(result.worktreePath as string, ["rev-parse", "HEAD"])).stdout.trim(),
+        ).toBe(head);
+        expect(result).toMatchObject({ branch, isOnPullRequestHead, checkoutChanged: true });
+      }),
+  );
 
   it.effect("fast-forwards a reused PR worktree to the latest pull request commit", () =>
     Effect.gen(function* () {

@@ -99,12 +99,16 @@ export const browseDirectories = Effect.fn("browseDirectories")(function* (
 
   const showHidden = prefix === "" || prefix.startsWith(".");
   const lowerPrefix = prefix.toLowerCase();
+  // macOS Finder stores names decomposed (NFD), while typed text is composed (NFC). Raw too:
+  // "De" typed so far is a prefix of decomposed "De\u0301v" but not of its composed form.
+  const composedPrefix = prefix.normalize("NFC").toLowerCase();
   return {
     entries: dirents.value
       .filter(
         (dirent) =>
           dirent.isDirectory() &&
-          dirent.name.toLowerCase().startsWith(lowerPrefix) &&
+          (dirent.name.toLowerCase().startsWith(lowerPrefix) ||
+            dirent.name.normalize("NFC").toLowerCase().startsWith(composedPrefix)) &&
           (showHidden || !dirent.name.startsWith(".")),
       )
       .map((dirent) => dirent.name)

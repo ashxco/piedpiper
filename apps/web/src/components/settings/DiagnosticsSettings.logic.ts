@@ -78,8 +78,11 @@ export function formatDiagnosticsBytes(bytes: number): string {
 
 export function formatDiagnosticsDuration(durationMs: number): string {
   if (durationMs < 1) return "<1 ms";
-  if (durationMs < 1_000) return `${Math.round(durationMs)} ms`;
-  if (durationMs < 60_000) return `${(durationMs / 1_000).toFixed(1)} s`;
+  // Pick the unit after rounding, so 999.6 ms never reads "1000 ms" and 59.97 s never "60.0 s".
+  const milliseconds = Math.round(durationMs);
+  if (milliseconds < 1_000) return `${milliseconds} ms`;
+  const seconds = (durationMs / 1_000).toFixed(1);
+  if (Number(seconds) < 60) return `${seconds} s`;
   return `${(durationMs / 60_000).toFixed(1)} min`;
 }
 

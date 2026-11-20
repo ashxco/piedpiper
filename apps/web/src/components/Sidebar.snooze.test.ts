@@ -174,6 +174,18 @@ describe("snooze labels", () => {
     expect(snoozeWakeLabel("not-a-date", nowMs)).toBe("now");
   });
 
+  it("reads a one-hour snooze as 1h on minute and live clocks", () => {
+    const wake = "2026-04-10T13:00:30.000Z";
+    const at = (iso: string) => Date.parse(iso);
+    expect(snoozeWakeLabel(wake, at("2026-04-10T12:00:00.000Z"))).toBe("1h");
+    expect(snoozeWakeLabel(wake, at("2026-04-10T12:00:40.000Z"))).toBe("1h");
+    expect(snoozeWakeLabel(wake, at("2026-04-10T12:00:20.000Z"))).toBe("1h");
+    expect(snoozeWakeLabel("2026-04-10T15:00:30.000Z", at("2026-04-10T12:00:00.000Z"))).toBe("3h");
+    expect(snoozeWakeLabel(wake, at("2026-04-10T12:01:00.000Z"))).toBe("59m");
+    expect(snoozeWakeLabel(wake, at("2026-04-10T13:00:10.000Z"))).toBe("1m");
+    expect(snoozeWakeLabel(wake, at("2026-04-10T13:00:30.000Z"))).toBe("now");
+  });
+
   it("describes today by time, the next day as tomorrow, and the week by weekday", () => {
     const describeAt = (date: Date) => snoozeWakeDescription(date.toISOString(), nowMs);
     expect(describeAt(localDate(2026, 4, 8, 18))).not.toContain("tomorrow");

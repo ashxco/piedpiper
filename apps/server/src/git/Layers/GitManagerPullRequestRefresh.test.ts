@@ -101,6 +101,31 @@ describe("refreshCheckedOutBranch", () => {
     expect(git(repo, "rev-parse", "HEAD")).toBe(target);
   });
 
+  it("lets the checkout move run without a deadline", async () => {
+    const repo = makeRepo();
+    const base = git(repo, "rev-parse", "HEAD");
+    const target = commit(repo, "next.txt", "next\n");
+    git(repo, "reset", "--hard", base);
+    const timeouts = new Map<string, number | null | undefined>();
+    const recording: GitCoreShape["execute"] = (input) => {
+      timeouts.set(input.operation, input.timeoutMs);
+      return execute(input);
+    };
+
+    await Effect.runPromise(
+      refreshCheckedOutBranch({
+        execute: recording,
+        cwd: repo,
+        pullRequestNumber: 7,
+        targetCommit: target,
+        resetWhenHeadCommit: null,
+      }),
+    );
+
+    // Killing a slow checkout (LFS smudge) partway through strands a half-updated tree.
+    expect(timeouts.get("GitManager.refreshCheckedOutBranch.move")).toBeNull();
+  });
+
   it.each([
     ["a tracked edit", "README.md"],
     ["an untracked file", "untracked.txt"],

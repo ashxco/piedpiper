@@ -54,7 +54,15 @@ export function connectTerminalSession(
     if (onlyIfChanged && size.cols === lastMeasured?.cols && size.rows === lastMeasured?.rows)
       return;
     lastMeasured = size;
-    void api.terminal.resize({ threadId, terminalId, viewerId, ...size }).catch(() => undefined);
+    sendResize(size);
+  };
+  // A failed resize is sent once more, or an onlyIfChanged refit would leave the PTY on the old
+  // grid. Only the newest grid is retried: an older one was already superseded.
+  const sendResize = (size: { cols: number; rows: number }, retry = false) => {
+    void api.terminal.resize({ threadId, terminalId, viewerId, ...size }).catch(() => {
+      if (retry || disposed || lastMeasured !== size) return;
+      sendResize(size, true);
+    });
   };
   let activeTerminal: Terminal | null = terminal;
   let hasHandledExit = false;

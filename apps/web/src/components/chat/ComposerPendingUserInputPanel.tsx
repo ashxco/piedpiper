@@ -272,7 +272,7 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
                 questionTextAlign,
               )}
             >
-              <ChatMarkdown text={activeQuestion.question} cwd={cwd} />
+              <ChatMarkdown text={activeQuestion.question} cwd={cwd} lineBreaks />
             </div>
             {activeQuestion.multiSelect ? (
               <p className="mt-0.5 text-xs text-muted-foreground">

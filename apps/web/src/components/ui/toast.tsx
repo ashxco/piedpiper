@@ -372,7 +372,14 @@ function AnchoredToasts() {
 
   return (
     <Toast.Portal data-slot="toast-portal-anchored">
-      <Toast.Viewport className="outline-none" data-slot="toast-viewport-anchored">
+      {/* Not a second "Notifications" landmark: the corner viewport is that one. Base UI's
+          region role and label are overridden; the viewport stays a polite live region. */}
+      <Toast.Viewport
+        aria-label={undefined}
+        className="outline-none"
+        data-slot="toast-viewport-anchored"
+        role={undefined}
+      >
         {toasts
           .filter((toast) => shouldRenderForActiveThread(toast.data, activeThreadId))
           .map((toast) => {

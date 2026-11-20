@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { explicitBareRepositoryEnv, gitConfigEnv } from "./gitConfigEnv.ts";
+import {
+  explicitBareRepositoryEnv,
+  gitConfigEnv,
+  unsetInheritedRepositoryEnv,
+} from "./gitConfigEnv.ts";
 
 describe("gitConfigEnv", () => {
   it("adds the first entry when nothing is inherited", () => {
@@ -63,5 +67,25 @@ describe("explicitBareRepositoryEnv", () => {
         GIT_CONFIG_VALUE_0: "explicit",
       });
     }
+  });
+});
+
+describe("unsetInheritedRepositoryEnv", () => {
+  it("unsets only inherited repository selectors, in any case on Windows", () => {
+    const inherited = {
+      GIT_DIR: "/x/.git",
+      GIT_INDEX_FILE: "/x/index",
+      PATH: "/bin",
+      git_dir: "y",
+    };
+    expect(unsetInheritedRepositoryEnv(inherited, "linux")).toEqual({
+      GIT_DIR: undefined,
+      GIT_INDEX_FILE: undefined,
+    });
+    expect(unsetInheritedRepositoryEnv(inherited, "win32")).toEqual({
+      GIT_DIR: undefined,
+      GIT_INDEX_FILE: undefined,
+      git_dir: undefined,
+    });
   });
 });

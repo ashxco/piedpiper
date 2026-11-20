@@ -97,6 +97,19 @@ describe("formatting", () => {
     expect(formatDiagnosticsDuration(90_000)).toBe("1.5 min");
   });
 
+  it("switches units when rounding reaches the next unit", () => {
+    expect([999.4, 999.6, 1_000].map(formatDiagnosticsDuration)).toEqual([
+      "999 ms",
+      "1.0 s",
+      "1.0 s",
+    ]);
+    expect([59_940, 59_970, 60_000].map(formatDiagnosticsDuration)).toEqual([
+      "59.9 s",
+      "1.0 min",
+      "1.0 min",
+    ]);
+  });
+
   it("shortens a long command in the kill confirmation", () => {
     expect(killConfirmationMessage({ pid: 7, command: "codex" })).toContain("process 7");
     const message = killConfirmationMessage({ pid: 7, command: "x".repeat(500) });

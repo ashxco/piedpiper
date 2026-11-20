@@ -57,7 +57,10 @@ function comparePrereleaseIdentifier(left: string, right: string): number {
   const rightNumeric = /^\d+$/.test(right);
 
   if (leftNumeric && rightNumeric) {
-    return Number.parseInt(left, 10) - Number.parseInt(right, 10);
+    // BigInt keeps long numeric identifiers exact.
+    const leftNumber = BigInt(left);
+    const rightNumber = BigInt(right);
+    return leftNumber === rightNumber ? 0 : leftNumber < rightNumber ? -1 : 1;
   }
   if (leftNumeric) {
     return -1;
@@ -65,7 +68,8 @@ function comparePrereleaseIdentifier(left: string, right: string): number {
   if (rightNumeric) {
     return 1;
   }
-  return left.localeCompare(right);
+  // Semver orders identifiers by ASCII code unit, not by locale.
+  return left === right ? 0 : left < right ? -1 : 1;
 }
 
 /** Semver order for any provider CLI, falling back to text order for what it cannot parse. */

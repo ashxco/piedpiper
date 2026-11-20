@@ -151,6 +151,35 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
   });
 
   describe("createDevRunnerEnv", () => {
+    it.effect("clears inherited server addresses and honors explicit overrides", () =>
+      Effect.gen(function* () {
+        for (const mode of ["dev", "dev:server", "dev:web", "dev:desktop"] as const) {
+          const input = {
+            mode,
+            baseEnv: { PIEDPIPER_HOST: "192.0.2.1", PIEDPIPER_PORT: "4999" },
+            serverOffset: 0,
+            webOffset: 0,
+            piedpiperHome: undefined,
+            authToken: undefined,
+            noBrowser: undefined,
+            autoBootstrapProjectFromCwd: undefined,
+            logWebSocketEvents: undefined,
+            host: undefined,
+            port: undefined,
+            devUrl: undefined,
+          };
+          const env = yield* createDevRunnerEnv(input);
+          assert.isUndefined(env.PIEDPIPER_HOST);
+          assert.notEqual(env.PIEDPIPER_PORT, "4999");
+          const explicit = yield* createDevRunnerEnv({ ...input, host: "127.0.0.2", port: 4888 });
+          if (mode !== "dev:desktop") {
+            assert.equal(explicit.PIEDPIPER_HOST, "127.0.0.2");
+            assert.equal(explicit.PIEDPIPER_PORT, "4888");
+          }
+        }
+      }),
+    );
+
     it.effect("defaults PIEDPIPER_HOME to ~/.piedpiper when not provided", () =>
       Effect.gen(function* () {
         const env = yield* createDevRunnerEnv({

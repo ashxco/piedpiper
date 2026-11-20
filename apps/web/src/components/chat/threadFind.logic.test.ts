@@ -142,6 +142,13 @@ describe("foldThreadFindText", () => {
     expect(foldThreadFindText(text)).toHaveLength(text.length);
     expect(foldThreadFindText(text)).toContain("strasse");
   });
+
+  it("matches dotted capital I without changing source offsets", () => {
+    const find = (text: string, query: string) =>
+      findThreadFindOccurrences(foldThreadFindText(text), normalizeThreadFindQuery(query));
+    expect(find("\u{1F4CD} \u0130stanbul \u0131stanbul i\u0307stanbul", "istanbul")).toEqual([3]);
+    expect(find("Istanbul istanbul", "\u0130STANBUL")).toEqual([0, 9]);
+  });
 });
 
 describe("normalizeThreadFindQuery", () => {

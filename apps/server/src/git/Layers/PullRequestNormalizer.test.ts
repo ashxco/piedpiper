@@ -11,6 +11,7 @@ import {
   parsePullRequestList,
   parseRepositoryNameFromPullRequestUrl,
   resolveHeadRepositoryNameWithOwner,
+  resolvePullRequestWorktreeLocalBranchName,
   sanitizeCommitMessage,
   sanitizeProgressText,
   shouldPreferSshRemote,
@@ -77,6 +78,9 @@ describe("shouldPreferSshRemote", () => {
     "SSH://git@github.com/octocat/hello.git",
     "git+ssh://git@github.com/octocat/hello.git",
     "github-work:owner/repo.git",
+    // Git reads a userless `host:path` remote as SSH even with a single path component.
+    "gitserver:repo.git",
+    "github.com:repo.git",
   ])("prefers ssh for %s", (url) => {
     expect(shouldPreferSshRemote(url)).toBe(true);
     expect(isSshRemoteUrl(url)).toBe(true);
@@ -93,8 +97,7 @@ describe("shouldPreferSshRemote", () => {
     "./team:group/repo",
     "file:///srv/git/repo.git",
     "hg::owner/repo",
-    // A userless scp remote needs owner/repo; git would read this as SSH too, but it has no repo owner.
-    "github.com:repo.git",
+    "C:repo.git",
   ])("does not prefer ssh for %s", (url) => {
     expect(shouldPreferSshRemote(url)).toBe(false);
     expect(isSshRemoteUrl(url)).toBe(false);
@@ -213,6 +216,16 @@ describe("emoji-safe truncation", () => {
     expect(sanitizeCommitMessage({ subject, body: "" }).subject).toBe("a".repeat(71));
   });
 
+  it("lowercases a capitalized Conventional Commits description only in that mode", () => {
+    const lower = (subject: string) => sanitizeCommitMessage({ subject, body: "" }, true).subject;
+    expect(lower("ci: Run E2E on pull requests")).toBe("ci: run E2E on pull requests");
+    expect(lower("feat(web)!: A new layout")).toBe("feat(web)!: a new layout");
+    expect(lower("fix: GitHub login")).toBe("fix: GitHub login");
+    expect(lower("fix: CI flake")).toBe("fix: CI flake");
+    expect(lower("Update readme")).toBe("Update readme");
+    expect(sanitizeCommitMessage({ subject: "ci: Run E2E", body: "" }).subject).toBe("ci: Run E2E");
+  });
+
   it("falls back when the generated subject is empty", () => {
     expect(sanitizeCommitMessage({ subject: " .\n", body: " body " })).toEqual({
       subject: "Update project files",
@@ -283,5 +296,44 @@ describe("isNotGitRepositoryError", () => {
 
   it("leaves other git failures alone", () => {
     expect(isNotGitRepositoryError(gitError("fatal: bad revision 'HEAD'"))).toBe(false);
+  });
+});
+
+describe("resolvePullRequestWorktreeLocalBranchName", () => {
+  const forkPullRequest = {
+    number: 7,
+    title: "Fork PR",
+    url: "https://github.com/acme/app/pull/7",
+    baseBranch: "main",
+    headBranch: "feature/x",
+    state: "open" as const,
+    isCrossRepository: true,
+  };
+
+  it("names fork PR branches under the piedpiper prefix when Git can create them", () => {
+    expect(resolvePullRequestWorktreeLocalBranchName(forkPullRequest)).toBe(
+      "piedpiper/pr-7/feature/x",
+    );
+    expect(
+      resolvePullRequestWorktreeLocalBranchName(
+        forkPullRequest,
+        new Set(["piedpiper/pr-7/feature/x"]),
+      ),
+    ).toBe("piedpiper/pr-7/feature/x");
+    expect(
+      resolvePullRequestWorktreeLocalBranchName({ ...forkPullRequest, isCrossRepository: false }),
+    ).toBe("feature/x");
+  });
+
+  it("falls back to a flat name when a local branch owns part of the prefix", () => {
+    expect(resolvePullRequestWorktreeLocalBranchName(forkPullRequest, new Set(["piedpiper"]))).toBe(
+      "piedpiper-pr-7-feature-x",
+    );
+    expect(
+      resolvePullRequestWorktreeLocalBranchName(
+        forkPullRequest,
+        new Set(["piedpiper/pr-7", "piedpiper-pr-7-feature-x/child"]),
+      ),
+    ).toBe("piedpiper-pr-7-feature-x-2");
   });
 });

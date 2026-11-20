@@ -558,6 +558,14 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     },
   );
 
+  const applyModelSelection: NonNullable<ProviderServiceShape["applyModelSelection"]> = Effect.fn(
+    "applyModelSelection",
+  )(function* (input) {
+    const adapter = yield* registry.getByProvider(input.modelSelection.provider);
+    if (!adapter.applyModelSelection || !(yield* adapter.hasSession(input.threadId))) return false;
+    return yield* adapter.applyModelSelection(input);
+  });
+
   const sendTurn: ProviderServiceShape["sendTurn"] = Effect.fn("sendTurn")(function* (rawInput) {
     const parsed = yield* decodeInputOrValidationError({
       operation: "ProviderService.sendTurn",
@@ -1078,6 +1086,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   return {
     startSession,
     sendTurn,
+    applyModelSelection,
     interruptTurn,
     respondToRequest,
     respondToUserInput,

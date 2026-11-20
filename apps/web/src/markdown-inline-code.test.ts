@@ -20,6 +20,7 @@ describe("resolveInlineCodeFileHref", () => {
     ["src\\main.ts", "src/main.ts"],
     ["Makefile:12", `${CWD}/Makefile:12`],
     ["Dockerfile:8:2", `${CWD}/Dockerfile:8:2`],
+    ["docker/Dockerfile", "docker/Dockerfile"],
   ])("links %s", (code, href) => {
     expect(resolveInlineCodeFileHref(code, CWD)).toBe(href);
   });

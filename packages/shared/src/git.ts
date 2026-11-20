@@ -1,11 +1,44 @@
 import type { GitBranch } from "@piedpiper/contracts";
 
+// Latin letters NFKD leaves whole (ł, ø, ß) or splits with a spacing mark (Ŀ, ŉ).
+const LATIN_FOLDS: Record<string, string> = {
+  Ŀ: "L",
+  ŀ: "l",
+  ŉ: "'n",
+  Đ: "D",
+  đ: "d",
+  Ð: "D",
+  ð: "d",
+  ß: "ss",
+  ẞ: "SS",
+  Ł: "L",
+  ł: "l",
+  Ø: "O",
+  ø: "o",
+  Æ: "AE",
+  æ: "ae",
+  Œ: "OE",
+  œ: "oe",
+  Þ: "TH",
+  þ: "th",
+  Ħ: "H",
+  ħ: "h",
+  ı: "i",
+  ĸ: "q",
+  Ŋ: "N",
+  ŋ: "n",
+  Ŧ: "T",
+  ŧ: "t",
+};
+const LATIN_FOLD_PATTERN = new RegExp(`[${Object.keys(LATIN_FOLDS).join("")}]`, "g");
+
 /**
  * Sanitize an arbitrary string into a valid, lowercase git branch fragment.
- * Strips quotes, collapses separators, limits to 64 chars.
+ * Folds accented Latin letters to ASCII, strips quotes, collapses separators, limits to 64 chars.
  */
 export function sanitizeBranchFragment(raw: string): string {
   const normalized = raw
+    .replace(LATIN_FOLD_PATTERN, (letter) => LATIN_FOLDS[letter] ?? letter)
     .normalize("NFKD")
     .replace(/\p{M}+/gu, "")
     .trim()

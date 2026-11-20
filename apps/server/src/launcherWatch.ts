@@ -67,12 +67,12 @@ export const awaitLauncherLoss = (options?: {
 // launcher gone nobody else will SIGKILL a backend whose finalizers hang.
 const DEFAULT_SHUTDOWN_DEADLINE = Duration.seconds(5);
 
-// The desktop launcher reads this process's stdout/stderr. Once it is gone every
-// log write fails, and Node turns an unhandled stream error into a crash that
-// skips shutdown.
-export function ignoreClosedLauncherPipe(error: NodeJS.ErrnoException): void {
-  if (error.code !== "EPIPE" && error.code !== "ERR_STREAM_DESTROYED") throw error;
-}
+/**
+ * Stdout/stderr error listener that drops the failed write. Logs may go to a closed desktop
+ * launcher pipe (EPIPE) or a log file on a full disk (ENOSPC); either way an unhandled stream
+ * error would crash the process and skip shutdown, so every output error is ignored.
+ */
+export function ignoreOutputStreamError(_error: NodeJS.ErrnoException): void {}
 
 /** Arms a one-shot, unref'd timer that force-exits if shutdown outlives `deadline`. */
 export const armShutdownDeadline = (options?: {
@@ -97,18 +97,11 @@ export const armShutdownDeadline = (options?: {
 export const untilLauncherLoss = <A, E, R>(
   program: Effect.Effect<A, E, R>,
   options?: Parameters<typeof awaitLauncherLoss>[0] & {
-    readonly guardLauncherPipes?: boolean;
     readonly shutdownDeadline?: Duration.Input;
     readonly forceExit?: () => void;
   },
 ): Effect.Effect<A, E, R> =>
   Effect.gen(function* () {
-    if (options?.guardLauncherPipes !== false) {
-      yield* Effect.sync(() => {
-        process.stdout.on("error", ignoreClosedLauncherPipe);
-        process.stderr.on("error", ignoreClosedLauncherPipe);
-      });
-    }
     const launcherLost = awaitLauncherLoss(options).pipe(
       Effect.andThen(
         armShutdownDeadline({

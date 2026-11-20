@@ -25,7 +25,7 @@ import { RuntimeReceiptBus } from "../Services/RuntimeReceiptBus.ts";
 import { settleOpenTasksCommands } from "./ProviderRuntimeIngestionHelpers.ts";
 import { CheckpointStoreError } from "../../checkpointing/Errors.ts";
 import { OrchestrationDispatchError } from "../Errors.ts";
-import { isGitRepository } from "../../git/Utils.ts";
+import { probeGitRepository } from "../../git/Utils.ts";
 import { GitManager } from "../../git/Services/GitManager.ts";
 import { EffectOutboxV2, layer as EffectOutboxLive } from "../../orchestration-v2/EffectOutbox.ts";
 import { readV2Entity } from "../../orchestration-v2/ProjectionStore.ts";
@@ -160,7 +160,7 @@ const make = Effect.gen(function* () {
     return Option.none();
   });
 
-  const isGitWorkspace = (cwd: string) => isGitRepository(cwd);
+  const isGitWorkspace = (cwd: string) => probeGitRepository(cwd);
 
   // Resolves the workspace CWD for checkpoint operations, preferring the
   // active provider session CWD and falling back to the thread/project config.
@@ -171,7 +171,7 @@ const make = Effect.gen(function* () {
     readonly thread: { readonly projectId: ProjectId; readonly worktreePath: string | null };
     readonly projects: ReadonlyMap<ProjectId, { readonly workspaceRoot: string }>;
     readonly preferSessionRuntime: boolean;
-  }): Effect.fn.Return<string | undefined> {
+  }) {
     const fromSession = yield* resolveSessionRuntimeForThread(input.threadId);
     const fromThread = resolveThreadWorkspaceCwd({
       thread: input.thread,
@@ -417,24 +417,6 @@ const make = Effect.gen(function* () {
         return;
       }
 
-      const checkpointCwd = yield* resolveCheckpointCwd({
-        threadId: thread.id,
-        thread,
-        projects: readModel.projects,
-        preferSessionRuntime: true,
-      });
-      if (!checkpointCwd) {
-        return;
-      }
-
-      // Before the checkpoint event, so the client refetch it triggers sees a PR the turn opened.
-      if (event.type === "turn.completed" && thread.branch !== null && Option.isSome(gitManager)) {
-        yield* gitManager.value.refreshMissingPullRequest({
-          cwd: checkpointCwd,
-          branch: thread.branch,
-        });
-      }
-
       // Only skip if a real (non-placeholder) checkpoint already exists for this turn.
       // ProviderRuntimeIngestion inserts "missing" placeholders on turn.diff.updated while the
       // turn is still editing; the real capture happens here once the turn has finished.
@@ -458,6 +440,45 @@ const make = Effect.gen(function* () {
       const nextTurnCount =
         runOrdinal ??
         (existingPlaceholder ? existingPlaceholder.checkpointTurnCount : currentTurnCount + 1);
+
+      const checkpointCwd = yield* resolveCheckpointCwd({
+        threadId: thread.id,
+        thread,
+        projects: readModel.projects,
+        preferSessionRuntime: true,
+      }).pipe(
+        Effect.tapError(() =>
+          orchestrationEngine.dispatch({
+            type: "thread.turn.diff.complete",
+            commandId: serverCommandId("checkpoint-probe-failed"),
+            threadId: thread.id,
+            turnId,
+            completedAt: event.createdAt,
+            checkpointRef: checkpointRefForThreadTurn(thread.id, nextTurnCount),
+            status: "error",
+            files: [],
+            assistantMessageId:
+              existingPlaceholder?.assistantMessageId ??
+              thread.messages.findLast(
+                (message) => message.role === "assistant" && message.turnId === turnId,
+              )?.id ??
+              MessageId.makeUnsafe(`assistant:${turnId}`),
+            checkpointTurnCount: nextTurnCount,
+            createdAt: event.createdAt,
+          }),
+        ),
+      );
+      if (!checkpointCwd) {
+        return;
+      }
+
+      // Before the checkpoint event, so the client refetch it triggers sees a PR the turn opened.
+      if (event.type === "turn.completed" && thread.branch !== null && Option.isSome(gitManager)) {
+        yield* gitManager.value.refreshMissingPullRequest({
+          cwd: checkpointCwd,
+          branch: thread.branch,
+        });
+      }
 
       yield* captureAndDispatchCheckpoint({
         threadId: thread.id,

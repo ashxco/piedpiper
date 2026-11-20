@@ -8,7 +8,8 @@ export interface ParseCliArgsOptions {
 }
 
 export function tokenizeCliArgs(args?: string): ReadonlyArray<string> {
-  const input = args?.trim();
+  // Untrimmed: the loop skips outer whitespace, and trimming would drop a trailing escaped space.
+  const input = args;
   if (!input) return [];
 
   const tokens: string[] = [];
@@ -41,7 +42,8 @@ export function tokenizeCliArgs(args?: string): ReadonlyArray<string> {
     if (char === "'" || char === '"') {
       quote = char;
       quoted = true;
-    } else if (/\s/.test(char)) {
+    } else if (/[ \t\n\r\f\v]/.test(char)) {
+      // ASCII whitespace only, like a shell: a non-breaking or other Unicode space stays in the value.
       if (current || quoted) {
         tokens.push(current);
         current = "";

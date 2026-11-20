@@ -3,12 +3,15 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { Effect, Exit } from "effect";
+import { Effect, Exit, Stream } from "effect";
 import { ChildProcess } from "effect/unstable/process";
 import { describe, expect, it } from "vitest";
 
 import {
+  collectBoundedStreamText,
+  collectProbeResult,
   EMPTY_MODEL_CAPABILITIES,
+  MAX_PROBE_OUTPUT_BYTES,
   providerModelsFromSettings,
   spawnAndCollect,
 } from "./providerSnapshot";
@@ -98,6 +101,47 @@ describe("spawnAndCollect", () => {
       }
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("bounded probe output", () => {
+  const encoder = new TextEncoder();
+  const chunks = (...parts: ReadonlyArray<string>) =>
+    Stream.fromIterable(parts.map((part) => encoder.encode(part)));
+
+  it("keeps output under the limit, including multi-byte text split across chunks", async () => {
+    const euro = encoder.encode("€");
+    const result = await Effect.runPromise(
+      collectBoundedStreamText(
+        Stream.fromIterable([encoder.encode("a"), euro.slice(0, 1), euro.slice(1)]),
+        16,
+      ),
+    );
+    expect(result).toEqual({ text: "a€", truncated: false });
+  });
+
+  it("drains output past the limit and reports it as truncated", async () => {
+    let pulled = 0;
+    const stream = chunks("12345", "67890", "abc").pipe(
+      Stream.tap(() => Effect.sync(() => pulled++)),
+    );
+    const result = await Effect.runPromise(collectBoundedStreamText(stream, 8));
+    expect(result).toEqual({ text: "", truncated: true });
+    expect(pulled).toBe(3);
+  });
+
+  it("fails a status probe whose output is oversized", async () => {
+    const exit = await Effect.runPromiseExit(
+      collectProbeResult("claude", {
+        stdout: Stream.make(new Uint8Array(MAX_PROBE_OUTPUT_BYTES + 1)),
+        stderr: Stream.empty,
+        exitCode: Effect.succeed(0),
+      }),
+    );
+    expect(Exit.isFailure(exit)).toBe(true);
+    if (Exit.isFailure(exit)) {
+      expect(String(exit.cause)).toContain("Provider status check produced too much stdout");
     }
   });
 });

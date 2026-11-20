@@ -76,6 +76,7 @@ vi.mock("~/nativeApi", async (importOriginal) => ({
 
 import { useCommandPaletteStore } from "../commandPaletteStore";
 import { useStore } from "../store";
+import { useUiStateStore } from "../uiStateStore";
 import type { Project, SidebarThreadSummary } from "../types";
 import { CommandPalette } from "./CommandPalette";
 import { RECENT_THREAD_LIMIT } from "./CommandPalette.logic";
@@ -294,6 +295,43 @@ describe("CommandPalette", () => {
     );
     expect(mocks.handleNewThread).not.toHaveBeenCalled();
     await screen.unmount();
+  });
+
+  it("opens a project's latest awake thread, skipping a newer snoozed one", async () => {
+    seedStore([
+      thread("Hooli awake", { projectId: "project-2" as ProjectId }),
+      thread("Hooli snoozed", {
+        projectId: "project-2" as ProjectId,
+        updatedAt: "2026-03-02T00:00:00.000Z",
+      }),
+    ]);
+    useUiStateStore.setState({
+      snoozedThreadsById: {
+        ["Hooli snoozed" as ThreadId]: {
+          snoozedUntil: "2999-01-01T00:00:00.000Z",
+          snoozedAt: "2026-03-02T00:00:00.000Z",
+          questionPendingAtSnooze: false,
+        },
+      },
+    });
+    const screen = await render(<CommandPalette />);
+    try {
+      await openPalette();
+
+      await userEvent.keyboard("/repo/hooli");
+      await vi.waitFor(() => expect(groupLabels()).toEqual(["Projects"]));
+      await userEvent.keyboard("{Enter}");
+
+      await vi.waitFor(() =>
+        expect(mocks.navigate).toHaveBeenCalledWith({
+          to: "/$threadId",
+          params: { threadId: "Hooli awake" },
+        }),
+      );
+    } finally {
+      useUiStateStore.setState({ snoozedThreadsById: {} });
+      await screen.unmount();
+    }
   });
 
   it("starts a thread when the project found by path has none", async () => {

@@ -7,7 +7,10 @@ import * as NodePath from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
+  ClaudeDescendantTracker,
+  claudeDescendants,
   claudeExitMessageWithStderr,
+  parseClaudeProcessTable,
   claudeProcessGroupSpawnerFor,
   makeClaudeProcessGroupSpawner,
   redactClaudeStderr,
@@ -193,6 +196,65 @@ describe("claudeExitMessageWithStderr", () => {
   });
 });
 
+describe("claude process tree", () => {
+  it("parses ps rows and walks descendants without revisiting a pid", () => {
+    const rows = parseClaudeProcessTable(
+      [
+        "  10     1    10 Thu Nov 19 10:00:00 2026",
+        "  11    10    10 Thu Nov 19 10:00:01 2026",
+        "  12    11    12 Thu Nov 19 10:00:02 2026",
+        "  13    12    12 Thu Nov 19 10:00:03 2026",
+        "  20     1    20 Thu Nov 19 10:00:04 2026",
+        "garbage",
+      ].join("\n"),
+    );
+    expect(rows).toHaveLength(5);
+    expect(rows[0]).toEqual({ pid: 10, ppid: 1, pgid: 10, started: "Thu Nov 19 10:00:00 2026" });
+    expect(
+      claudeDescendants(rows, [10])
+        .map((row) => row.pid)
+        .toSorted(),
+    ).toEqual([11, 12, 13]);
+    expect(claudeDescendants(rows, [12]).map((row) => row.pid)).toEqual([13]);
+  });
+});
+
+describe("ClaudeDescendantTracker", () => {
+  const row = (pid: number, ppid: number, started = `start-${pid}`) => ({
+    pid,
+    ppid,
+    pgid: pid,
+    started,
+  });
+  const cli = row(10, 1);
+  const tracked = (tracker: ClaudeDescendantTracker) =>
+    tracker.trackedRows.map((entry) => entry.pid).toSorted();
+
+  it("forgets jobs that have ended, so a reused pid is never a root", () => {
+    const tracker = new ClaudeDescendantTracker(10);
+    tracker.record({ readId: 1, rows: [cli, row(11, 10), row(12, 11)] }, true);
+    expect(tracked(tracker)).toEqual([11, 12]);
+    // 11 ended; its pid now belongs to an unrelated process with a child of its own.
+    tracker.record({ readId: 2, rows: [cli, row(12, 1), row(11, 1, "later"), row(30, 11)] }, true);
+    expect(tracked(tracker)).toEqual([12]);
+  });
+
+  it("keeps what it tracked through a failed (empty) read", () => {
+    const tracker = new ClaudeDescendantTracker(10);
+    tracker.record({ readId: 1, rows: [cli, row(11, 10)] }, true);
+    tracker.record({ readId: 2, rows: [] }, true);
+    expect(tracked(tracker)).toEqual([11]);
+  });
+
+  it("ignores a table read before one it already applied", () => {
+    const tracker = new ClaudeDescendantTracker(10);
+    tracker.record({ readId: 2, rows: [cli, row(11, 10), row(12, 10)] }, true);
+    // Started earlier and finished later: it predates job 12, which must not be forgotten.
+    tracker.record({ readId: 1, rows: [cli, row(11, 10)] }, true);
+    expect(tracked(tracker)).toEqual([11, 12]);
+  });
+});
+
 describe("claudeProcessGroupSpawnerFor", () => {
   it("leaves spawning to the SDK on Windows", () => {
     expect(claudeProcessGroupSpawnerFor("win32")).toBeUndefined();
@@ -216,6 +278,40 @@ describe.skipIf(process.platform === "win32")("makeClaudeProcessGroupSpawner", (
     cleanups.push(() => signalClaudeProcessGroup(child.pid, "SIGKILL"));
     await alive.started;
 
+    child.stdin?.end();
+    await alive.stopped;
+  });
+
+  it("stops a job the CLI started in its own process group once the CLI exits", async () => {
+    const { cli, dir } = fakeClaudeCli(
+      [
+        'dir=$(dirname "$0")',
+        `perl -e 'setpgrp(0, 0); exec @ARGV' sleep 600 > "$dir/alive" &`,
+        'echo $! > "$dir/leftover.pid"',
+        "cat > /dev/null",
+      ].join("\n"),
+    );
+    cleanups.push(() => {
+      try {
+        process.kill(Number(NodeFS.readFileSync(NodePath.join(dir, "leftover.pid"), "utf8")));
+      } catch {}
+    });
+    const alive = watchAlive(dir);
+    let refreshDescendants: (() => Promise<void>) | undefined;
+    const child = makeClaudeProcessGroupSpawner({
+      onSpawn: (handle) => (refreshDescendants = handle.refreshDescendants),
+    })({
+      command: cli,
+      args: [],
+      cwd: dir,
+      env: process.env,
+      signal: new AbortController().signal,
+    }) as unknown as NodeChildProcess.ChildProcess;
+    cleanups.push(() => signalClaudeProcessGroup(child.pid, "SIGKILL"));
+    await alive.started;
+
+    // The close path records the tree first, as the adapter does before closing the query.
+    await refreshDescendants?.();
     child.stdin?.end();
     await alive.stopped;
   });

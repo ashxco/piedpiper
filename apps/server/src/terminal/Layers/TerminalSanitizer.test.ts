@@ -14,6 +14,48 @@ function sanitizeChunks(chunks: ReadonlyArray<string>): { text: string; pending:
 }
 
 describe("sanitizeTerminalHistoryChunk", () => {
+  it("strips DECID and queries with embedded controls at every chunk boundary", () => {
+    for (const query of [
+      "\u001bZ",
+      "\u001b[>\u0007\u000a0c",
+      "\u009b?\u00075u",
+      "\u001b[?12\u007f$p",
+    ]) {
+      const expected = query.includes("\u000a")
+        ? "\u0007\u000a"
+        : query.includes("\u0007")
+          ? "\u0007"
+          : "";
+      for (let split = 0; split <= query.length; split++) {
+        expect(sanitizeChunks([query.slice(0, split), query.slice(split)])).toEqual({
+          text: expected,
+          pending: "",
+        });
+      }
+    }
+    expect(sanitizeChunks(["\u001b#Z"])).toEqual({ text: "\u001b#Z", pending: "" });
+  });
+
+  it("strips primary, secondary and tertiary Device Attributes queries", () => {
+    expect(sanitizeChunks(["a\u001b[c\u001b[0c\u001b[>c\u001b[>0c\u001b[=c\u001b[=0cb"])).toEqual({
+      text: "ab",
+      pending: "",
+    });
+  });
+
+  it("keeps BEL inside DCS, PM and APC strings until ST", () => {
+    for (const prefix of ["\u001bP", "\u001b^", "\u001b_", "\u0090", "\u009e", "\u009f"]) {
+      const sequence = `${prefix}payload\u0007more\u001b\\`;
+      for (let split = 0; split <= sequence.length; split++) {
+        expect(sanitizeChunks([sequence.slice(0, split), sequence.slice(split)])).toEqual({
+          text: sequence,
+          pending: "",
+        });
+      }
+    }
+    expect(sanitizeChunks(["\u001bP$q\u0007tail\u001b\\ok"])).toEqual({ text: "ok", pending: "" });
+  });
+
   it("returns plain output unchanged without parsing it", () => {
     const data = "café\t界🙂\u0007\u009c\u0085 plain\r\n".repeat(64);
     const result = sanitizeTerminalHistoryChunk("", data);

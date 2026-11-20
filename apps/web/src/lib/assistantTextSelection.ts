@@ -67,7 +67,8 @@ export function captureAssistantTextSelection(
   range.setEnd(last, last === range.endContainer ? range.endOffset : last.length);
   // The serializer only reads the ranges, and the native selection may overshoot this row.
   const narrowed = { rangeCount: 1, getRangeAt: () => range } as unknown as Selection;
-  const text = chatMarkdownClipboardPayload(narrowed)?.text.trim();
+  // A quote keeps code fenced, so the agent can tell the code from the prose around it.
+  const text = chatMarkdownClipboardPayload(narrowed, { fenceCode: true })?.text.trim();
   if (!text) return null;
 
   const rects = range.getClientRects();

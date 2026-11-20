@@ -57,6 +57,13 @@ describe("completeProjectPath", () => {
 });
 
 describe("visibleProjectPathSuggestions", () => {
+  it("narrows folder names stored decomposed, as macOS Finder names them", () => {
+    const decomposed = { name: "De\u0301veloppement", fullPath: "/Users/me/De\u0301veloppement" };
+    const accented = { queriedPath: "/Users/me/", entries: [decomposed] };
+    expect(visibleProjectPathSuggestions(accented, "/Users/me/d\u00e9v")).toEqual([decomposed]);
+    expect(visibleProjectPathSuggestions(accented, "/Users/me/De")).toEqual([decomposed]);
+  });
+
   const entries = [
     { name: "alpha", fullPath: "/code/alpha" },
     { name: "Alpine", fullPath: "/code/Alpine" },

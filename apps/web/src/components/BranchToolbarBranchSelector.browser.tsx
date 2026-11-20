@@ -89,6 +89,12 @@ async function renderOpenSelector(
 
   const trigger = page.getByRole("combobox");
   await expect.element(trigger).toBeEnabled();
+  // The name is an attribute, so NVDA browse mode re-reads it when the thread's branch changes.
+  await expect
+    .element(trigger)
+    .toHaveAccessibleName(
+      effectiveEnvMode === "local" ? "Branch: develop" : "Branch: From develop",
+    );
   await userEvent.click(trigger);
   await expect.element(page.getByRole("option", { name: "develop" })).toBeVisible();
   return queryClient;
@@ -486,4 +492,75 @@ it("disables switching to another worktree during a running turn", async () => {
   await expect.element(page.getByText("Stop the current turn to switch worktrees.")).toBeVisible();
   expect(checkoutSpy).not.toHaveBeenCalled();
   client.clear();
+});
+
+describe("picking a branch the list says is checked out", () => {
+  it("checks it out again when an agent has since switched that checkout away", async () => {
+    // The list predates the agent's checkout: it still has "previous" checked out in /repo.
+    const stale: GitBranch = {
+      name: "previous",
+      current: true,
+      isDefault: false,
+      worktreePath: "/repo",
+    };
+    const fresh: GitBranch = { ...stale, current: false, worktreePath: null };
+    listBranchesSpy.mockImplementation(({ query }: { query?: string }) =>
+      Promise.resolve(branchListResult(query === "previous" ? [fresh] : [...BRANCHES, stale])),
+    );
+    const onSetThreadBranch = vi.fn();
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    await render(
+      <QueryClientProvider client={queryClient}>
+        <BranchToolbarBranchSelector
+          activeProjectCwd="/repo"
+          activeThreadBranch="develop"
+          activeWorktreePath={null}
+          branchCwd="/repo"
+          effectiveEnvMode="local"
+          envLocked={false}
+          onSetThreadBranch={onSetThreadBranch}
+        />
+      </QueryClientProvider>,
+    );
+    await userEvent.click(page.getByRole("combobox"));
+    await userEvent.click(page.getByRole("option", { name: "previous" }));
+
+    await vi.waitFor(() =>
+      expect(checkoutSpy).toHaveBeenCalledWith({ cwd: "/repo", branch: "previous" }),
+    );
+    queryClient.clear();
+  });
+
+  it("only retags the thread while that checkout still has it", async () => {
+    const other: GitBranch = {
+      name: "other",
+      current: true,
+      isDefault: false,
+      worktreePath: "/other",
+    };
+    listBranchesSpy.mockImplementation(() =>
+      Promise.resolve(branchListResult([...BRANCHES, other])),
+    );
+    const onSetThreadBranch = vi.fn();
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    await render(
+      <QueryClientProvider client={queryClient}>
+        <BranchToolbarBranchSelector
+          activeProjectCwd="/repo"
+          activeThreadBranch="develop"
+          activeWorktreePath={null}
+          branchCwd="/repo"
+          effectiveEnvMode="local"
+          envLocked={false}
+          onSetThreadBranch={onSetThreadBranch}
+        />
+      </QueryClientProvider>,
+    );
+    await userEvent.click(page.getByRole("combobox"));
+    await userEvent.click(page.getByRole("option", { name: "other" }));
+
+    await vi.waitFor(() => expect(onSetThreadBranch).toHaveBeenCalledWith("other", "/other"));
+    expect(checkoutSpy).not.toHaveBeenCalled();
+    queryClient.clear();
+  });
 });

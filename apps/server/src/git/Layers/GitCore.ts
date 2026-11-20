@@ -3,6 +3,7 @@ import {
   Cause,
   Clock,
   Data,
+  Deferred,
   Duration,
   Effect,
   Exit,
@@ -58,7 +59,7 @@ import {
   stripGitCheckoutProgressLines,
   splitGitOutputLines,
 } from "../gitCheckoutProgress.ts";
-import { explicitBareRepositoryEnv } from "../gitConfigEnv.ts";
+import { explicitBareRepositoryEnv, unsetInheritedRepositoryEnv } from "../gitConfigEnv.ts";
 import { readGitDiffPreview } from "../gitDiffPreview.ts";
 import { remoteUrlIdentityKey } from "../remoteUrl.ts";
 import { removeLinkedWorktree } from "../worktreeRemoval.ts";
@@ -75,7 +76,6 @@ import {
   chunkPathsForGitCheckIgnore,
   commandLabel,
   createGitCommandError,
-  deriveLocalBranchNameFromRemoteRef,
   filterBranchesForListQuery,
   gitCommandMutatesRepositoryLayout,
   isMissingGitCwdError,
@@ -147,6 +147,12 @@ const STATUS_UPSTREAM_REFRESH_CACHE_CAPACITY = 2_048;
 const STATUS_STATIC_INFO_TTL = Duration.minutes(5);
 const STATUS_STATIC_INFO_CACHE_CAPACITY = 2_048;
 const STATUS_ARGS = ["status", "--porcelain=2", "--branch", "-z"] as const;
+// `status.showUntrackedFiles=no` hides files that commit's `add -A` still includes; `all` stays.
+const STATUS_ARGS_SHOWING_UNTRACKED = [...STATUS_ARGS, "--untracked-files=normal"] as const;
+const UNTRACKED_FILES_SHOWN_CONFIG_VALUES = new Set(["normal", "all", "true", "yes", "on", "1"]);
+function untrackedFilesHiddenByConfig(value: string | null): boolean {
+  return value !== null && !UNTRACKED_FILES_SHOWN_CONFIG_VALUES.has(value.toLowerCase());
+}
 const DEFAULT_BASE_BRANCH_CANDIDATES = ["main", "master"] as const;
 const COMMIT_SCRATCH_INDEX_CONFIG_ARGS = [
   "-c",
@@ -232,6 +238,7 @@ interface StatusStaticInfo {
   readonly worktreeRoot: string | null;
   readonly defaultBranch: string | null;
   readonly hasOriginRemote: boolean;
+  readonly untrackedFilesHidden: boolean;
 }
 
 interface ExecuteGitOptions {
@@ -242,6 +249,7 @@ interface ExecuteGitOptions {
   fallbackErrorMessage?: string | undefined;
   maxOutputBytes?: number | undefined;
   truncateOutputAtMaxBytes?: boolean | undefined;
+  keepLineCallbacksAfterTruncation?: boolean | undefined;
   progress?: ExecuteGitProgress | undefined;
 }
 
@@ -457,6 +465,13 @@ const createTrace2Monitor = Effect.fnUntraced(function* (
   };
 });
 
+const OVERFLOW_LINE_BUFFER_LIMIT = 64 * 1024;
+
+// Git prints an alternate C-quoted when it needs quoting; quote the rest the same way, so a path
+// holding the list separator stays one entry (Git 2.11.1+).
+const quoteAlternateObjectDirectory = (entry: string) =>
+  entry.startsWith('"') ? entry : `"${entry.replace(/[\\"]/g, "\\$&")}"`;
+
 // Untraced: runs twice per git spawn; errors fail the enclosing runGitCommand span.
 const collectOutput = Effect.fnUntraced(function* <E>(
   input: Pick<ExecuteGitInput, "operation" | "cwd" | "args">,
@@ -464,8 +479,11 @@ const collectOutput = Effect.fnUntraced(function* <E>(
   maxOutputBytes: number,
   truncateOutputAtMaxBytes: boolean,
   onLine: ((line: string) => Effect.Effect<void, never>) | undefined,
+  keepLineCallbacksAfterTruncation = false,
 ): Effect.fn.Return<{ readonly text: string; readonly truncated: boolean }, GitCommandError> {
   const decoder = new TextDecoder();
+  // Decodes only for line callbacks once the captured text has stopped at the cap.
+  const overflowDecoder = new TextDecoder();
   let bytes = 0;
   let text = "";
   let lineBuffer = "";
@@ -490,9 +508,17 @@ const collectOutput = Effect.fnUntraced(function* <E>(
     }
   });
 
+  const feedOverflowLines = Effect.fnUntraced(function* (overflow: Uint8Array) {
+    if (!keepLineCallbacksAfterTruncation || !onLine || overflow.byteLength === 0) return;
+    lineBuffer += overflowDecoder.decode(overflow, { stream: true });
+    yield* emitCompleteLines(false);
+    // A run this long without a line break is not a progress line; never buffer it unbounded.
+    if (lineBuffer.length > OVERFLOW_LINE_BUFFER_LIMIT) lineBuffer = "";
+  });
+
   const processChunk = Effect.fnUntraced(function* (chunk: Uint8Array) {
     if (truncateOutputAtMaxBytes && truncated) {
-      return;
+      return yield* feedOverflowLines(chunk);
     }
     const nextBytes = bytes + chunk.byteLength;
     if (!truncateOutputAtMaxBytes && nextBytes > maxOutputBytes) {
@@ -517,6 +543,7 @@ const collectOutput = Effect.fnUntraced(function* <E>(
       lineBuffer += decoded;
       yield* emitCompleteLines(false);
     }
+    if (truncated) yield* feedOverflowLines(chunk.subarray(chunkToDecode.byteLength));
   });
 
   yield* Stream.runForEach(stream, processChunk).pipe(
@@ -526,7 +553,8 @@ const collectOutput = Effect.fnUntraced(function* <E>(
   const remainder = truncated ? "" : decoder.decode();
   text += remainder;
   if (onLine) {
-    lineBuffer += remainder;
+    lineBuffer +=
+      truncated && keepLineCallbacksAfterTruncation ? overflowDecoder.decode() : remainder;
     yield* emitCompleteLines(true);
   }
   return {
@@ -593,6 +621,8 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
         );
         const mergedEnv = {
           ...process.env,
+          // An inherited GIT_DIR (e.g. a server started from a git hook) would name another repo.
+          ...unsetInheritedRepositoryEnv(process.env, platform),
           // Read-only commands (status polling) must not take index.lock beside the agent's own git.
           GIT_OPTIONAL_LOCKS: "0",
           // Failures are matched by English text; LANGUAGE (not LC_ALL) leaves hooks' charset alone.
@@ -645,6 +675,7 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
               maxOutputBytes,
               truncateOutputAtMaxBytes,
               input.progress?.onStdoutLine,
+              input.keepLineCallbacksAfterTruncation,
             ),
             collectOutput(
               commandInput,
@@ -652,6 +683,7 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
               maxOutputBytes,
               truncateOutputAtMaxBytes,
               input.progress?.onStderrLine,
+              input.keepLineCallbacksAfterTruncation,
             ),
             child.exitCode.pipe(
               Effect.map((value) => Number(value)),
@@ -782,6 +814,9 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
       ...(options.maxOutputBytes !== undefined ? { maxOutputBytes: options.maxOutputBytes } : {}),
       ...(options.truncateOutputAtMaxBytes !== undefined
         ? { truncateOutputAtMaxBytes: options.truncateOutputAtMaxBytes }
+        : {}),
+      ...(options.keepLineCallbacksAfterTruncation
+        ? { keepLineCallbacksAfterTruncation: true }
         : {}),
       ...(options.progress ? { progress: options.progress } : {}),
     }).pipe(
@@ -984,8 +1019,18 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
 
   // Consecutive failed fetches per (gitCommonDir, remote); insertion order doubles as LRU order.
   const statusRefreshFailures = new Map<string, { count: number; retryAt: number }>();
-  // In-flight background fetches, so slow fetches are joined rather than restarted or killed.
-  const statusFetches = new Map<string, Fiber.Fiber<void, GitCommandError>>();
+  // In-flight background fetches, so slow fetches are joined rather than restarted or killed. A
+  // pull can claim one still queued for a permit and run its own fetch instead of waiting.
+  interface StatusFetchState {
+    phase: "queued" | "running" | "claimed";
+    readonly claimed: Deferred.Deferred<void>;
+    /** Whether the claiming pull fetched the whole remote, making this fetch redundant. */
+    readonly finished: Deferred.Deferred<boolean>;
+  }
+  const statusFetches = new Map<
+    string,
+    { readonly state: StatusFetchState; readonly fiber: Fiber.Fiber<void, GitCommandError> }
+  >();
   const statusFetchRegistration = yield* Semaphore.make(1);
   const statusFetchPermits = yield* Semaphore.make(STATUS_UPSTREAM_FETCH_CONCURRENCY);
 
@@ -1020,11 +1065,20 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
   });
 
   // Fetch the whole remote (configured refspecs) so every worktree on it shares one refresh.
-  const startStatusFetch = (gitCommonDir: string, remoteName: string, key: string) => {
+  const startStatusFetch = Effect.fn("startStatusFetch")(function* (
+    gitCommonDir: string,
+    remoteName: string,
+    key: string,
+  ) {
     const fetchCwd =
       path.basename(gitCommonDir) === ".git" ? path.dirname(gitCommonDir) : gitCommonDir;
+    const state: StatusFetchState = {
+      phase: "queued",
+      claimed: yield* Deferred.make<void>(),
+      finished: yield* Deferred.make<boolean>(),
+    };
     // A failing `gc --auto` reruns on every poll and leaves a full-size tmp_pack_* each time.
-    return executeGit(
+    const fetch = executeGit(
       "GitCore.fetchRemoteForStatus",
       fetchCwd,
       [
@@ -1034,6 +1088,8 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
         "--quiet",
         "--no-tags",
         "--no-auto-gc",
+        // FETCH_HEAD is written without a lock; overlapping a user's `git pull` makes that pull fail.
+        "--no-write-fetch-head",
         "--",
         remoteName,
       ],
@@ -1046,11 +1102,38 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
       Effect.asVoid,
       Effect.tap(() => Effect.sync(() => statusRefreshFailures.delete(key))),
       Effect.tapError((error) => recordStatusRefreshFailure(key, gitCommonDir, remoteName, error)),
-      (fetch) => statusFetchPermits.withPermit(fetch),
-      Effect.onExit(() => Effect.sync(() => statusFetches.delete(key))),
+    );
+    const fiber = yield* Effect.raceFirst(
+      // Claiming and starting are both decided synchronously, so exactly one side wins.
+      Effect.uninterruptibleMask((restore) =>
+        Effect.gen(function* () {
+          if (state.phase !== "queued") return false;
+          state.phase = "running";
+          yield* restore(fetch);
+          return true;
+        }),
+      ).pipe((acquire) => statusFetchPermits.withPermit(acquire)),
+      Deferred.await(state.claimed).pipe(Effect.as(false)),
+    ).pipe(
+      // A claiming pull fetches the remote itself; fetch afterwards only if it did not.
+      Effect.flatMap((completed) =>
+        completed
+          ? Effect.void
+          : Deferred.await(state.finished).pipe(
+              Effect.flatMap((fetchedRemote) =>
+                fetchedRemote ? Effect.void : statusFetchPermits.withPermit(fetch),
+              ),
+            ),
+      ),
+      Effect.onExit(() =>
+        Effect.sync(() => {
+          if (statusFetches.get(key)?.state === state) statusFetches.delete(key);
+        }),
+      ),
       Effect.forkIn(layerScope, { startImmediately: false }),
     );
-  };
+    return { state, fiber };
+  });
 
   const fetchRemoteForStatus = Effect.fn("fetchRemoteForStatus")(function* (
     gitCommonDir: string,
@@ -1063,9 +1146,10 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
     const fiber = yield* statusFetchRegistration.withPermit(
       Effect.suspend(() => {
         const pending = statusFetches.get(key);
-        if (pending) return Effect.succeed(pending);
+        if (pending) return Effect.succeed(pending.fiber);
         return startStatusFetch(gitCommonDir, remoteName, key).pipe(
           Effect.tap((started) => Effect.sync(() => statusFetches.set(key, started))),
+          Effect.map((started) => started.fiber),
         );
       }),
     );
@@ -1090,10 +1174,10 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
     if (gitCommonDir === null) return;
     const prefix = `${gitCommonDir}\0`;
     const pending = remoteName
-      ? [statusFetches.get(statusRefreshFailureKey(gitCommonDir, remoteName))].filter(
+      ? [statusFetches.get(statusRefreshFailureKey(gitCommonDir, remoteName))?.fiber].filter(
           (fiber) => fiber !== undefined,
         )
-      : [...statusFetches].flatMap(([key, fiber]) => (key.startsWith(prefix) ? [fiber] : []));
+      : [...statusFetches].flatMap(([key, entry]) => (key.startsWith(prefix) ? [entry.fiber] : []));
     if (pending.length === 0) return;
     const finished = yield* Fiber.awaitAll(pending).pipe(
       Effect.timeoutOption(STATUS_FETCH_JOIN_WAIT),
@@ -1172,12 +1256,24 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
   const resolveDefaultBranchName = (
     cwd: string,
     remoteName: string,
+    operation = "GitCore.resolveDefaultBranchName",
+    options: ExecuteGitOptions = {},
   ): Effect.Effect<string | null, GitCommandError> =>
     executeGit(
-      "GitCore.resolveDefaultBranchName",
+      operation,
       cwd,
-      ["symbolic-ref", `refs/remotes/${remoteName}/HEAD`],
-      { allowNonZeroExit: true },
+      // Unlike `symbolic-ref`, this fails when the remote deleted the branch HEAD points at.
+      [
+        "rev-parse",
+        "--verify",
+        "--quiet",
+        "--symbolic-full-name",
+        `refs/remotes/${remoteName}/HEAD`,
+      ],
+      {
+        ...options,
+        allowNonZeroExit: true,
+      },
     ).pipe(
       Effect.map((result) => {
         if (result.code !== 0) {
@@ -1212,6 +1308,26 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
       Effect.map((result) => result.code === 0 && parseRemoteNames(result.stdout).length > 0),
     );
 
+  // origin's HEAD, or, in a repository without origin, the first remote's (e.g. only `github`).
+  const resolvePrimaryDefaultBranch = Effect.fn("resolvePrimaryDefaultBranch")(function* (
+    cwd: string,
+    operation: string,
+    options: ExecuteGitOptions = {},
+  ) {
+    const originDefault = yield* resolveDefaultBranchName(cwd, "origin", operation, options);
+    if (originDefault !== null) return { remoteName: "origin", branch: originDefault };
+    const remoteNames = yield* executeGit(`${operation}.remotes`, cwd, ["remote"], {
+      ...options,
+      allowNonZeroExit: true,
+    }).pipe(
+      Effect.map((result) => (result.code === 0 ? parseRemoteNamesInGitOrder(result.stdout) : [])),
+    );
+    const [firstRemote] = remoteNames;
+    if (firstRemote === undefined || remoteNames.includes("origin")) return null;
+    const branch = yield* resolveDefaultBranchName(cwd, firstRemote, operation, options);
+    return branch === null ? null : { remoteName: firstRemote, branch };
+  });
+
   const readStatusStaticInfo = Effect.fn("readStatusStaticInfo")(function* (cwd: string) {
     // Fails alone first so a non-repository folder costs one spawn per poll, not three.
     const repositoryPaths = yield* runGitStdout("GitCore.statusDetails.repositoryPaths", cwd, [
@@ -1220,21 +1336,23 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
       "--git-path",
       "index",
     ]);
-    const [defaultRefResult, hasOriginRemote, worktreeRootResult] = yield* Effect.all(
-      [
-        executeGit(
-          "GitCore.statusDetails.defaultRef",
-          cwd,
-          ["symbolic-ref", "refs/remotes/origin/HEAD"],
-          { allowNonZeroExit: true },
-        ),
-        anyRemoteExists(cwd),
-        executeGit("GitCore.statusDetails.worktreeRoot", cwd, ["rev-parse", "--show-toplevel"], {
-          allowNonZeroExit: true,
-        }),
-      ],
-      { concurrency: "unbounded" },
-    );
+    const [primaryDefault, hasOriginRemote, worktreeRootResult, showUntrackedResult] =
+      yield* Effect.all(
+        [
+          resolvePrimaryDefaultBranch(cwd, "GitCore.statusDetails.defaultRef"),
+          anyRemoteExists(cwd),
+          executeGit("GitCore.statusDetails.worktreeRoot", cwd, ["rev-parse", "--show-toplevel"], {
+            allowNonZeroExit: true,
+          }),
+          executeGit(
+            "GitCore.statusDetails.showUntrackedFiles",
+            cwd,
+            ["config", "--get", "status.showUntrackedFiles"],
+            { allowNonZeroExit: true },
+          ),
+        ],
+        { concurrency: "unbounded" },
+      );
     // Only the trailing newline is stripped: whitespace before it belongs to the path.
     const worktreeRoot =
       worktreeRootResult.code === 0 ? worktreeRootResult.stdout.replace(/\r?\n$/, "") : "";
@@ -1243,11 +1361,11 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
       gitCommonDir: gitCommonDir ? yield* resolveGitReportedPath(cwd, gitCommonDir) : null,
       indexPath: indexPath ? yield* resolveGitReportedPath(cwd, indexPath) : null,
       worktreeRoot: worktreeRoot.length > 0 ? path.normalize(worktreeRoot) : null,
-      defaultBranch:
-        defaultRefResult.code === 0
-          ? parseDefaultBranchFromRemoteHeadRef(defaultRefResult.stdout, "origin")
-          : null,
+      defaultBranch: primaryDefault?.branch ?? null,
       hasOriginRemote,
+      untrackedFilesHidden:
+        showUntrackedResult.code === 0 &&
+        untrackedFilesHiddenByConfig(showUntrackedResult.stdout.trim()),
     } satisfies StatusStaticInfo;
   });
 
@@ -1276,6 +1394,8 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
   const resolvePushRemoteName = Effect.fn("resolvePushRemoteName")(function* (
     cwd: string,
     branch: string,
+    /** Used before the primary remote when no push remote is configured. */
+    fallbackRemoteName: string | null = null,
   ) {
     const branchPushRemote = yield* runGitStdout(
       "GitCore.resolvePushRemoteName.branchPushRemote",
@@ -1295,6 +1415,10 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
     ).pipe(Effect.map((stdout) => stdout.trim()));
     if (pushDefaultRemote.length > 0) {
       return pushDefaultRemote;
+    }
+
+    if (fallbackRemoteName) {
+      return fallbackRemoteName;
     }
 
     return yield* resolvePrimaryRemoteName(cwd).pipe(Effect.catch(() => Effect.succeed(null)));
@@ -1560,14 +1684,15 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
       ),
     );
 
-  // Unborn HEAD: diff the working tree against the empty tree (its id depends on the hash format).
+  // The empty tree's id depends on the repository's hash format.
+  const readEmptyTreeHash = (cwd: string): Effect.Effect<string, GitCommandError> =>
+    executeGit("GitCore.emptyTree", cwd, ["hash-object", "-t", "tree", "--stdin"], {
+      stdin: "",
+    }).pipe(Effect.map((result) => result.stdout.trim()));
+
+  // Unborn HEAD: diff the working tree against the empty tree.
   const readUnbornNumstat = Effect.fn("readUnbornNumstat")(function* (cwd: string) {
-    const emptyTree = yield* executeGit(
-      "GitCore.statusDetails.numstat.emptyTree",
-      cwd,
-      ["hash-object", "-t", "tree", "--stdin"],
-      { stdin: "" },
-    ).pipe(Effect.map((result) => result.stdout.trim()));
+    const emptyTree = yield* readEmptyTreeHash(cwd);
     return yield* runGitStdoutWithOptions(
       "GitCore.statusDetails.numstat.unborn",
       cwd,
@@ -1607,6 +1732,9 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
         );
       }
 
+      const statusArgs =
+        staticInfo?.untrackedFilesHidden === true ? STATUS_ARGS_SHOWING_UNTRACKED : STATUS_ARGS;
+
       // One HEAD-to-working-tree diff: summing staged and unstaged diffs double-counts re-edited lines.
       // Plumbing: porcelain `git diff` rewrites the index even under GIT_OPTIONAL_LOCKS=0.
       const numstatArgs = ["diff-index", "-M", "--numstat", "-z", "HEAD", "--"];
@@ -1614,7 +1742,7 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
       const [statusResult, numstatAttempt] = yield* Effect.all(
         [
           recoverMissingGitCwd(
-            executeGit("GitCore.statusDetails.status", cwd, STATUS_ARGS, {
+            executeGit("GitCore.statusDetails.status", cwd, statusArgs, {
               allowNonZeroExit: true,
               maxOutputBytes: STATUS_MAX_OUTPUT_BYTES,
             }),
@@ -1638,7 +1766,7 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
         return yield* createGitCommandError(
           "GitCore.statusDetails.status",
           cwd,
-          STATUS_ARGS,
+          statusArgs,
           stderr || "git status failed",
         );
       }
@@ -1670,6 +1798,10 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
 
       let branch: string | null = null;
       let upstreamRef: string | null = null;
+      // Git omits branch.ab when the upstream ref is gone, e.g. deleted after its PR merged,
+      // and also for an unborn HEAD, which can still track a fetched upstream.
+      let upstreamRefExists = false;
+      let isUnbornHead = false;
       let aheadCount = 0;
       let behindCount = 0;
       let hasWorkingTreeChanges = false;
@@ -1679,9 +1811,15 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
       const statusRecords = statusStdout.split("\0");
       for (let index = 0; index < statusRecords.length; index += 1) {
         const line = statusRecords[index]!;
+        if (line === "# branch.oid (initial)") {
+          isUnbornHead = true;
+          continue;
+        }
         if (line.startsWith("# branch.head ")) {
           const value = line.slice("# branch.head ".length).trim();
-          branch = value.startsWith("(") ? null : value;
+          // Only the exact markers: a branch may itself be named "(topic". `(unknown)` is printed
+          // while HEAD names no resolvable branch, e.g. mid-`git clone`.
+          branch = value === "(detached)" || value === "(unknown)" ? null : value;
           continue;
         }
         if (line.startsWith("# branch.upstream ")) {
@@ -1690,6 +1828,7 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
           continue;
         }
         if (line.startsWith("# branch.ab ")) {
+          upstreamRefExists = true;
           const value = line.slice("# branch.ab ".length).trim();
           const parsed = parseBranchAb(value);
           aheadCount = parsed.ahead;
@@ -1708,6 +1847,9 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
           }
         }
       }
+
+      // A gone upstream counts as none, so a push publishes the branch again.
+      if (!upstreamRefExists && !isUnbornHead) upstreamRef = null;
 
       if (!upstreamRef && branch) {
         aheadCount = yield* computeAheadCountAgainstBase(cwd, branch).pipe(
@@ -1781,6 +1923,101 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
       })),
     );
 
+  // `add -A` marks unmerged paths resolved, so refuse while one still has conflict markers.
+  const refuseLeftoverConflictMarkers = Effect.fn("refuseLeftoverConflictMarkers")(function* (
+    cwd: string,
+    config: ReadonlyArray<string>,
+    options: { readonly env?: NodeJS.ProcessEnv },
+  ) {
+    const unmergedPaths = (yield* runGitStdoutWithOptions(
+      "GitCore.commit.unmergedPaths",
+      cwd,
+      [...config, ...DIFF_NOT_RELATIVE_CONFIG_ARGS, "diff", "--name-only", "--diff-filter=U", "-z"],
+      { ...options, maxOutputBytes: STATUS_MAX_OUTPUT_BYTES },
+    ))
+      .split("\0")
+      .filter((file) => file.length > 0);
+    if (unmergedPaths.length === 0) return;
+    const check = yield* executeGit(
+      "GitCore.commit.conflictMarkers",
+      cwd,
+      [
+        ...config,
+        ...DIFF_NOT_RELATIVE_CONFIG_ARGS,
+        "diff",
+        "--check",
+        "--no-color",
+        "--",
+        ...unmergedPaths.map((file) => `:(top,literal)${file}`),
+      ],
+      {
+        ...options,
+        allowNonZeroExit: true,
+        maxOutputBytes: STATUS_MAX_OUTPUT_BYTES,
+        truncateOutputAtMaxBytes: true,
+      },
+    );
+    const reports = check.stdout.split("\n");
+    const conflicted: string[] = [];
+    let emptyTree: string | undefined;
+    for (const file of unmergedPaths) {
+      const markerLines = new Set(
+        reports.flatMap((line) => {
+          const match = line.startsWith(`${file}:`)
+            ? /^(\d+): leftover conflict marker$/.exec(line.slice(file.length + 1))
+            : null;
+          return match ? [Number(match[1]) - 1] : [];
+        }),
+      );
+      if (markerLines.size === 0) continue;
+      emptyTree ??= yield* readEmptyTreeHash(cwd);
+      // --check numbers lines after working-tree-encoding (e.g. UTF-16) and clean filters; a diff
+      // from the empty tree prints that view. Read it in full so large resolved files still commit.
+      const fileDiff = yield* runGitStdoutWithOptions(
+        "GitCore.commit.conflictMarkers.file",
+        cwd,
+        [
+          ...config,
+          ...DIFF_NOT_RELATIVE_CONFIG_ARGS,
+          "diff",
+          ...GIT_PLAIN_DIFF_ARGS,
+          "--text",
+          emptyTree,
+          "--",
+          `:(top,literal)${file}`,
+        ],
+        { ...options, maxOutputBytes: Number.POSITIVE_INFINITY },
+      ).pipe(
+        Effect.mapError((cause) =>
+          createGitCommandError(
+            "GitCore.commit.conflictMarkers",
+            cwd,
+            ["commit"],
+            `Could not check ${file} for conflict markers.`,
+            cause,
+          ),
+        ),
+      );
+      const diffLines = fileDiff.split("\n");
+      const lines = diffLines
+        .slice(diffLines.findIndex((line) => line.startsWith("@@")) + 1)
+        .filter((line) => line.startsWith("+"))
+        .map((line) => line.slice(1));
+      // Git also reports a lone "=======", which is valid content such as a heading underline.
+      const reported = (marker: string) =>
+        lines.some((line, index) => markerLines.has(index) && line.startsWith(marker));
+      if (reported("<") && reported(">")) conflicted.push(file);
+    }
+    if (conflicted.length > 0) {
+      return yield* createGitCommandError(
+        "GitCore.commit",
+        cwd,
+        ["commit"],
+        `Cannot commit with unresolved merge conflicts in ${conflicted.join(", ")}. Resolve them, then commit.`,
+      );
+    }
+  });
+
   // Stages into the real index, or into a scratch index when `env` sets GIT_INDEX_FILE.
   const stageCommitChanges = Effect.fn("stageCommitChanges")(function* (
     cwd: string,
@@ -1793,6 +2030,7 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
       ...(env ? COMMIT_SCRATCH_INDEX_CONFIG_ARGS : []),
     ];
     const options = env ? { env } : {};
+    let preserveUnselectedConflicts = false;
     if (filePaths && filePaths.length > 0) {
       if (env) {
         const head = yield* executeGit(
@@ -1809,22 +2047,42 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
           options,
         );
       } else {
-        // Like `git commit --only`, refuse before reset discards the merge or cherry-pick state.
-        const [mergeHead, cherryPickHead] = (yield* runGitStdout("GitCore.commit.mergeHead", cwd, [
+        // Like `git commit --only`, refuse before reset discards the merge, cherry-pick or revert state.
+        const inProgressHeads = [
+          { head: "MERGE_HEAD", operation: "merge" },
+          { head: "CHERRY_PICK_HEAD", operation: "cherry-pick" },
+          { head: "REVERT_HEAD", operation: "revert" },
+          // A conflicted multi-commit `cherry-pick --no-commit` writes only the sequencer; reset
+          // would clear its unmerged entries, so `--continue` would walk past the conflict.
+          { head: "sequencer", operation: "cherry-pick or revert" },
+        ] as const;
+        const statePaths = (yield* runGitStdout("GitCore.commit.mergeHead", cwd, [
           "rev-parse",
-          "--git-path",
-          "MERGE_HEAD",
-          "--git-path",
-          "CHERRY_PICK_HEAD",
+          ...inProgressHeads.flatMap(({ head }) => ["--git-path", head]),
         ]))
           .split(/\r?\n/g)
           .map((line) => line.trim());
-        for (const [statePath, operation] of [
-          [mergeHead, "merge"],
-          [cherryPickHead, "cherry-pick"],
-        ] as const) {
+        // Reftable keeps CHERRY_PICK_HEAD and REVERT_HEAD as refs with no file under .git. A
+        // same-named branch resolves to its full name; an ambiguity warning would blank stdout.
+        const isOperationRef = (head: string) =>
+          runGitStdout(
+            "GitCore.commit.operationRef",
+            cwd,
+            [
+              "-c",
+              "core.warnAmbiguousRefs=false",
+              "rev-parse",
+              "--verify",
+              "--quiet",
+              "--symbolic-full-name",
+              head,
+            ],
+            true,
+          ).pipe(Effect.map((ref) => ref.trim() === head));
+        for (const [index, { head, operation }] of inProgressHeads.entries()) {
+          const statePath = statePaths[index];
           if (!statePath) continue;
-          const inProgress = yield* fileSystem
+          const stateFileExists = yield* fileSystem
             .exists(yield* resolveGitReportedPath(cwd, statePath))
             .pipe(
               Effect.mapError((cause) =>
@@ -1837,6 +2095,10 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
                 ),
               ),
             );
+          const inProgress =
+            stateFileExists ||
+            ((head === "CHERRY_PICK_HEAD" || head === "REVERT_HEAD") &&
+              (yield* isOperationRef(head)));
           if (inProgress) {
             return yield* createGitCommandError(
               "GitCore.commit",
@@ -1846,17 +2108,36 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
             );
           }
         }
-        // Must not be ignored: a stale index would commit files the user did not select.
-        yield* runGit("GitCore.commit.reset", cwd, [...config, "reset", "--quiet"]);
+        const selectedFiles = new Set(filePaths);
+        const unmergedPaths = yield* runGitStdoutWithOptions(
+          "GitCore.commit.unmergedPaths",
+          cwd,
+          ["-c", "diff.relative=false", "diff", "--cached", "--name-only", "--diff-filter=U", "-z"],
+          { maxOutputBytes: STATUS_MAX_OUTPUT_BYTES },
+        );
+        // Reset drops every conflict stage (e.g. after a conflicted `stash pop`), so keep the index
+        // while unselected files are conflicted and commit the selection with `--only`.
+        preserveUnselectedConflicts = unmergedPaths
+          .split("\0")
+          .some((file) => file.length > 0 && !selectedFiles.has(file));
+        if (!preserveUnselectedConflicts) {
+          // Must not be ignored: a stale index would commit files the user did not select.
+          yield* runGit("GitCore.commit.reset", cwd, [...config, "reset", "--quiet"]);
+        }
       }
       yield* runGit(
         env ? "GitCore.prepareCommitContext.addSelected" : "GitCore.commit.addSelected",
         cwd,
-        // Status paths are repository-relative while cwd can be a subdirectory project.
-        [...config, "add", "-A", "--", ...filePaths.map((filePath) => `:(top,literal)${filePath}`)],
-        options,
+        // On stdin: a large selection on argv fails to spawn with E2BIG.
+        [...config, "add", "-A", "--pathspec-from-file=-", "--pathspec-file-nul"],
+        {
+          ...options,
+          // Status paths are repository-relative while cwd can be a subdirectory project.
+          stdin: filePaths.map((filePath) => `:(top,literal)${filePath}\0`).join(""),
+        },
       );
     } else {
+      yield* refuseLeftoverConflictMarkers(cwd, config, options);
       yield* runGit(
         env ? "GitCore.prepareCommitContext.addAll" : "GitCore.commit.addAll",
         cwd,
@@ -1864,6 +2145,10 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
         options,
       );
     }
+    // Repository-relative pathspecs for `commit --only`, when the index must keep other conflicts.
+    return preserveUnselectedConflicts && filePaths
+      ? filePaths.map((filePath) => `:(top,literal)${filePath}`)
+      : undefined;
   });
 
   const prepareCommitContext: GitCoreShape["prepareCommitContext"] = Effect.fn(
@@ -1872,17 +2157,41 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
     return yield* Effect.scoped(
       Effect.gen(function* () {
         // Work on a copy of the index so generation never disturbs the user's staging.
-        const indexValue = yield* runGitStdout("GitCore.prepareCommitContext.indexPath", cwd, [
-          "rev-parse",
-          "--git-path",
-          "index",
-        ]);
+        const [indexValue = "", objectsValue = ""] = (yield* runGitStdout(
+          "GitCore.prepareCommitContext.gitPaths",
+          cwd,
+          ["rev-parse", "--git-path", "index", "--git-path", "objects"],
+        )).split(/\r?\n/g);
         const indexPath = yield* resolveGitReportedPath(cwd, indexValue.trim());
+        const objectsPath = yield* resolveGitReportedPath(cwd, objectsValue.trim());
         const directory = yield* fileSystem.makeTempDirectoryScoped({
           prefix: "piedpiper-commit-index-",
         });
         const tempIndexPath = path.join(directory, "index");
-        const env = { GIT_INDEX_FILE: tempIndexPath } satisfies NodeJS.ProcessEnv;
+        // Staging writes blobs; put them in the temp directory so a draft leaves nothing behind.
+        // List every object directory Git resolved (nested and environment alternates) flat,
+        // since nesting the repository's objects one level deeper can pass Git's depth limit.
+        const countObjects = yield* runGitStdout("GitCore.prepareCommitContext.alternates", cwd, [
+          "count-objects",
+          "-v",
+        ]);
+        const alternates = [
+          objectsPath,
+          ...countObjects
+            .split(/\r?\n/g)
+            .flatMap((line) =>
+              line.startsWith("alternate: ") ? [line.slice("alternate: ".length)] : [],
+            ),
+        ];
+        const tempObjectsPath = path.join(directory, "objects");
+        yield* fileSystem.makeDirectory(tempObjectsPath);
+        const env = {
+          GIT_INDEX_FILE: tempIndexPath,
+          GIT_OBJECT_DIRECTORY: tempObjectsPath,
+          GIT_ALTERNATE_OBJECT_DIRECTORIES: alternates
+            .map(quoteAlternateObjectDirectory)
+            .join(platform === "win32" ? ";" : ":"),
+        } satisfies NodeJS.ProcessEnv;
         if (yield* fileSystem.exists(indexPath)) {
           const { mtime } = yield* fileSystem.stat(indexPath);
           yield* fileSystem.copyFile(indexPath, tempIndexPath);
@@ -1929,7 +2238,17 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
           { env, maxOutputBytes: STATUS_MAX_OUTPUT_BYTES },
         ).pipe(Effect.map((stdout) => stdout.trim()));
         if (stagedSummary.length === 0) {
-          return null;
+          // Like git commit, a merge resolved to HEAD's tree still records its merge commit.
+          const mergeHeadPath = yield* runGitStdout("GitCore.prepareCommitContext.mergeHead", cwd, [
+            "rev-parse",
+            "--git-path",
+            "MERGE_HEAD",
+          ]);
+          if (
+            !(yield* fileSystem.exists(yield* resolveGitReportedPath(cwd, mergeHeadPath.trim())))
+          ) {
+            return null;
+          }
         }
         if (options?.includePatch === false) {
           return { stagedSummary, stagedPatch: "" };
@@ -1981,13 +2300,22 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
     body,
     options?: GitCommitOptions,
   ) {
-    if (options?.stage !== undefined) {
-      yield* stageCommitChanges(cwd, options.stage.filePaths);
-    }
+    const partialCommitPaths =
+      options?.stage !== undefined
+        ? yield* stageCommitChanges(cwd, options.stage.filePaths)
+        : undefined;
     const args = ["commit", "-m", subject];
     const trimmedBody = body.trim();
     if (trimmedBody.length > 0) {
       args.push("-m", trimmedBody);
+    }
+    // On stdin: a large selection on argv fails to spawn with E2BIG.
+    const onlyPathspecArgs = ["--pathspec-from-file=-", "--pathspec-file-nul"];
+    const onlyPathspecStdin = partialCommitPaths
+      ? { stdin: partialCommitPaths.map((pathspec) => `${pathspec}\0`).join("") }
+      : {};
+    if (partialCommitPaths) {
+      args.push("--only", ...onlyPathspecArgs);
     }
     const progress =
       options?.progress?.onOutputLine === undefined
@@ -2001,9 +2329,19 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
           };
     yield* executeGit("GitCore.commit.commit", cwd, args, {
       maxOutputBytes: STATUS_MAX_OUTPUT_BYTES,
+      ...onlyPathspecStdin,
       ...(options?.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
       ...(progress ? { progress } : {}),
     }).pipe(Effect.asVoid);
+    if (partialCommitPaths) {
+      // --only runs hooks on a temporary index, so a hook's `git add` never reaches the real one.
+      yield* runGit(
+        "GitCore.commit.syncSelectedIndex",
+        cwd,
+        ["reset", "--quiet", "HEAD", ...onlyPathspecArgs],
+        onlyPathspecStdin,
+      );
+    }
     const commitSha = yield* runGitStdout("GitCore.commit.revParseHead", cwd, [
       "rev-parse",
       "HEAD",
@@ -2014,13 +2352,13 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
 
   // `push -u` exits 0 without the upstream when another writer holds the config lock.
   const recordPushedUpstream = Effect.fn("recordPushedUpstream")(
-    function* (cwd: string, branch: string, remoteName: string) {
+    function* (cwd: string, branch: string, remoteName: string, remoteBranch: string = branch) {
       const mergeKey = `branch.${branch}.merge`;
       const previousMerge = yield* readConfigValue(cwd, mergeKey);
       yield* runConfigWrite("GitCore.pushCurrentBranch.recordUpstreamMerge", cwd, [
         "config",
         mergeKey,
-        `refs/heads/${branch}`,
+        `refs/heads/${remoteBranch}`,
       ]);
       yield* runConfigWrite("GitCore.pushCurrentBranch.recordUpstreamRemote", cwd, [
         "config",
@@ -2055,6 +2393,42 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
       ),
     ),
   );
+
+  // Publishing retargets tracking, so the base is recorded first; base resolution reads gh-merge-base.
+  const recordBranchMergeBaseIfUnset = Effect.fn("recordBranchMergeBaseIfUnset")(function* (
+    cwd: string,
+    branch: string,
+    baseBranch: string,
+  ) {
+    const configuredMergeBase = yield* runGitStdout(
+      "GitCore.pushCurrentBranch.readMergeBase",
+      cwd,
+      ["config", "--get", `branch.${branch}.gh-merge-base`],
+      true,
+    ).pipe(Effect.map((stdout) => stdout.trim()));
+    if (configuredMergeBase.length === 0) {
+      yield* runConfigWrite("GitCore.pushCurrentBranch.recordMergeBase", cwd, [
+        "config",
+        `branch.${branch}.gh-merge-base`,
+        baseBranch,
+      ]);
+    }
+  });
+
+  // The remote upstream a branch still has configured after status reported none (its ref is gone).
+  const readGoneUpstream = Effect.fn("readGoneUpstream")(function* (cwd: string, branch: string) {
+    const [remoteName, mergeRef] = yield* Effect.all(
+      [
+        readConfigValue(cwd, `branch.${branch}.remote`),
+        readConfigValue(cwd, `branch.${branch}.merge`),
+      ],
+      { concurrency: "unbounded" },
+    ).pipe(Effect.orElseSucceed(() => [null, null] as const));
+    if (!remoteName || remoteName === "." || !mergeRef?.startsWith("refs/heads/")) return null;
+    const upstreamBranch = mergeRef.slice("refs/heads/".length);
+    if (upstreamBranch.length === 0) return null;
+    return { remoteName, upstreamBranch, upstreamRef: `${remoteName}/${upstreamBranch}` };
+  });
 
   const pushCurrentBranch: GitCoreShape["pushCurrentBranch"] = Effect.fn("pushCurrentBranch")(
     function* (cwd, fallbackBranch) {
@@ -2114,7 +2488,16 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
       }
 
       if (!details.hasUpstream) {
-        const publishRemoteName = yield* resolvePushRemoteName(cwd, branch);
+        // A deleted upstream keeps its config: republish to it when it was this branch's own,
+        // otherwise it was the base, so record that before publishing.
+        const goneUpstream = yield* readGoneUpstream(cwd, branch);
+        const ownGoneUpstream =
+          goneUpstream !== null && isUpstreamPushTarget(branch, goneUpstream) ? goneUpstream : null;
+        const publishRemoteName = yield* resolvePushRemoteName(
+          cwd,
+          branch,
+          ownGoneUpstream?.remoteName ?? null,
+        );
         if (!publishRemoteName) {
           return yield* createGitCommandError(
             "GitCore.pushCurrentBranch",
@@ -2123,17 +2506,21 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
             "Cannot push because no git remote is configured for this repository.",
           );
         }
+        if (goneUpstream !== null && ownGoneUpstream === null) {
+          yield* recordBranchMergeBaseIfUnset(cwd, branch, goneUpstream.upstreamBranch);
+        }
+        const remoteBranch = ownGoneUpstream?.upstreamBranch ?? branch;
         yield* runGit(
           "GitCore.pushCurrentBranch.pushWithUpstream",
           cwd,
-          ["push", "--", publishRemoteName, `HEAD:refs/heads/${branch}`],
+          ["push", "--", publishRemoteName, `HEAD:refs/heads/${remoteBranch}`],
           { timeoutMs: PUSH_TIMEOUT_MS },
         );
         return {
           status: "pushed" as const,
           branch,
-          upstreamBranch: `${publishRemoteName}/${branch}`,
-          setUpstream: yield* recordPushedUpstream(cwd, branch, publishRemoteName),
+          upstreamBranch: `${publishRemoteName}/${remoteBranch}`,
+          setUpstream: yield* recordPushedUpstream(cwd, branch, publishRemoteName, remoteBranch),
         };
       }
 
@@ -2142,19 +2529,7 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
         publishRemoteName: string,
         baseBranch: string,
       ) {
-        const configuredMergeBase = yield* runGitStdout(
-          "GitCore.pushCurrentBranch.readMergeBase",
-          cwd,
-          ["config", "--get", `branch.${branch}.gh-merge-base`],
-          true,
-        ).pipe(Effect.map((stdout) => stdout.trim()));
-        if (configuredMergeBase.length === 0) {
-          yield* runConfigWrite("GitCore.pushCurrentBranch.recordMergeBase", cwd, [
-            "config",
-            `branch.${branch}.gh-merge-base`,
-            baseBranch,
-          ]);
-        }
+        yield* recordBranchMergeBaseIfUnset(cwd, branch, baseBranch);
         yield* runGit(
           "GitCore.pushCurrentBranch.pushOwnBranch",
           cwd,
@@ -2233,7 +2608,8 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
 
   const pullCurrentBranch: GitCoreShape["pullCurrentBranch"] = Effect.fn("pullCurrentBranch")(
     function* (cwd) {
-      const details = yield* statusDetails(cwd);
+      // The pull fetches itself, so status must not start (and wait on) a background fetch.
+      const details = yield* statusDetails(cwd, { skipUpstreamRefresh: true });
       const branch = details.branch;
       if (!branch) {
         return yield* createGitCommandError(
@@ -2251,8 +2627,41 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
           "Current branch has no upstream configured. Push with upstream first.",
         );
       }
-      // The status read above can start a fetch that still holds ref locks.
-      yield* awaitStatusFetches(cwd, yield* readBranchRemote(cwd, branch));
+      // The upstream-only retry leaves other remote-tracking refs stale, so a claimed status fetch
+      // must still run after it.
+      let fetchedUpstreamOnly = false;
+      const branchRemote = yield* readBranchRemote(cwd, branch);
+      const gitCommonDir =
+        branchRemote === null
+          ? null
+          : yield* resolveGitCommonDir(cwd).pipe(Effect.orElseSucceed(() => null));
+      const pending =
+        gitCommonDir === null || branchRemote === null
+          ? undefined
+          : statusFetches.get(statusRefreshFailureKey(gitCommonDir, branchRemote));
+      if (pending) {
+        // A fetch still queued behind other repositories' fetches is claimed: the pull's own
+        // fetch replaces it. One already running may hold ref locks, so let it finish first.
+        const claimed = yield* Effect.uninterruptible(
+          Effect.gen(function* () {
+            if (pending.state.phase !== "queued") return false;
+            pending.state.phase = "claimed";
+            yield* Effect.addFinalizer((exit) =>
+              Deferred.succeed(
+                pending.state.finished,
+                Exit.isSuccess(exit) && !fetchedUpstreamOnly,
+              ),
+            );
+            yield* Deferred.succeed(pending.state.claimed, undefined);
+            return true;
+          }),
+        );
+        if (!claimed) {
+          yield* Fiber.await(pending.fiber).pipe(Effect.timeoutOption(STATUS_FETCH_JOIN_WAIT));
+        }
+      } else if (branchRemote === null) {
+        yield* awaitStatusFetches(cwd);
+      }
       const beforeSha = yield* runGitStdout(
         "GitCore.pullCurrentBranch.beforeSha",
         cwd,
@@ -2260,9 +2669,10 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
         true,
       ).pipe(Effect.map((stdout) => stdout.trim()));
       // HEAD before and after decides the result; a large fast-forward's diffstat must not fail a
-      // pull git already applied.
+      // pull git already applied. A deadline would kill git mid-checkout (e.g. a slow LFS smudge)
+      // and strand a half-updated tree.
       const pullOptions = {
-        timeoutMs: 30_000,
+        timeoutMs: null,
         truncateOutputAtMaxBytes: true,
         allowNonZeroExit: true,
       } satisfies ExecuteGitOptions;
@@ -2310,6 +2720,7 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
           currentSha === beforeSha
         ) {
           pullArgs = ["pull", "--ff-only", "--", remote, mergeRef];
+          fetchedUpstreamOnly = true;
           pullResult = yield* executeGit(
             "GitCore.pullCurrentBranch.pull",
             cwd,
@@ -2334,13 +2745,17 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
         true,
       ).pipe(Effect.map((stdout) => stdout.trim()));
 
-      const refreshed = yield* statusDetails(cwd);
+      const refreshed = yield* statusDetails(cwd, { skipUpstreamRefresh: true });
       return {
-        status: beforeSha.length > 0 && beforeSha === afterSha ? "skipped_up_to_date" : "pulled",
+        status:
+          beforeSha.length > 0 && beforeSha === afterSha
+            ? ("skipped_up_to_date" as const)
+            : ("pulled" as const),
         branch,
         upstreamBranch: refreshed.upstreamRef,
       };
     },
+    Effect.scoped,
   );
 
   const readRangeContext: GitCoreShape["readRangeContext"] = Effect.fn("readRangeContext")(
@@ -2587,15 +3002,9 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
       repositoryPathsResult,
     ] = yield* Effect.all(
       [
-        executeGit(
-          "GitCore.listBranches.defaultRef",
-          input.cwd,
-          ["symbolic-ref", "refs/remotes/origin/HEAD"],
-          {
-            timeoutMs: 5_000,
-            allowNonZeroExit: true,
-          },
-        ),
+        resolvePrimaryDefaultBranch(input.cwd, "GitCore.listBranches.defaultRef", {
+          timeoutMs: 5_000,
+        }).pipe(Effect.orElseSucceed(() => null)),
         executeGit(
           "GitCore.listBranches.worktreeList",
           input.cwd,
@@ -2626,10 +3035,7 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
       );
     }
 
-    const defaultBranch =
-      defaultRef.code === 0
-        ? defaultRef.stdout.trim().replace(/^refs\/remotes\/origin\//, "")
-        : null;
+    const defaultBranch = defaultRef?.branch ?? null;
 
     const [reportedGitCommonDir = "", reportedToplevel = ""] =
       repositoryPathsResult.stdout.split(/\r?\n/g);
@@ -2708,9 +3114,9 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
                 current: false,
                 isRemote: true,
                 isDefault:
-                  defaultBranch !== null &&
-                  parsedRemoteRef?.remoteName === "origin" &&
-                  parsedRemoteRef.branchName === defaultBranch,
+                  defaultRef !== null &&
+                  parsedRemoteRef?.remoteName === defaultRef.remoteName &&
+                  parsedRemoteRef.branchName === defaultRef.branch,
                 worktreePath: null,
               };
               if (parsedRemoteRef) {
@@ -2880,22 +3286,61 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
       .exists(path.join(worktreePath, ".gitmodules"))
       .pipe(Effect.orElseSucceed(() => false));
     if (!hasSubmodules) return;
-    yield* runGit(
-      "GitCore.createWorktree.updateSubmodules",
-      worktreePath,
-      mode === "recursive"
-        ? ["submodule", "update", "--init", "--recursive"]
-        : ["submodule", "update", "--init"],
-      // Cloning scales with remote size; bound it like worktree add and never wait on a prompt.
-      { timeoutMs: WORKTREE_ADD_TIMEOUT_MS, env: STATUS_UPSTREAM_REFRESH_ENV },
-    ).pipe(
-      // The first init writes submodule.<name>.url to the shared config; rerunning it is idempotent.
-      retryWhileConfigLocked,
+    const updateSubmodules = (paths: readonly string[]) =>
+      runGit(
+        "GitCore.createWorktree.updateSubmodules",
+        worktreePath,
+        [
+          "submodule",
+          "update",
+          "--init",
+          ...(mode === "recursive" ? ["--recursive"] : []),
+          // A clone left by a failed update already has HEAD at the gitlink, so Git would skip it.
+          ...(paths.length > 0 ? ["--force", "--", ...paths] : []),
+        ],
+        // Cloning scales with remote size; bound it like worktree add and never wait on a prompt.
+        { timeoutMs: WORKTREE_ADD_TIMEOUT_MS, env: STATUS_UPSTREAM_REFRESH_ENV },
+      ).pipe(
+        // The first init writes submodule.<name>.url to the shared config; rerunning it is idempotent.
+        retryWhileConfigLocked,
+      );
+    // One failed clone stops Git before it checks out any submodule, leaving the cloned ones as
+    // empty working trees that read as modified; check those out on their own.
+    const checkOutClonedSubmodules = Effect.gen(function* () {
+      // Records are "submodule.<name>.path\n<path>".
+      const submodulePaths = (yield* runGitStdout(
+        "GitCore.createWorktree.listSubmodules",
+        worktreePath,
+        ["config", "-z", "--file", ".gitmodules", "--get-regexp", "^submodule\\..*\\.path$"],
+      ))
+        .split("\0")
+        .flatMap((record) => {
+          const newline = record.indexOf("\n");
+          return newline === -1 ? [] : [record.slice(newline + 1)];
+        });
+      const clonedPaths = yield* Effect.filter(submodulePaths, (submodulePath) =>
+        fileSystem
+          .exists(path.join(worktreePath, submodulePath, ".git"))
+          .pipe(Effect.orElseSucceed(() => false)),
+      );
+      if (clonedPaths.length > 0) {
+        yield* updateSubmodules(clonedPaths);
+      }
+    });
+    yield* updateSubmodules([]).pipe(
       Effect.catch((cause) =>
         Effect.logWarning("worktree submodule checkout failed; submodules may be incomplete", {
           worktreePath,
           detail: cause.detail,
-        }),
+        }).pipe(
+          Effect.andThen(checkOutClonedSubmodules),
+          Effect.catch((retryCause) =>
+            Effect.logWarning("could not check out the submodules that did clone", {
+              worktreePath,
+              detail: retryCause.detail,
+            }),
+          ),
+        ),
       ),
     );
   });
@@ -2972,11 +3417,20 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
             worktreesRoot.detail,
           );
         }
-        worktreePath = path.join(
+        const basePath = path.join(
           worktreesRoot.directory,
           path.basename(input.cwd),
           worktreeDirectoryName(targetBranch, yield* resolveGitCommonDir(input.cwd)),
         );
+        // The name is stable per branch, so a folder left by an earlier worktree must not block it.
+        worktreePath = basePath;
+        for (
+          let suffix = 2;
+          yield* fileSystem.exists(worktreePath).pipe(Effect.orElseSucceed(() => false));
+          suffix++
+        ) {
+          worktreePath = `${basePath}-${suffix}`;
+        }
         // A location that holds the repo itself (e.g. ~/code for ~/code/app) would nest the
         // worktree inside the main checkout, where `git clean` or the main thread can touch it.
         const realPathOrSelf = (value: string) =>
@@ -3014,6 +3468,9 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
       const stockWorktree = executeGit("GitCore.createWorktree", input.cwd, args, {
         timeoutMs: WORKTREE_ADD_TIMEOUT_MS,
         fallbackErrorMessage: "git worktree add failed",
+        // Hooks and filter drivers may print without bound; only progress lines are read.
+        truncateOutputAtMaxBytes: true,
+        keepLineCallbacksAfterTruncation: true,
         ...(onCheckoutProgress
           ? {
               env: GIT_CHECKOUT_PROGRESS_ENV,
@@ -3045,8 +3502,8 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
               ...(newBranch ? { newBranch } : {}),
               checkoutWorkers,
             })
-            .pipe(Effect.flatMap((cloned) => (cloned ? Effect.void : stockWorktree)))
-        : stockWorktree;
+            .pipe(Effect.flatMap((cloned) => (cloned ? Effect.void : Effect.asVoid(stockWorktree))))
+        : Effect.asVoid(stockWorktree);
       const createdPath = worktreePath;
       const requestedBranch = newBranch;
       const finishWorktree = Effect.gen(function* () {
@@ -3216,13 +3673,38 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
   );
 
   const setBranchUpstream: GitCoreShape["setBranchUpstream"] = (input) =>
-    runConfigWrite("GitCore.setBranchUpstream", input.cwd, [
-      "branch",
-      "--set-upstream-to",
-      `${input.remoteName}/${input.remoteBranch}`,
-      "--",
-      input.branch,
-    ]);
+    withSharedConfigLock(
+      input.cwd,
+      Effect.gen(function* () {
+        const args = [
+          "branch",
+          "--set-upstream-to",
+          `refs/remotes/${input.remoteName}/${input.remoteBranch}`,
+          "--",
+          input.branch,
+        ];
+        const result = yield* executeGit("GitCore.setBranchUpstream", input.cwd, args, {
+          allowNonZeroExit: true,
+        });
+        if (result.code === 0) return;
+        // Git requires a configured fetch mapping even when the tracking ref already exists, as
+        // after a PR checkout from a remote with a restricted refspec. The mapping is a glob because
+        // an exact source fails every later fetch once the branch is deleted.
+        if (
+          /^fatal: cannot set up tracking information; starting point '.+' is not a branch$/m.test(
+            result.stderr,
+          )
+        ) {
+          yield* runGit("GitCore.setBranchUpstream.addFetchMapping", input.cwd, [
+            "config",
+            "--add",
+            `remote.${input.remoteName}.fetch`,
+            `+refs/heads/${input.remoteBranch}*:refs/remotes/${input.remoteName}/${input.remoteBranch}*`,
+          ]).pipe(retryWhileConfigLocked);
+        }
+        yield* runGit("GitCore.setBranchUpstream", input.cwd, args).pipe(retryWhileConfigLocked);
+      }),
+    );
 
   const removeWorktree: GitCoreShape["removeWorktree"] = Effect.fn("removeWorktree")(
     function* (input) {
@@ -3274,19 +3756,27 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
     if (input.oldBranch === input.newBranch) {
       return { branch: input.newBranch };
     }
-    const targetBranch = yield* resolveAvailableBranchName(input.cwd, input.newBranch);
-
-    yield* executeGit(
-      "GitCore.renameBranch",
+    // Parallel launches often generate the same name; picking it under the lock that serializes
+    // shared-config writes (a rename moves the branch's config section) keeps a second launch from
+    // choosing a name the first is about to take.
+    return yield* withSharedConfigLock(
       input.cwd,
-      ["branch", "-m", "--", input.oldBranch, targetBranch],
-      {
-        timeoutMs: 10_000,
-        fallbackErrorMessage: "git branch rename failed",
-      },
-    );
+      Effect.gen(function* () {
+        const targetBranch = yield* resolveAvailableBranchName(input.cwd, input.newBranch);
 
-    return { branch: targetBranch };
+        yield* executeGit(
+          "GitCore.renameBranch",
+          input.cwd,
+          ["branch", "-m", "--", input.oldBranch, targetBranch],
+          {
+            timeoutMs: 10_000,
+            fallbackErrorMessage: "git branch rename failed",
+          },
+        );
+
+        return { branch: targetBranch };
+      }),
+    );
   });
 
   const createBranch: GitCoreShape["createBranch"] = (input) =>
@@ -3325,7 +3815,8 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
         ? yield* executeGit(
             "GitCore.checkoutBranch.localTrackingBranch",
             input.cwd,
-            ["for-each-ref", "--format=%(refname:short)\t%(upstream:short)", "refs/heads"],
+            // `:short` prefixes a name a tag shares with `heads/`, so names are unambiguous here.
+            ["for-each-ref", "--format=%(refname:lstrip=2)\t%(upstream)", "refs/heads"],
             {
               timeoutMs: 5_000,
               allowNonZeroExit: true,
@@ -3333,35 +3824,21 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
           ).pipe(
             Effect.map((result) =>
               result.code === 0
-                ? parseTrackingBranchByUpstreamRef(result.stdout, input.branch)
+                ? parseTrackingBranchByUpstreamRef(result.stdout, `refs/remotes/${input.branch}`)
                 : null,
             ),
           )
         : null;
 
-      const localTrackedBranchCandidate = deriveLocalBranchNameFromRemoteRef(input.branch);
-      const localTrackedBranchTargetExists =
-        remoteExists && localTrackedBranchCandidate
-          ? yield* executeGit(
-              "GitCore.checkoutBranch.localTrackedBranchTargetExists",
-              input.cwd,
-              ["show-ref", "--verify", "--quiet", `refs/heads/${localTrackedBranchCandidate}`],
-              {
-                timeoutMs: 5_000,
-                allowNonZeroExit: true,
-              },
-            ).pipe(Effect.map((result) => result.code === 0))
-          : false;
-
+      // A local branch of the same name that does not track this remote branch makes `--track`
+      // fail, which is intended: checking out the remote ref instead would silently detach HEAD.
       const checkoutArgs = localInputExists
         ? ["checkout", input.branch]
-        : remoteExists && !localTrackingBranch && localTrackedBranchTargetExists
-          ? ["checkout", input.branch]
-          : remoteExists && !localTrackingBranch
-            ? ["checkout", "--track", input.branch]
-            : remoteExists && localTrackingBranch
-              ? ["checkout", localTrackingBranch]
-              : ["checkout", input.branch];
+        : remoteExists && !localTrackingBranch
+          ? ["checkout", "--track", input.branch]
+          : remoteExists && localTrackingBranch
+            ? ["checkout", localTrackingBranch]
+            : ["checkout", input.branch];
 
       yield* refuseOptionLikeRefName(
         "GitCore.checkoutBranch",
@@ -3371,7 +3848,8 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
       );
       // A trailing `--` keeps a name that is not a ref from becoming a path checkout that discards edits.
       yield* executeGit("GitCore.checkoutBranch.checkout", input.cwd, [...checkoutArgs, "--"], {
-        timeoutMs: 10_000,
+        // Killing a checkout midway (large or LFS repos) leaves a half-updated working tree.
+        timeoutMs: null,
         fallbackErrorMessage: "git checkout failed",
       });
     },

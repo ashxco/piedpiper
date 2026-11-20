@@ -43,6 +43,7 @@ interface GitCall {
   readonly cwd: string;
   readonly args: ReadonlyArray<string>;
   readonly env?: NodeJS.ProcessEnv;
+  readonly timeoutMs?: number | null;
 }
 
 const makeGit = (
@@ -57,13 +58,23 @@ const makeGit = (
   const heads = new Map<string, number>();
   return {
     statusDetails: (cwd: string) => Effect.succeed((options?.statusFor ?? statusFor)(cwd)),
-    execute: (input: { cwd: string; args: ReadonlyArray<string>; env?: NodeJS.ProcessEnv }) =>
+    execute: (input: {
+      cwd: string;
+      args: ReadonlyArray<string>;
+      env?: NodeJS.ProcessEnv;
+      timeoutMs?: number | null;
+    }) =>
       Effect.suspend(() => {
         const { cwd, args } = input;
         if (args[0] === "rev-parse") {
           return Effect.succeed({ code: 0, stdout: `sha-${heads.get(cwd) ?? 0}\n`, stderr: "" });
         }
-        options?.calls?.push({ cwd, args, ...(input.env ? { env: input.env } : {}) });
+        options?.calls?.push({
+          cwd,
+          args,
+          ...(input.env ? { env: input.env } : {}),
+          ...(input.timeoutMs !== undefined ? { timeoutMs: input.timeoutMs } : {}),
+        });
         if (options?.failPull) {
           return Effect.fail(
             new GitCommandError({
@@ -322,6 +333,8 @@ it.effect("status hook fast-forwards locally and never prompts for credentials",
     assert.deepStrictEqual(calls[0]?.args, ["merge", "--ff-only", "@{upstream}"]);
     assert.equal(calls[0]?.env?.GIT_TERMINAL_PROMPT, "0");
     assert.equal(calls[0]?.env?.GCM_INTERACTIVE, "never");
+    // A deadline would kill a slow checkout (LFS smudge) and strand a half-updated tree.
+    assert.equal(calls[0]?.timeoutMs, null);
   }),
 );
 
@@ -334,6 +347,7 @@ it.effect("startup pass pulls over the network without credential prompts", () =
     assert.deepStrictEqual(calls[0]?.args, ["pull", "--ff-only"]);
     assert.equal(calls[0]?.env?.SSH_ASKPASS, "");
     assert.equal(calls[0]?.env?.GIT_ASKPASS, "");
+    assert.equal(calls[0]?.timeoutMs, null);
   }),
 );
 
