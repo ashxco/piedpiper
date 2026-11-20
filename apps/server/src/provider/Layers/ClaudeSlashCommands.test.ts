@@ -56,6 +56,21 @@ describe("buildClaudeCommandProbeQueryOptions", () => {
     expect(options.strictMcpConfig).toBe(true);
     expect(options.persistSession).toBe(false);
     expect(options.env?.CLAUDE_CONFIG_DIR).toBe("/accounts/work");
+    expect(options.plugins).toBeUndefined();
+  });
+
+  it("loads --plugin-dir folders as local plugins, so their skills are listed", () => {
+    const options = buildClaudeCommandProbeQueryOptions({
+      binaryPath: "claude",
+      homePath: "",
+      cwd: "/work/app",
+      abortController: new AbortController(),
+      pluginDirectories: ["/plugins/one", "plugins/two"],
+    });
+    expect(options.plugins).toEqual([
+      { type: "local", path: "/plugins/one" },
+      { type: "local", path: "plugins/two" },
+    ]);
   });
 });
 
@@ -232,5 +247,23 @@ describe("makeClaudeSlashCommands", () => {
       { homePath: "/accounts/work" },
     );
     expect(seen).toEqual(["/accounts/work"]);
+  });
+
+  it("passes --plugin-dir launch args to the probe and keys the cache on them", async () => {
+    const seen = await run(
+      Effect.gen(function* () {
+        const dirs = yield* Ref.make<ReadonlyArray<ReadonlyArray<string> | undefined>>([]);
+        const service = yield* makeClaudeSlashCommands({
+          directoryExists: () => true,
+          probe: (input) =>
+            Ref.update(dirs, (list) => [...list, input.pluginDirectories]).pipe(Effect.as([])),
+        });
+        yield* service.list("/work/a");
+        yield* service.list("/work/a");
+        return yield* Ref.get(dirs);
+      }),
+      { launchArgs: "--plugin-dir /plugins/one --model opus --plugin-dir=/plugins/two" },
+    );
+    expect(seen).toEqual([["/plugins/one", "/plugins/two"]]);
   });
 });

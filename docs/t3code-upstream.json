@@ -3,9 +3,9 @@
   "repository": "https://github.com/pingdotgg/t3code",
   "branch": "main",
   "reviewedThrough": {
-    "sha": "068332c603ce5ca40ad5a96a09cffa34ebd05dff",
-    "committedAt": "2026-11-20T18:15:35Z",
-    "reviewedAt": "2026-11-20T19:11:20Z"
+    "sha": "a1b9e1cc8709d50190bf8e1f50e94257ce206525",
+    "committedAt": "2026-11-20T21:43:16Z",
+    "reviewedAt": "2026-11-20T22:34:42Z"
   },
   "reviews": [
     {
@@ -17831,6 +17831,181 @@
         "contracts": "20 files, 169 passed",
         "shared": "24 files, 351 passed",
         "scripts": "4 files, 86 passed",
+        "checks": ["bun fmt", "bun lint (37 warnings, 0 errors)", "bun typecheck"]
+      }
+    },
+    {
+      "fromExclusive": "068332c603ce5ca40ad5a96a09cffa34ebd05dff",
+      "toInclusive": "a1b9e1cc8709d50190bf8e1f50e94257ce206525",
+      "toCommittedAt": "2026-11-20T21:43:16Z",
+      "startedAt": "2026-11-20T22:11:50Z",
+      "status": "completed",
+      "comparison": {
+        "status": "ahead",
+        "commitCount": 24,
+        "uniqueCommitCount": 24,
+        "allPagesFetched": true
+      },
+      "commits": [
+        {
+          "sha": "e668e6141faef533509e1d38d0f984bb38431d3f",
+          "subject": "fix(web): scrolling a PR description no longer moves focus to the condensed header (#39840)",
+          "status": "not_applicable",
+          "reason": "Fix is for upstream's pull request detail panel (scroll-swapped inert header); Pied Piper has no PR detail panel or data-workspace-scroll-swap elements."
+        },
+        {
+          "sha": "f0a2aa10f5165413e863db9f1502dc4bb6fa42e8",
+          "subject": "feat(cli): thread show reports why the latest run failed (#39849)",
+          "status": "not_applicable",
+          "reason": "Upstream CLI `thread show` command; Pied Piper has no apps/server/src/cli."
+        },
+        {
+          "sha": "524c757f827a869e42bf9e59ebb8c8cd4f0233d1",
+          "subject": "fix(web): RTF previews read Mac Roman documents (#39846)",
+          "status": "not_applicable",
+          "reason": "Upstream file preview panel (RTF/extended documents); not in Pied Piper."
+        },
+        {
+          "sha": "6cbda0cd0aa982b7cbf22d9790bd74e68b2d3dbe",
+          "subject": "fix(server): prevent auto-settle while terminal has active subprocess (#39835)",
+          "status": "not_applicable",
+          "reason": "Fixes upstream's orchestration-v2 ThreadSettlementService auto-settle; Pied Piper has no thread auto-settle."
+        },
+        {
+          "sha": "338352dee2f43079482e054e8229a2ba055641d9",
+          "subject": "fix(web): spreadsheet scrollbars are visible in dark mode (#39833)",
+          "status": "not_applicable",
+          "reason": "Upstream office spreadsheet preview; not in Pied Piper."
+        },
+        {
+          "sha": "ad4d0f0659b0b147591724999b0e2f1d59d4b42e",
+          "subject": "fix(antigravity): keep complete transcript steps at the tail boundary (#39855)",
+          "status": "not_applicable",
+          "reason": "Antigravity provider; not in Pied Piper."
+        },
+        {
+          "sha": "0702c6fdcabd70ca6c5a765bc744a24989979540",
+          "subject": "fix(web): Open on GitHub in a thread's PR panel honors 'Open links in' (#39856)",
+          "status": "not_applicable",
+          "reason": "Upstream pull request panel actions; not in Pied Piper."
+        },
+        {
+          "sha": "90c028c6fc4a9ecd3af048cb52432e819af6487c",
+          "subject": "fix(server): a slow disk no longer freezes the service while it writes a log line (#39857)",
+          "status": "not_applicable",
+          "reason": "Upstream serviceLauncher (background service log piping); Pied Piper has no service launcher."
+        },
+        {
+          "sha": "9294a9801e804646dbce0cad78fea1102e6c98ce",
+          "subject": "fix(acp,web): stop showing \"Running Ran\" for commandless ACP tool calls (#39837)",
+          "status": "not_applicable",
+          "reason": "Commandless ACP tool calls; Pied Piper has no ACP providers, and the helpers live in upstream's client-runtime package."
+        },
+        {
+          "sha": "1cb3a8c753047efc4fa00600105f5388de8fd7eb",
+          "subject": "feat: read a linked environment's threads from the client (#39406)",
+          "status": "not_applicable",
+          "reason": "Linked environments / peer links feature; not in Pied Piper."
+        },
+        {
+          "sha": "d7f6b3efcac375160bbe20e28276be853eaf7315",
+          "subject": "feat: connect to a linked environment from its read-only thread (#39439)",
+          "status": "not_applicable",
+          "reason": "Linked environments / peer links feature; not in Pied Piper."
+        },
+        {
+          "sha": "7c6e889ddbc2c8b74a4fd784623175abea4ee310",
+          "subject": "feat: subagents, side chats and linked threads open the same way (#39515)",
+          "status": "not_applicable",
+          "reason": "Subagent, side chat and linked-thread surfaces (right panel store, linked threads); not in Pied Piper."
+        },
+        {
+          "sha": "271357040676ea578f134493169df4b27ee080f6",
+          "subject": "fix(desktop): update checks say why a build with a different saved track offers nothing (#38506)",
+          "status": "not_applicable",
+          "reason": "Upstream desktop update tracks and client-runtime update state; Pied Piper's updater has no saved tracks."
+        },
+        {
+          "sha": "392526768806ab7b36854ad9a401955c4bec6a85",
+          "subject": "fix(desktop): a phone can watch an agent's hidden browser tab while Windows is locked (#39198)",
+          "status": "not_applicable",
+          "reason": "Desktop agent browser preview Manager; not in Pied Piper."
+        },
+        {
+          "sha": "6f5293fbdca476cddbc37466450983ba1dd2ada2",
+          "subject": "fix(server): text generation no longer runs a disabled provider (#39870)",
+          "status": "adopted",
+          "reason": "Ported to RoutingTextGeneration: a provider turned off in Settings never runs; text generation falls back to the other runnable provider, otherwise fails with a TextGenerationError asking to turn on Claude or Codex. Approved by the user on 2026-11-20 (\"Apply both\").",
+          "localFiles": [
+            "apps/server/src/git/Layers/RoutingTextGeneration.ts",
+            "apps/server/src/git/Layers/RoutingTextGeneration.test.ts"
+          ]
+        },
+        {
+          "sha": "ccabed086ad47294173769c77d2d44e55bb8bd0d",
+          "subject": "feat(web): the environments page is a map of your machines (#39445)",
+          "status": "not_applicable",
+          "reason": "Environments map settings page for remote/linked environments; not in Pied Piper."
+        },
+        {
+          "sha": "6d6ca6090794510dff93a203fc60d17e8b85a2a2",
+          "subject": "fix(acp): /compact right after session/load waits for the agent's command list (#39891)",
+          "status": "not_applicable",
+          "reason": "ACP adapter /compact after session/load; not in Pied Piper."
+        },
+        {
+          "sha": "d20e6c294c527273ac046f56ac96d87f65456e45",
+          "subject": "fix(speech): project name hints no longer recase ordinary words (#39884)",
+          "status": "not_applicable",
+          "reason": "Speech input custom words; Pied Piper has no speech input."
+        },
+        {
+          "sha": "c53ac237a0af3d48229a509945edb0168fc92df1",
+          "subject": "fix(pi): async subagents leave Running when their run settles first (#39888)",
+          "status": "not_applicable",
+          "reason": "Pi provider; not in Pied Piper."
+        },
+        {
+          "sha": "a1acd7aa12b3ee501b11fc0b359cd93f77639dca",
+          "subject": "fix(mobile): disabled T3 Connect server menu no longer opens during deregistration (#39894)",
+          "status": "not_applicable",
+          "reason": "Mobile app T3 Connect; not in Pied Piper."
+        },
+        {
+          "sha": "46b626263fcfaa13d09448272dd749c82c95023a",
+          "subject": "fix(server): token analytics record new Antigravity models (#39897)",
+          "status": "not_applicable",
+          "reason": "Antigravity token analytics; not in Pied Piper."
+        },
+        {
+          "sha": "f68d36d8aa9ca83eff811f285c4d20fc31e1a3bd",
+          "subject": "fix(antigravity): a mid-turn 404 shows its error and is retryable (#39869)",
+          "status": "not_applicable",
+          "reason": "Antigravity/ACP turn outcome; not in Pied Piper."
+        },
+        {
+          "sha": "21d7feaff7edb445855c91e0d4526b9cce63d83a",
+          "subject": "fix(web): theme hex field keeps your text while you delete it (#29550)",
+          "status": "not_applicable",
+          "reason": "Theme editor color picker; Pied Piper has no theme editor."
+        },
+        {
+          "sha": "a1b9e1cc8709d50190bf8e1f50e94257ce206525",
+          "subject": "fix(server): skills from Claude --plugin-dir launch args show in the composer (#39896)",
+          "status": "adopted",
+          "reason": "Ported to the composer command probe: --plugin-dir launch-arg folders are loaded as local SDK plugins (as sessions load them) and are part of the probe cache key, so their skills show in the composer menu. Approved by the user on 2026-11-20 (\"Apply both\").",
+          "localFiles": [
+            "apps/server/src/provider/Layers/ClaudeSlashCommands.ts",
+            "apps/server/src/provider/Layers/ClaudeSlashCommands.test.ts"
+          ]
+        }
+      ],
+      "completedAt": "2026-11-20T22:34:42Z",
+      "note": "24 commits triaged on 2026-11-20: 22 not applicable (upstream-only features and providers), 2 shortlisted fixes approved and adopted as local ports.",
+      "verification": {
+        "status": "passed",
+        "verifiedAt": "2026-11-20T22:34:42Z",
+        "server": "195 files, 3991 passed, 6 skipped",
         "checks": ["bun fmt", "bun lint (37 warnings, 0 errors)", "bun typecheck"]
       }
     }

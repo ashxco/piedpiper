@@ -145,6 +145,29 @@ describe("resolveRunnableTextGenerationSelection", () => {
     });
   });
 
+  it("uses the other provider when the selected one is turned off", () => {
+    expect(
+      resolveRunnableTextGenerationSelection(claudeSelection, [
+        snapshot("codex"),
+        snapshot("claudeAgent", { enabled: false, status: "disabled" }),
+      ]),
+    ).toEqual({ provider: "codex", model: "gpt-6-luna" });
+  });
+
+  it("has no selection when the selected provider is turned off and the other cannot run", () => {
+    for (const other of [
+      snapshot("codex", { enabled: false, status: "disabled" }),
+      snapshot("codex", { installed: false }),
+    ]) {
+      expect(
+        resolveRunnableTextGenerationSelection(claudeSelection, [
+          other,
+          snapshot("claudeAgent", { enabled: false, status: "disabled" }),
+        ]),
+      ).toBeUndefined();
+    }
+  });
+
   it("keeps the selection when the other provider cannot run", () => {
     const failedCodex = snapshot("codex", { status: "error", installed: false });
     for (const other of [
@@ -226,5 +249,35 @@ describe("makeRoutingTextGenerationFrom", () => {
 
     expect(result.branch).toBe("claude");
     expect(calls).toEqual([["claude", { provider: "claudeAgent", model: "claude-haiku-5-5" }]]);
+  });
+
+  it("fails instead of running a turned-off provider", async () => {
+    const calls: Array<[string, ModelSelection]> = [];
+    const routing = makeRoutingTextGenerationFrom({
+      codex: recordingTextGeneration("codex", calls),
+      claude: recordingTextGeneration("claude", calls),
+      providerRegistry: Option.some(
+        registryWith([
+          snapshot("codex", { enabled: false, status: "disabled" }),
+          snapshot("claudeAgent", { enabled: false, status: "disabled" }),
+        ]),
+      ),
+    });
+
+    const error = await Effect.runPromise(
+      Effect.flip(
+        routing.generateCommitMessage({
+          cwd: "/repo",
+          branch: null,
+          stagedSummary: "",
+          stagedPatch: "",
+          modelSelection: claudeSelection,
+        }),
+      ),
+    );
+
+    expect(error._tag).toBe("TextGenerationError");
+    expect(error.operation).toBe("generateCommitMessage");
+    expect(calls).toEqual([]);
   });
 });

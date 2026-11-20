@@ -22,6 +22,7 @@ import {
   ClaudeSlashCommands,
   type ClaudeSlashCommandsShape,
 } from "../Services/ClaudeSlashCommands";
+import { claudeLaunchExtraArgs } from "./ClaudeAdapterHelpers";
 import { buildClaudeCapabilitiesProbeQueryOptions } from "./ClaudeProvider";
 
 const COMMAND_PROBE_TIMEOUT_MS = 15_000;
@@ -30,7 +31,11 @@ const COMMAND_CACHE_CAPACITY = 32;
 const COMMAND_LIST_TTL = Duration.minutes(2);
 const COMMAND_PROBE_RETRY_COOLDOWN = Duration.seconds(30);
 
-/** SDK options for the per-workspace probe: real setting sources, but no hooks and no MCP servers. */
+/**
+ * SDK options for the per-workspace probe: real setting sources, but no hooks and no MCP servers.
+ * Plugin folders from `--plugin-dir` launch args are loaded as sessions load them, so their skills
+ * show in the menu.
+ */
 export function buildClaudeCommandProbeQueryOptions(input: {
   readonly binaryPath: string;
   readonly homePath: string;
@@ -38,12 +43,17 @@ export function buildClaudeCommandProbeQueryOptions(input: {
   readonly abortController: AbortController;
   readonly environment?: NodeJS.ProcessEnv;
   readonly managedMcpConfig?: boolean;
+  readonly pluginDirectories?: ReadonlyArray<string>;
 }): ClaudeQueryOptions {
+  const { pluginDirectories, ...probeInput } = input;
   return {
-    ...buildClaudeCapabilitiesProbeQueryOptions(input),
+    ...buildClaudeCapabilitiesProbeQueryOptions(probeInput),
     settingSources: ["user", "project", "local"],
     // SessionStart hooks would otherwise run every time the menu opens.
     settings: { disableAllHooks: true },
+    ...(pluginDirectories && pluginDirectories.length > 0
+      ? { plugins: pluginDirectories.map((path) => ({ type: "local" as const, path })) }
+      : {}),
   };
 }
 
@@ -89,7 +99,12 @@ export type ClaudeCommandProbeCreateQuery = (input: {
 
 /** Spawns Claude in the workspace; undefined when it fails, times out or sends no skills list. */
 export const probeClaudeSlashCommands = (
-  input: { readonly binaryPath: string; readonly homePath: string; readonly cwd: string },
+  input: {
+    readonly binaryPath: string;
+    readonly homePath: string;
+    readonly cwd: string;
+    readonly pluginDirectories?: ReadonlyArray<string>;
+  },
   createQuery: ClaudeCommandProbeCreateQuery = claudeQuery,
 ): Effect.Effect<ReadonlyArray<ClaudeSlashCommand> | undefined> => {
   const abort = new AbortController();
@@ -153,8 +168,13 @@ export const makeClaudeSlashCommands = Effect.fn("makeClaudeSlashCommands")(func
   const cache = yield* Cache.makeWith({
     capacity: COMMAND_CACHE_CAPACITY,
     lookup: (key: string) => {
-      const [binaryPath, homePath, cwd] = JSON.parse(key) as [string, string, string];
-      return probe({ binaryPath, homePath, cwd }).pipe(
+      const [binaryPath, homePath, cwd, pluginDirectories] = JSON.parse(key) as [
+        string,
+        string,
+        string,
+        ReadonlyArray<string>,
+      ];
+      return probe({ binaryPath, homePath, cwd, pluginDirectories }).pipe(
         Effect.map((reported): ClaudeSlashCommandList => {
           if (!reported) {
             return { commands: lastGoodCommands.get(key) ?? FALLBACK_COMMANDS, pending: true };
@@ -177,7 +197,12 @@ export const makeClaudeSlashCommands = Effect.fn("makeClaudeSlashCommands")(func
       if (!claude.enabled) return { commands: [], pending: false };
       // A deleted worktree can never answer, so it must not read as still pending.
       if (!directoryExists(cwd)) return { commands: FALLBACK_COMMANDS, pending: false };
-      return yield* Cache.get(cache, JSON.stringify([claude.binaryPath, claude.homePath, cwd]));
+      // Keyed on the plugin folders too, so editing --plugin-dir refreshes the menu.
+      const pluginDirectories = claudeLaunchExtraArgs(claude.launchArgs).pluginDirectories ?? [];
+      return yield* Cache.get(
+        cache,
+        JSON.stringify([claude.binaryPath, claude.homePath, cwd, pluginDirectories]),
+      );
     },
   );
 
