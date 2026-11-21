@@ -4387,6 +4387,59 @@ it.layer(TestLayer)("git integration", (it) => {
       }),
     );
 
+    it.effect("waits for a slow upstream fetch when asked, instead of reading old refs", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        const remote = yield* makeTmpDir();
+        const updater = yield* makeTmpDir();
+        const { initialBranch } = yield* initRepoWithCommit(cwd);
+        yield* git(remote, ["init", "--bare"]);
+        yield* git(cwd, ["remote", "add", "origin", remote]);
+        yield* git(cwd, ["push", "-u", "origin", initialBranch]);
+        yield* git(updater, ["clone", remote, "."]);
+        yield* git(updater, ["config", "user.email", "test@test.com"]);
+        yield* git(updater, ["config", "user.name", "Test"]);
+        yield* writeTextFile(path.join(updater, "remote.txt"), "remote\n");
+        yield* git(updater, ["add", "remote.txt"]);
+        yield* git(updater, ["commit", "-m", "remote commit"]);
+        yield* git(updater, ["push", "origin", initialBranch]);
+
+        const delegate = yield* ChildProcessSpawner.ChildProcessSpawner;
+        const fetchHeld = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        let held = false;
+        const heldFetchSpawner = ChildProcessSpawner.make((command) =>
+          Effect.gen(function* () {
+            if (
+              !held &&
+              ChildProcess.isStandardCommand(command) &&
+              command.args.includes("fetch")
+            ) {
+              held = true;
+              yield* Deferred.succeed(fetchHeld, undefined);
+              yield* Deferred.await(release);
+            }
+            return yield* delegate.spawn(command);
+          }),
+        );
+        const core = yield* makeGitCore().pipe(
+          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, heldFetchSpawner),
+          Effect.provide(ServerConfigLayer),
+        );
+
+        const reading = yield* core
+          .statusDetails(cwd, { awaitUpstreamFetch: true })
+          .pipe(Effect.forkChild({ startImmediately: true }));
+        yield* Deferred.await(fetchHeld);
+        // Past the short wait a passive read gives up after.
+        yield* TestClock.adjust("6 seconds");
+        yield* Deferred.succeed(release, undefined);
+        const details = yield* Fiber.join(reading);
+
+        expect(details.behindCount).toBe(1);
+      }),
+    );
+
     it.effect("does not start git auto-gc from background upstream status fetches", () =>
       Effect.gen(function* () {
         const cwd = yield* makeTmpDir();

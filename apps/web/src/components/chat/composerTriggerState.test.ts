@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import { type ComposerTrigger, detectComposerTrigger } from "../../composer-logic";
 import {
   applyComposerTriggerDismissal,
+  followComposerTriggerCaret,
+  isSameComposerTriggerToken,
   keepEquivalentComposerTrigger,
   resolveDismissedComposerTrigger,
 } from "./composerTriggerState";
@@ -129,5 +131,59 @@ describe("composer trigger dismissal", () => {
     const { triggers, dismissed } = replay(slash, states);
     expect(triggers.every((trigger) => trigger === null)).toBe(true);
     expect(dismissed).toBe(slash);
+  });
+});
+
+describe("followComposerTriggerCaret", () => {
+  const slash = (overrides: Partial<ComposerTrigger> = {}) =>
+    trigger({ kind: "slash-command", query: "mod", rangeStart: 0, rangeEnd: 4, ...overrides });
+
+  it("never opens a menu when the caret moves onto a token", () => {
+    expect(followComposerTriggerCaret(null, null, slash())).toEqual({
+      trigger: null,
+      dismissed: null,
+    });
+    expect(
+      followComposerTriggerCaret(trigger({ rangeStart: 10 }), null, trigger({ rangeStart: 0 })),
+    ).toEqual({ trigger: null, dismissed: null });
+  });
+
+  it("keeps the open menu while the caret stays in its token", () => {
+    const moved = slash({ query: "mo", rangeEnd: 3 });
+    expect(followComposerTriggerCaret(slash(), null, moved).trigger).toBe(moved);
+    // `/mo` → `/model` switches slash kinds within the same token.
+    expect(
+      followComposerTriggerCaret(slash(), null, slash({ kind: "slash-model" })).trigger,
+    ).not.toBeNull();
+  });
+
+  it("closes the menu when the caret leaves the token", () => {
+    expect(followComposerTriggerCaret(slash(), null, null).trigger).toBeNull();
+  });
+
+  it("keeps an Escape dismissal only while the caret stays in that token", () => {
+    const dismissed = slash();
+    expect(followComposerTriggerCaret(null, dismissed, slash({ query: "m" })).dismissed).toBe(
+      dismissed,
+    );
+    expect(followComposerTriggerCaret(null, dismissed, null).dismissed).toBeNull();
+  });
+
+  it("caret moves after typing a trigger keep the menu, but returning to an old one does not", () => {
+    const text = "/mod ab";
+    const atToken = detectComposerTrigger(text, 4);
+    const afterSpace = detectComposerTrigger(text, text.length);
+    expect(afterSpace).toBeNull();
+    // The menu closed when the user typed past the token; arrowing back must not reopen it.
+    expect(followComposerTriggerCaret(afterSpace, null, atToken).trigger).toBeNull();
+  });
+});
+
+describe("isSameComposerTriggerToken", () => {
+  it("matches on family and start, not query", () => {
+    expect(isSameComposerTriggerToken(trigger(), trigger({ query: "s", rangeEnd: 2 }))).toBe(true);
+    expect(isSameComposerTriggerToken(trigger(), trigger({ rangeStart: 1 }))).toBe(false);
+    expect(isSameComposerTriggerToken(trigger(), trigger({ kind: "slash-command" }))).toBe(false);
+    expect(isSameComposerTriggerToken(null, trigger())).toBe(false);
   });
 });

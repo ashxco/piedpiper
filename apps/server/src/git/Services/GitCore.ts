@@ -161,6 +161,12 @@ export interface GitStatusDetailsOptions {
   readonly failWhenIndexLocked?: boolean | undefined;
   /** Read local refs without contacting the remote (passive polls). */
   readonly skipUpstreamRefresh?: boolean | undefined;
+  /**
+   * Wait for a running upstream fetch instead of reading the last fetched refs after a short wait.
+   * For one-time readers, such as the startup automatic pull, that have no later poll to see a slow
+   * fetch land. The fetch keeps its own time limit.
+   */
+  readonly awaitUpstreamFetch?: boolean | undefined;
 }
 
 export interface GitCoreShape {

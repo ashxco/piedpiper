@@ -3,9 +3,9 @@
   "repository": "https://github.com/pingdotgg/t3code",
   "branch": "main",
   "reviewedThrough": {
-    "sha": "a1b9e1cc8709d50190bf8e1f50e94257ce206525",
-    "committedAt": "2026-11-20T21:43:16Z",
-    "reviewedAt": "2026-11-20T22:34:42Z"
+    "sha": "634ee43deb6d5fc0feae77153d33df1e97ffb303",
+    "committedAt": "2026-11-21T00:42:37Z",
+    "reviewedAt": "2026-11-21T01:30:18Z"
   },
   "reviews": [
     {
@@ -18007,6 +18007,230 @@
         "verifiedAt": "2026-11-20T22:34:42Z",
         "server": "195 files, 3991 passed, 6 skipped",
         "checks": ["bun fmt", "bun lint (37 warnings, 0 errors)", "bun typecheck"]
+      }
+    },
+    {
+      "fromExclusive": "a1b9e1cc8709d50190bf8e1f50e94257ce206525",
+      "toInclusive": "634ee43deb6d5fc0feae77153d33df1e97ffb303",
+      "toCommittedAt": "2026-11-21T00:42:37Z",
+      "startedAt": "2026-11-21T01:00:00Z",
+      "status": "completed",
+      "comparison": {
+        "status": "ahead",
+        "commitCount": 30,
+        "uniqueCommitCount": 30,
+        "allPagesFetched": true
+      },
+      "commits": [
+        {
+          "sha": "8d37736cddce74e7cc7ff965b26b1d3ea1fbcd7d",
+          "subject": "fix(web,mobile): usage-limit recovery banner updates copy after reset passes (#39889)",
+          "status": "not_applicable",
+          "reason": "Usage-limit recovery banner (UsageLimitRecoveryBanner, limitRecovery runs); Pied Piper has no usage-limit recovery banner."
+        },
+        {
+          "sha": "f2ec853fbbb6ed84f6c08aa156d3b7d9e9f7385f",
+          "subject": "fix(server): the startup automatic pull waits for a slow fetch (#39915)",
+          "status": "adopted",
+          "reason": "Ported: GitStatusDetailsOptions.awaitUpstreamFetch makes refreshStatusUpstreamIfStale wait for the running status fetch (which keeps its own 5 min limit) instead of reading old refs after the 2 s wait; autoPullWorkspaceRoots (the startup pass) uses it, so a slow fetch no longer makes a behind checkout look up to date. Approved by the user on 2026-11-20 (\"Apply both\").",
+          "localFiles": [
+            "apps/server/src/git/Services/GitCore.ts",
+            "apps/server/src/git/Layers/GitCore.ts",
+            "apps/server/src/git/Layers/GitCore.test.ts",
+            "apps/server/src/defaultBranchAutoPull.ts",
+            "apps/server/src/defaultBranchAutoPull.test.ts"
+          ]
+        },
+        {
+          "sha": "b985057d3f0ae8d368d73f98585aeb639daffbed",
+          "subject": "chore(server): PR tool descriptions stop steering away from gh and cafe (#39947)",
+          "status": "not_applicable",
+          "reason": "Upstream's pull request MCP toolkit / PullRequestService; Pied Piper has no apps/server/src/mcp or pullRequest services."
+        },
+        {
+          "sha": "13e940a4e30c18d40feddf7034e5087232e38590",
+          "subject": "fix(cli): keep managed T3 Connect tunnels across service updates and restarts (#39819)",
+          "status": "not_applicable",
+          "reason": "T3 Connect cloud boot service; not in Pied Piper."
+        },
+        {
+          "sha": "5e59fc677fbb52b75488659745c174c4a14a4b63",
+          "subject": "fix(server): pull_request_merge accepts an abbreviated head SHA (#39906)",
+          "status": "not_applicable",
+          "reason": "Upstream's pull request MCP toolkit / PullRequestService; Pied Piper has no apps/server/src/mcp or pullRequest services."
+        },
+        {
+          "sha": "b076d8c8bf62e9780be6ab0b0c2b671ab697b37f",
+          "subject": "fix(server): watch_pull_request on a merged PR reports it instead of failing (#39899)",
+          "status": "not_applicable",
+          "reason": "Upstream's pull request MCP toolkit / PullRequestService; Pied Piper has no apps/server/src/mcp or pullRequest services."
+        },
+        {
+          "sha": "6788be775bb9ada8f6be49768269638619d600ac",
+          "subject": "fix(evals): GPT evals stop at startup when OpenAI auth is required but no key is found (#39384)",
+          "status": "not_applicable",
+          "reason": "Upstream evals; not in Pied Piper."
+        },
+        {
+          "sha": "0fa2b92f8d2fc729556fea15c2919b91d50c2f10",
+          "subject": "fix(evals): T3CODE_EVAL_MODEL_PROVIDER picks the GPT evals' proxy provider (#39505)",
+          "status": "not_applicable",
+          "reason": "Upstream evals; not in Pied Piper."
+        },
+        {
+          "sha": "921a54c2fd7004166deb4410244b7a3d63a8a895",
+          "subject": "fix(server): t3 connect status reports a link made in the app as on (#39471)",
+          "status": "not_applicable",
+          "reason": "Upstream CLI t3 connect; not in Pied Piper."
+        },
+        {
+          "sha": "d984b71385910bd575d4ed10ae6c0d1caf48f008",
+          "subject": "fix(server): PR guides work for pull requests on a fork's own repository (#39601)",
+          "status": "not_applicable",
+          "reason": "Upstream's pull request MCP toolkit / PullRequestService; Pied Piper has no apps/server/src/mcp or pullRequest services. (PR review guides)"
+        },
+        {
+          "sha": "29af131f06d4c03959ec08c4abb14d798864bbad",
+          "subject": "perf(cursor): run Cursor SDK agents and text generation out of process (#39526)",
+          "status": "not_applicable",
+          "reason": "Cursor provider package; not in Pied Piper."
+        },
+        {
+          "sha": "22dcb0af5a836ec10a38674e219c123ba67a49de",
+          "subject": "feat: launch videos staged from the real app (#39978)",
+          "status": "not_applicable",
+          "reason": "Upstream launch-video agent skill; not in Pied Piper."
+        },
+        {
+          "sha": "8a0f19092e8c3582385acaa3f477f47f8b25e5ee",
+          "subject": "chore(gitcafe): pull request listing records how many pages it read (#39867)",
+          "status": "not_applicable",
+          "reason": "GitCafe source control package; not in Pied Piper."
+        },
+        {
+          "sha": "2770bf3c61c4d6b7bb1f5d3df74aacf54ac7a159",
+          "subject": "feat(server): a thread turn can return a typed result (#38874)",
+          "status": "not_applicable",
+          "reason": "Typed turn results for upstream's orchestrator MCP thread/project toolkits and CLI (OrchestratorMcpService, ThreadLaunchService); Pied Piper has no orchestrator MCP toolkits or CLI, so nothing would call it."
+        },
+        {
+          "sha": "6908754f0bf9cd64cdb8df8d5d059b63b77b691e",
+          "subject": "fix(web): caret navigation no longer opens composer suggestions (#37122)",
+          "status": "adopted",
+          "reason": "Ported: ComposerPromptEditor's onChange reports textChanged; ChatView routes caret-only moves through the new followCaret, which keeps or closes the open suggestion menu but never opens one, and resolveTrigger only returns the trigger whose menu is open, so Enter/Tab cannot pick an item from a menu that is not showing. Approved by the user on 2026-11-20 (\"Apply both\").",
+          "localFiles": [
+            "apps/web/src/components/chat/composerTriggerState.ts",
+            "apps/web/src/components/chat/composerTriggerState.test.ts",
+            "apps/web/src/components/ComposerPromptEditor.tsx",
+            "apps/web/src/components/ComposerPromptEditor.browser.tsx",
+            "apps/web/src/components/chat/ChatComposer.tsx",
+            "apps/web/src/components/ChatView.tsx"
+          ]
+        },
+        {
+          "sha": "d406823a833395a6a964d2eeacd66426039d6593",
+          "subject": "perf(github): skip decoding oversized GraphQL responses (#39928)",
+          "status": "not_applicable",
+          "reason": "Upstream source-control-github GraphQL client; Pied Piper has no such package."
+        },
+        {
+          "sha": "a8f5237a3c85a04b43cf12fe5d43644f41ae5eaf",
+          "subject": "fix(web): repository and loading-header PR links honor 'Open links in' (#39926)",
+          "status": "not_applicable",
+          "reason": "Upstream pull request detail panel links; not in Pied Piper."
+        },
+        {
+          "sha": "18d1c4db96696dea89f83a209ff5675a773ad5ea",
+          "subject": "fix(web): usage limit refill stripes all render the same width (#30407)",
+          "status": "not_applicable",
+          "reason": "UsageLimitsPooled refill stripes; Pied Piper has no usage limits view."
+        },
+        {
+          "sha": "d2329add05ff061a709ac2948b5ff5596fe28f41",
+          "subject": "fix(relay): sample Workers Logs at 1% (#40004)",
+          "status": "not_applicable",
+          "reason": "Upstream relay infra worker; not in Pied Piper."
+        },
+        {
+          "sha": "d2bb611134ad37a87cdd37fc05f4c00c7136a9b5",
+          "subject": "fix(dev): dev servers no longer open a console window on Windows (#38194)",
+          "status": "already_present",
+          "reason": "Local dev-runner spawns turbo and its children with detached: false (same process group), so no detached shell opens a console window on Windows."
+        },
+        {
+          "sha": "e19193db45054e06df5e799bf4d6b4fd9ec53e90",
+          "subject": "feat(server): pull_request_read returns a compact summary by default (#39901)",
+          "status": "not_applicable",
+          "reason": "Upstream's pull request MCP toolkit / PullRequestService; Pied Piper has no apps/server/src/mcp or pullRequest services."
+        },
+        {
+          "sha": "3d54dc96f9684f4bc34a9c7f69599f2fd202a095",
+          "subject": "fix(web): focus popup search from anywhere in its row (#33110)",
+          "status": "not_applicable",
+          "reason": "Changes ComboboxSearchInput/MenuSearchInput wrappers; Pied Piper's combobox.tsx and menu.tsx have no search-input row components."
+        },
+        {
+          "sha": "a23085273f68b2167dc3bce0e0e406852726b45a",
+          "subject": "fix(web): adding the last snooze option no longer reorders rows mid-edit (#33279)",
+          "status": "not_applicable",
+          "reason": "Snooze presets settings panel; Pied Piper has no snooze preset settings."
+        },
+        {
+          "sha": "3027c2c8400438193cbf9903236e2f3fe644eaa6",
+          "subject": "fix(voice): start dictation capture sooner on iOS and desktop (#40011)",
+          "status": "not_applicable",
+          "reason": "Voice dictation; Pied Piper has no speech input."
+        },
+        {
+          "sha": "a04bca5bcf369b9d25a41b6fa1d00d38734a3047",
+          "subject": "fix(gitcafe): a timed-out cafe credential check says it timed out (#39533)",
+          "status": "not_applicable",
+          "reason": "GitCafe credentials; not in Pied Piper."
+        },
+        {
+          "sha": "3e837d0bdbd06619cdac3f525d2f04d20ddb6a62",
+          "subject": "fix(server): pull_request_create pushes an unpushed branch (#39903)",
+          "status": "not_applicable",
+          "reason": "GitManager.createPullRequest for the pull_request_create MCP tool; Pied Piper has no such entry point (its PR flow runs through stacked actions, which push first)."
+        },
+        {
+          "sha": "669d8941e270e6a26f5d51de6b6e8c7f48e88f70",
+          "subject": "feat: sign in to an agent's MCP server from its warning (#39921)",
+          "status": "deferred",
+          "reason": "Feature: MCP server sign-in from an agent's auth warning. Built on upstream's V2 Claude/Codex adapters, McpSignIn RPC and client-runtime thread commands; Pied Piper surfaces no MCP auth warnings today, so this would need its own design.",
+          "shortlist": {
+            "priority": "low",
+            "effort": "large"
+          }
+        },
+        {
+          "sha": "4b0dd9eb1c078db9945ed57d49a274816f9831f5",
+          "subject": "fix(acp): terminal tool fallback works from Windows PowerShell (#39949)",
+          "status": "not_applicable",
+          "reason": "ACP terminal tool fallback; not in Pied Piper."
+        },
+        {
+          "sha": "07fe456146f20b5667c1d506f226b2951970f49e",
+          "subject": "feat(web): copy button for file previews (#34769)",
+          "status": "not_applicable",
+          "reason": "File preview panel copy button; Pied Piper has no file preview panel."
+        },
+        {
+          "sha": "634ee43deb6d5fc0feae77153d33df1e97ffb303",
+          "subject": "test(evals): measure T3's PR tools against raw forge CLIs (#39922)",
+          "status": "not_applicable",
+          "reason": "Upstream evals; not in Pied Piper."
+        }
+      ],
+      "completedAt": "2026-11-21T01:30:18Z",
+      "note": "30 commits triaged on 2026-11-20: 26 not applicable, 1 already present, 1 deferred feature (669d8941e2), 2 shortlisted fixes approved and adopted as local ports.",
+      "verification": {
+        "status": "passed",
+        "verifiedAt": "2026-11-21T01:30:18Z",
+        "server": "195 files, 3993 passed, 6 skipped",
+        "web": "257 files, 4511 passed; browser suite 108 files, 1192 passed",
+        "checks": ["bun fmt", "bun lint (37 warnings, 0 errors)", "bun typecheck"],
+        "note": "A first full server run had one failure in server.test.ts (CORS preflight returned 404), unrelated to these changes; the file passed 3/3 alone and the full suite passed on re-run."
       }
     }
   ],

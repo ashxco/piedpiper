@@ -12,7 +12,12 @@ import {
   fastForwardCleanDefaultBranch,
   makeDefaultBranchAutoPull,
 } from "./defaultBranchAutoPull.ts";
-import { GitCore, type GitCoreShape, type GitStatusDetails } from "./git/Services/GitCore.ts";
+import {
+  GitCore,
+  type GitCoreShape,
+  type GitStatusDetails,
+  type GitStatusDetailsOptions,
+} from "./git/Services/GitCore.ts";
 import { ServerConfig } from "./config.ts";
 import { GitCoreLive } from "./git/Layers/GitCore.ts";
 import { ProjectionSnapshotQuery } from "./orchestration/Services/ProjectionSnapshotQuery.ts";
@@ -140,6 +145,25 @@ it.effect("startup pass pulls only clean, behind default-branch checkouts", () =
       "/feature",
     ]).pipe(Effect.provideService(GitCore, makeGit(pulled)));
     assert.deepStrictEqual(pulled, ["/clean"]);
+  }),
+);
+
+it.effect("startup pass waits for a slow upstream fetch before reading status", () =>
+  Effect.gen(function* () {
+    const pulled: string[] = [];
+    const statusOptions: Array<GitStatusDetailsOptions | undefined> = [];
+    const git = makeGit(pulled);
+    yield* autoPullWorkspaceRoots(["/clean"]).pipe(
+      Effect.provideService(GitCore, {
+        ...git,
+        statusDetails: (cwd: string, options?: GitStatusDetailsOptions) => {
+          statusOptions.push(options);
+          return git.statusDetails(cwd);
+        },
+      } as unknown as GitCoreShape),
+    );
+    assert.deepStrictEqual(pulled, ["/clean"]);
+    assert.deepStrictEqual(statusOptions, [{ awaitUpstreamFetch: true }]);
   }),
 );
 

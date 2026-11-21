@@ -738,6 +738,8 @@ interface ComposerPromptEditorProps {
     expandedCursor: number,
     cursorAdjacentToMention: boolean,
     terminalContextIds: string[],
+    /** False when only the caret or selection moved. */
+    textChanged: boolean,
   ) => void;
   // Method syntax: handlers typed for a subset of keys stay assignable.
   onCommandKeyDown?(key: ComposerCommandKey, event: KeyboardEvent): boolean;
@@ -1436,6 +1438,7 @@ function ComposerPromptEditorInner({
         snapshotRef.current.expandedCursor,
         false,
         snapshotRef.current.terminalContextIds,
+        false,
       );
     },
     [editor],
@@ -1579,6 +1582,7 @@ function ComposerPromptEditorInner({
         nextExpandedCursor,
         cursorAdjacentToMention,
         terminalContextIds,
+        previousSnapshot.value !== nextValue,
       );
     });
   }, []);

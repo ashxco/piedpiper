@@ -507,3 +507,50 @@ describe("ComposerPromptEditor chip selection highlight", () => {
     expect(selectedChips(root)).toHaveLength(0);
   });
 });
+
+function ChangeRecordingHarness(props: {
+  onChange: (value: string, textChanged: boolean) => void;
+}) {
+  const [value, setValue] = useState("");
+  const [cursor] = useState(0);
+  return (
+    <ComposerPromptEditor
+      value={value}
+      cursor={cursor}
+      terminalContexts={[]}
+      disabled={false}
+      placeholder="Ask anything"
+      onRemoveTerminalContext={vi.fn()}
+      onChange={(next, _cursor, _expanded, _adjacent, _contexts, textChanged) => {
+        setValue(next);
+        props.onChange(next, textChanged);
+      }}
+      onPaste={vi.fn()}
+    />
+  );
+}
+
+describe("ComposerPromptEditor change notifications", () => {
+  afterEach(() => {
+    document.body.innerHTML = "";
+  });
+
+  it("tells text edits apart from caret moves", async () => {
+    const changes: Array<[string, boolean]> = [];
+    await render(
+      <ChangeRecordingHarness
+        onChange={(value, textChanged) => changes.push([value, textChanged])}
+      />,
+    );
+    const root = document.querySelector<HTMLElement>('[data-testid="composer-editor"]');
+    if (!root) throw new Error("composer editor did not mount");
+    root.focus();
+    await userEvent.keyboard("/mod ab");
+    await settle();
+    expect(changes.at(-1)).toEqual(["/mod ab", true]);
+
+    await userEvent.keyboard("{ArrowLeft}");
+    await settle();
+    expect(changes.at(-1)).toEqual(["/mod ab", false]);
+  });
+});

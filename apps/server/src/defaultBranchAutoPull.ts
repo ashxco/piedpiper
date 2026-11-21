@@ -61,6 +61,8 @@ export interface AutoPullOptions {
    * (for callers whose status read just refreshed it).
    */
   readonly mode?: "network" | "local";
+  /** Wait for a slow upstream fetch before reading status; for one-time passes with no later poll. */
+  readonly awaitUpstreamFetch?: boolean;
 }
 
 /**
@@ -75,7 +77,12 @@ export const fastForwardCleanDefaultBranch = Effect.fn("fastForwardCleanDefaultB
   const knownStatus = options?.knownStatus;
   const mode = options?.mode ?? "network";
   return yield* Effect.gen(function* () {
-    const status = knownStatus ?? (yield* gitCore.statusDetails(cwd));
+    const status =
+      knownStatus ??
+      (yield* gitCore.statusDetails(
+        cwd,
+        options?.awaitUpstreamFetch ? { awaitUpstreamFetch: true } : undefined,
+      ));
     const skipReason = autoPullSkipReason(status);
     if (skipReason !== null) {
       yield* Effect.logDebug("skipped automatic default branch pull", { cwd, reason: skipReason });
@@ -132,23 +139,18 @@ export const fastForwardCleanDefaultBranch = Effect.fn("fastForwardCleanDefaultB
   );
 });
 
-/** Fast-forwards a clean, behind default-branch checkout. Returns true when HEAD moved. Never fails. */
-const pullCleanDefaultBranch = Effect.fn("pullCleanDefaultBranch")(function* (
-  cwd: string,
-  knownStatus?: AutoPullStatus,
-) {
-  const outcome = yield* fastForwardCleanDefaultBranch(cwd, knownStatus ? { knownStatus } : {});
-  return outcome === "pulled";
-});
-
-/** Pulls each distinct workspace root with bounded concurrency; failures are only logged. */
+/**
+ * Pulls each distinct workspace root with bounded concurrency; failures are only logged. This pass
+ * checks once, so each status read waits for a slow fetch rather than reading the old refs.
+ */
 export const autoPullWorkspaceRoots = Effect.fn("autoPullWorkspaceRoots")(function* (
   workspaceRoots: ReadonlyArray<string>,
 ) {
-  yield* Effect.forEach([...new Set(workspaceRoots)], (cwd) => pullCleanDefaultBranch(cwd), {
-    concurrency: AUTO_PULL_STARTUP_CONCURRENCY,
-    discard: true,
-  });
+  yield* Effect.forEach(
+    [...new Set(workspaceRoots)],
+    (cwd) => fastForwardCleanDefaultBranch(cwd, { awaitUpstreamFetch: true }),
+    { concurrency: AUTO_PULL_STARTUP_CONCURRENCY, discard: true },
+  );
 });
 
 /** Startup pass: when the setting is on, pull every active project's main checkout. Never fails. */

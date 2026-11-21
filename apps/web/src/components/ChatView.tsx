@@ -675,6 +675,7 @@ export default function ChatView({ threadId }: ChatViewProps) {
   const {
     trigger: composerTrigger,
     setTrigger: setDetectedComposerTrigger,
+    followCaret: followComposerCaretTrigger,
     resolveTrigger: resolveComposerTriggerDismissal,
     dismissTrigger: dismissComposerTrigger,
     resetTrigger: setComposerTrigger,
@@ -3311,6 +3312,7 @@ export default function ChatView({ threadId }: ChatViewProps) {
       nextCursor: number,
       expandedCursor: number,
       cursorAdjacentToMention: boolean,
+      textChanged: boolean,
     ) => {
       if (!activePendingDraftKey) {
         return;
@@ -3331,10 +3333,12 @@ export default function ChatView({ threadId }: ChatViewProps) {
       const nextTrigger = cursorAdjacentToMention
         ? null
         : detectComposerTrigger(value, expandedCursor);
-      setDetectedComposerTrigger(nextTrigger);
+      // A caret move only keeps or closes the open menu; edits open it.
+      (textChanged ? setDetectedComposerTrigger : followComposerCaretTrigger)(nextTrigger);
     },
     [
       activePendingDraftKey,
+      followComposerCaretTrigger,
       setDetectedComposerTrigger,
       setPendingUserInputAnswersByKey,
       withdrawRestoredPendingAnswer,
@@ -5165,6 +5169,7 @@ export default function ChatView({ threadId }: ChatViewProps) {
       expandedCursor: number,
       cursorAdjacentToMention: boolean,
       terminalContextIds: string[],
+      textChanged: boolean,
     ) => {
       if (activePendingActiveQuestion && activePendingUserInput) {
         onChangeActivePendingUserInputCustomAnswer(
@@ -5173,6 +5178,7 @@ export default function ChatView({ threadId }: ChatViewProps) {
           nextCursor,
           expandedCursor,
           cursorAdjacentToMention,
+          textChanged,
         );
         return;
       }
@@ -5190,7 +5196,8 @@ export default function ChatView({ threadId }: ChatViewProps) {
       const nextTrigger = cursorAdjacentToMention
         ? null
         : detectComposerTrigger(nextPrompt, expandedCursor);
-      setDetectedComposerTrigger(nextTrigger);
+      // A caret move only keeps or closes the open menu; edits open it.
+      (textChanged ? setDetectedComposerTrigger : followComposerCaretTrigger)(nextTrigger);
     },
   );
 

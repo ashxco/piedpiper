@@ -1222,6 +1222,7 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
   const refreshStatusUpstreamIfStale = Effect.fn("refreshStatusUpstreamIfStale")(function* (
     cwd: string,
     knownGitCommonDir: string | null,
+    awaitFetch = false,
   ) {
     const { automaticGitFetchIntervalMs } = yield* readServerSettings;
     // Off: status still reads local refs but never contacts the remote.
@@ -1251,6 +1252,10 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
       statusRemoteRefreshCache,
       new StatusRemoteRefreshCacheKey({ gitCommonDir, remoteName }),
     ).pipe(Effect.ignore);
+    if (!awaitFetch) return;
+    // The cache returns after a short wait while the fetch keeps running.
+    const pending = statusFetches.get(statusRefreshFailureKey(gitCommonDir, remoteName));
+    if (pending) yield* Fiber.await(pending.fiber);
   });
 
   const resolveDefaultBranchName = (
@@ -1710,7 +1715,11 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
 
       if (options?.skipUpstreamRefresh !== true) {
         yield* recoverMissingGitCwd(
-          refreshStatusUpstreamIfStale(cwd, staticInfo?.gitCommonDir ?? null),
+          refreshStatusUpstreamIfStale(
+            cwd,
+            staticInfo?.gitCommonDir ?? null,
+            options?.awaitUpstreamFetch === true,
+          ),
           cwd,
           () => undefined,
         ).pipe(Effect.ignoreCause({ log: true }));

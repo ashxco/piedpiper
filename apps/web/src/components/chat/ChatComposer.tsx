@@ -269,6 +269,8 @@ export interface ChatComposerProps {
     expandedCursor: number,
     cursorAdjacentToMention: boolean,
     terminalContextIds: string[],
+    /** False when only the caret or selection moved. */
+    textChanged: boolean,
   ) => void;
   // Method syntax: handlers typed for a subset of keys stay assignable.
   onComposerCommandKey(key: ComposerCommandKey, event: KeyboardEvent): boolean;
@@ -704,6 +706,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         expandCollapsedComposerCursor(next.text, nextCursor),
         false,
         snapshot.terminalContextIds,
+        true,
       );
       window.requestAnimationFrame(() => composerEditorRef.current?.focusAt(nextCursor));
     }
@@ -927,7 +930,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     questionIndex={activePendingQuestionIndex}
                     onSelectOption={onSelectActivePendingUserInputOption}
                     onCustomAnswer={(_questionId: string, text: string) =>
-                      onPromptChange(text, text.length, text.length, false, [])
+                      onPromptChange(text, text.length, text.length, false, [], true)
                     }
                     onAdvance={onAdvanceActivePendingUserInput}
                     onDismiss={onDismissPendingUserInput}
